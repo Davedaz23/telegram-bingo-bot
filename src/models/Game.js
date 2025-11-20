@@ -44,7 +44,16 @@ const gameSchema = new mongoose.Schema({
     type: Date
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+});
+
+// Virtual for players
+gameSchema.virtual('players', {
+  ref: 'GamePlayer',
+  localField: '_id',
+  foreignField: 'gameId'
 });
 
 // Indexes for better performance
