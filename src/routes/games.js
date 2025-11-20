@@ -455,4 +455,21 @@ router.put('/:id/settings', async (req, res) => {
   }
 });
 
+// Get active games
+router.get('/active', async (req, res) => {
+  try {
+    const games = await GameService.getActiveGames();
+    
+    res.json({
+      success: true,
+      games,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
 module.exports = router;
