@@ -1,4 +1,5 @@
 // services/gameService.js
+const mongoose = require('mongoose');
 const Game = require('../models/Game');
 const User = require('../models/User');
 const GamePlayer = require('../models/GamePlayer');
@@ -214,6 +215,11 @@ class GameService {
   }
 
   static async getGameWithDetails(gameId) {
+    // Validate gameId is a valid ObjectId
+    if (!mongoose.Types.ObjectId.isValid(gameId)) {
+      throw new Error('Invalid game ID');
+    }
+
     return await Game.findById(gameId)
       .populate('host', 'username firstName telegramId')
       .populate('winner', 'username firstName')
@@ -278,6 +284,244 @@ class GameService {
     
     await game.save();
     return game;
+  }
+
+  // NEW METHODS - ADDED BASED ON API REQUIREMENTS
+
+  static async getWaitingGames() {
+    return await Game.find({ 
+      status: 'WAITING',
+      isPrivate: false 
+    })
+      .populate('host', 'username firstName telegramId')
+      .populate({
+        path: 'players',
+        populate: {
+          path: 'user',
+          select: 'username firstName telegramId'
+        }
+      })
+      .sort({ createdAt: -1 })
+      .limit(50);
+  }
+
+  static async getUserActiveGames(userId) {
+    return await Game.find({
+      'players.userId': userId,
+      status: { $in: ['WAITING', 'ACTIVE'] }
+    })
+      .populate('host', 'username firstName telegramId')
+      .populate('winner', 'username firstName')
+      .populate({
+        path: 'players',
+        populate: {
+          path: 'user',
+          select: 'username firstName telegramId'
+        }
+      })
+      .sort({ createdAt: -1 })
+      .limit(20);
+  }
+
+  static async getUserGameHistory(userId, limit = 10, page = 1) {
+    const skip = (page - 1) * limit;
+    
+    const games = await Game.find({
+      'players.userId': userId,
+      status: { $in: ['FINISHED', 'CANCELLED'] }
+    })
+      .populate('host', 'username firstName telegramId')
+      .populate('winner', 'username firstName')
+      .populate({
+        path: 'players',
+        populate: {
+          path: 'user',
+          select: 'username firstName telegramId'
+        }
+      })
+      .sort({ updatedAt: -1 })
+      .skip(skip)
+      .limit(limit);
+    
+    const total = await Game.countDocuments({
+      'players.userId': userId,
+      status: { $in: ['FINISHED', 'CANCELLED'] }
+    });
+    
+    return {
+      games,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    };
+  }
+
+  static async checkForWin(gameId, userId) {
+    const bingoCard = await BingoCard.findOne({ gameId, userId });
+    if (!bingoCard) {
+      throw new Error('Bingo card not found');
+    }
+
+    const game = await Game.findById(gameId);
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    const numbers = bingoCard.numbers.flat();
+    const isWinner = GameUtils.checkWinCondition(numbers, bingoCard.markedPositions);
+    
+    // Update card if winner
+    if (isWinner && !bingoCard.isWinner) {
+      bingoCard.isWinner = true;
+      await bingoCard.save();
+
+      // Update game if active
+      if (game.status === 'ACTIVE') {
+        game.status = 'FINISHED';
+        game.winnerId = userId;
+        await game.save();
+
+        // Update stats
+        const UserService = require('./userService');
+        await UserService.updateUserStats(userId, true);
+      }
+    }
+
+    return {
+      isWinner,
+      bingoCard,
+      winningPattern: isWinner ? GameUtils.getWinningPattern(numbers, bingoCard.markedPositions) : null
+    };
+  }
+
+  static async endGame(gameId, hostId) {
+    const game = await Game.findById(gameId);
+    
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    if (game.hostId.toString() !== hostId.toString()) {
+      throw new Error('Only host can end the game');
+    }
+
+    if (game.status === 'FINISHED' || game.status === 'CANCELLED') {
+      throw new Error('Game already ended');
+    }
+
+    // Update game status
+    game.status = 'FINISHED';
+    game.endedAt = new Date();
+    
+    // If no winner, mark as completed without winner
+    if (!game.winnerId) {
+      game.winnerId = null;
+    }
+    
+    await game.save();
+
+    // Update player stats for all participants
+    const UserService = require('./userService');
+    const players = await GamePlayer.find({ gameId });
+    
+    for (const player of players) {
+      const isWinner = player.userId.toString() === game.winnerId?.toString();
+      await UserService.updateUserStats(player.userId, isWinner);
+    }
+
+    return this.getGameWithDetails(gameId);
+  }
+
+  static async getGameStats(gameId) {
+    const game = await this.getGameWithDetails(gameId);
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    const bingoCards = await BingoCard.find({ gameId });
+    const calledNumbers = game.numbersCalled || [];
+    
+    // Calculate average marked numbers per player
+    let totalMarked = 0;
+    let cardsWithBingo = 0;
+    
+    for (const card of bingoCards) {
+      totalMarked += card.markedPositions.length;
+      if (card.isWinner) {
+        cardsWithBingo++;
+      }
+    }
+
+    const averageMarked = bingoCards.length > 0 ? totalMarked / bingoCards.length : 0;
+
+    return {
+      gameId,
+      totalPlayers: game.currentPlayers,
+      totalNumbersCalled: calledNumbers.length,
+      averageMarkedPerPlayer: Math.round(averageMarked * 100) / 100,
+      cardsWithBingo,
+      gameDuration: game.startedAt ? Math.floor((new Date() - game.startedAt) / 60000) : 0, // in minutes
+      numbersByLetter: this._getNumbersByLetter(calledNumbers)
+    };
+  }
+
+  static _getNumbersByLetter(calledNumbers) {
+    const letters = ['B', 'I', 'N', 'G', 'O'];
+    const result = {};
+    
+    letters.forEach(letter => {
+      result[letter] = calledNumbers.filter(num => 
+        GameUtils.getNumberLetter(num) === letter
+      ).length;
+    });
+    
+    return result;
+  }
+
+  static async updateGameSettings(gameId, hostId, settings) {
+    const game = await Game.findById(gameId);
+    
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    if (game.hostId.toString() !== hostId.toString()) {
+      throw new Error('Only host can update game settings');
+    }
+
+    if (game.status !== 'WAITING') {
+      throw new Error('Cannot update settings after game has started');
+    }
+
+    // Validate maxPlayers
+    if (settings.maxPlayers !== undefined) {
+      if (settings.maxPlayers < game.currentPlayers) {
+        throw new Error(`Cannot set max players lower than current player count (${game.currentPlayers})`);
+      }
+      if (settings.maxPlayers < 2 || settings.maxPlayers > 50) {
+        throw new Error('Max players must be between 2 and 50');
+      }
+      game.maxPlayers = settings.maxPlayers;
+    }
+
+    // Update isPrivate if provided
+    if (settings.isPrivate !== undefined) {
+      game.isPrivate = settings.isPrivate;
+    }
+
+    await game.save();
+    return this.getGameWithDetails(gameId);
+  }
+
+  static async getGameById(gameId) {
+    if (!mongoose.Types.ObjectId.isValid(gameId)) {
+      throw new Error('Invalid game ID');
+    }
+
+    return await this.getGameWithDetails(gameId);
   }
 }
 

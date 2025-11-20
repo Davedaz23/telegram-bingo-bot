@@ -166,24 +166,40 @@ router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     
+    // Validate if it's a valid MongoDB ObjectId
+    if (!id || id === 'active' || id === 'waiting') {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid game ID'
+      });
+    }
+
     const game = await GameService.getGameWithDetails(id);
     
     if (!game) {
       return res.status(404).json({
         success: false,
-        error: 'Game not found',
+        error: 'Game not found'
       });
     }
 
     res.json({
       success: true,
-      game,
+      game
     });
   } catch (error) {
     console.error('Get game error:', error);
+    
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid game ID format'
+      });
+    }
+    
     res.status(500).json({
       success: false,
-      error: error.message,
+      error: error.message
     });
   }
 });
@@ -254,6 +270,184 @@ router.post('/:id/leave', async (req, res) => {
     });
   } catch (error) {
     console.error('Leave game error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+//helpers
+// Get waiting games (public games that haven't started)
+router.get('/list/waiting', async (req, res) => {
+  try {
+    const games = await GameService.getWaitingGames();
+    
+    res.json({
+      success: true,
+      games,
+    });
+  } catch (error) {
+    console.error('Get waiting games error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// Get user's active games
+router.get('/user/:userId/active', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required',
+      });
+    }
+
+    const games = await GameService.getUserActiveGames(userId);
+    
+    res.json({
+      success: true,
+      games,
+    });
+  } catch (error) {
+    console.error('Get user active games error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// Get user's game history
+router.get('/user/:userId/history', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { limit = 10, page = 1 } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required',
+      });
+    }
+
+    const result = await GameService.getUserGameHistory(userId, parseInt(limit), parseInt(page));
+    
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error('Get user game history error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// Check for winner (manual verification)
+router.post('/:id/check-win', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required',
+      });
+    }
+
+    const result = await GameService.checkForWin(id, userId);
+    
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error('Check win error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// End game (host only)
+router.post('/:id/end', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { hostId } = req.body;
+    
+    if (!hostId) {
+      return res.status(400).json({
+        success: false,
+        error: 'hostId is required',
+      });
+    }
+
+    const game = await GameService.endGame(id, hostId);
+    
+    res.json({
+      success: true,
+      game,
+    });
+  } catch (error) {
+    console.error('End game error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// Get game statistics
+router.get('/:id/stats', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const stats = await GameService.getGameStats(id);
+    
+    res.json({
+      success: true,
+      stats,
+    });
+  } catch (error) {
+    console.error('Get game stats error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// Update game settings
+router.put('/:id/settings', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { hostId, maxPlayers, isPrivate } = req.body;
+    
+    if (!hostId) {
+      return res.status(400).json({
+        success: false,
+        error: 'hostId is required',
+      });
+    }
+
+    const game = await GameService.updateGameSettings(id, hostId, { maxPlayers, isPrivate });
+    
+    res.json({
+      success: true,
+      game,
+    });
+  } catch (error) {
+    console.error('Update game settings error:', error);
     res.status(400).json({
       success: false,
       error: error.message,
