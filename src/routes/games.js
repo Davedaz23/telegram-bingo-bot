@@ -161,7 +161,48 @@ router.get('/code/:code', async (req, res) => {
   }
 });
 
-// Get game by ID
+// ADD THESE ROUTES BEFORE THE /:id ROUTE
+// Get active games - simple endpoint
+router.get('/active', async (req, res) => {
+  try {
+    console.log('GET /api/games/active called');
+    const games = await GameService.getActiveGames();
+    console.log(`Found ${games.length} active games`);
+    
+    res.json({
+      success: true,
+      games,
+    });
+  } catch (error) {
+    console.error('Get active games error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// Get waiting games - simple endpoint (MISSING ROUTE)
+router.get('/waiting', async (req, res) => {
+  try {
+    console.log('GET /api/games/waiting called');
+    const games = await GameService.getWaitingGames();
+    console.log(`Found ${games.length} waiting games`);
+    
+    res.json({
+      success: true,
+      games,
+    });
+  } catch (error) {
+    console.error('Get waiting games error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// Get game by ID - THIS SHOULD BE AFTER SPECIFIC ROUTES
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -231,7 +272,7 @@ router.get('/:gameId/card/:userId', async (req, res) => {
   }
 });
 
-// Get active games
+// Get active games (list endpoint)
 router.get('/list/active', async (req, res) => {
   try {
     const games = await GameService.getActiveGames();
@@ -277,8 +318,7 @@ router.post('/:id/leave', async (req, res) => {
   }
 });
 
-//helpers
-// Get waiting games (public games that haven't started)
+// Get waiting games (public games that haven't started) - list endpoint
 router.get('/list/waiting', async (req, res) => {
   try {
     const games = await GameService.getWaitingGames();
@@ -449,23 +489,6 @@ router.put('/:id/settings', async (req, res) => {
   } catch (error) {
     console.error('Update game settings error:', error);
     res.status(400).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
-
-// Get active games
-router.get('/active', async (req, res) => {
-  try {
-    const games = await GameService.getActiveGames();
-    
-    res.json({
-      success: true,
-      games,
-    });
-  } catch (error) {
-    res.status(500).json({
       success: false,
       error: error.message,
     });
