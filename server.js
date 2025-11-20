@@ -7,22 +7,28 @@ require('dotenv').config();
 
 const authRoutes = require('./src/routes/auth');
 const gameRoutes = require('./src/routes/games');
+const BotController = require('./src/controllers/botController'); // Add this line
+
 
 const app = express();
-
-console.log('=== ENVIRONMENT VARIABLES DEBUG ===');
-console.log('BOT_TOKEN:', process.env.BOT_TOKEN ? 'EXISTS' : 'MISSING');
-console.log('MONGODB_URI:', process.env.MONGODB_URI ? 'EXISTS' : 'MISSING'); 
-console.log('WEB_APP_URL:', process.env.WEB_APP_URL ? 'EXISTS' : 'MISSING');
-console.log('Total env vars loaded:', Object.keys(process.env).length);
-console.log('All env keys:', Object.keys(process.env));
-console.log('====================================');
 
 // Connect to MongoDB
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected successfully'))
   .catch(err => console.error('MongoDB connection error:', err));
-
+// ✅ ADD THIS: Initialize and launch the bot
+let botController;
+try {
+  if (process.env.BOT_TOKEN) {
+    botController = new BotController(process.env.BOT_TOKEN);
+    botController.launch();
+    console.log('🤖 Telegram Bot initialized successfully');
+  } else {
+    console.warn('⚠️ BOT_TOKEN not found - Telegram bot disabled');
+  }
+} catch (error) {
+  console.error('❌ Failed to initialize Telegram bot:', error);
+}
 // CORS configuration - UPDATED with your live frontend URL
 app.use(cors({
   origin: [
