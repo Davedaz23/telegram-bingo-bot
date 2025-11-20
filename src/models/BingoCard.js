@@ -1,3 +1,4 @@
+// models/BingoCard.js
 const mongoose = require('mongoose');
 
 const bingoCardSchema = new mongoose.Schema({
@@ -12,22 +13,22 @@ const bingoCardSchema = new mongoose.Schema({
     required: true
   },
   numbers: {
-    type: [[Number]], // 5x5 grid
+    type: [[mongoose.Schema.Types.Mixed]], // Change to Mixed to allow numbers and strings
     required: true
   },
   markedPositions: {
     type: [Number],
-    default: [12] // FREE space (center position in 5x5 grid)
+    default: [12] // FREE space is always marked
   },
   isWinner: {
     type: Boolean,
     default: false
   }
 }, {
-  timestamps: { createdAt: true, updatedAt: false }
+  timestamps: true
 });
 
-// Compound unique index - one card per user per game
+// Index for faster queries
 bingoCardSchema.index({ userId: 1, gameId: 1 }, { unique: true });
 
 module.exports = mongoose.model('BingoCard', bingoCardSchema);
