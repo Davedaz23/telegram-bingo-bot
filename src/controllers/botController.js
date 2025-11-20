@@ -11,9 +11,10 @@ class BotController {
   setupHandlers() {
     // Start command with inline keyboard
     this.bot.start(async (ctx) => {
-      const user = await UserService.findOrCreateUser(ctx.from);
-      
-      const welcomeMessage = `
+      try {
+        const user = await UserService.findOrCreateUser(ctx.from);
+        
+        const welcomeMessage = `
 🎯 *Welcome to Bingo Bot, ${user.firstName || user.username}!*
 
 *Features:*
@@ -27,39 +28,54 @@ class BotController {
 2. Create a game or join existing one
 3. Mark numbers as they're called
 4. Shout BINGO when you win!
-      `;
+        `;
 
-      await ctx.replyWithMarkdown(welcomeMessage, 
-        Markup.inlineKeyboard([
-          [Markup.button.webApp('🎮 Play Bingo Now', `${process.env.WEB_APP_URL}`)],
-          [Markup.button.callback('📊 My Stats', 'show_stats')],
-          [Markup.button.callback('❓ How to Play', 'show_help')]
-        ])
-      );
+        await ctx.replyWithMarkdown(welcomeMessage, 
+          Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+            [Markup.button.callback('📊 My Stats', 'show_stats')],
+            [Markup.button.callback('❓ How to Play', 'show_help')]
+          ])
+        );
+      } catch (error) {
+        console.error('Error in start command:', error);
+        // Fallback if database fails
+        await ctx.replyWithMarkdown(
+          `🎯 *Welcome to Bingo Bot!*\n\nClick below to play:`,
+          Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+          ])
+        );
+      }
     });
 
     // Handle inline button callbacks
     this.bot.action('show_stats', async (ctx) => {
-      const stats = await UserService.getUserStats(ctx.from.id);
-      
-      let statsMessage = `📊 *Your Bingo Stats:*\n\n`;
-      if (stats) {
-        statsMessage += `Games Played: ${stats.gamesPlayed}\n`;
-        statsMessage += `Games Won: ${stats.gamesWon}\n`;
-        statsMessage += `Win Rate: ${stats.gamesPlayed > 0 ? ((stats.gamesWon / stats.gamesPlayed) * 100).toFixed(1) : 0}%\n`;
-        statsMessage += `Total Score: ${stats.totalScore}\n\n`;
-        statsMessage += `Keep playing to improve your stats! 🏆`;
-      } else {
-        statsMessage += `No games played yet. Start your first game!`;
+      try {
+        const stats = await UserService.getUserStats(ctx.from.id);
+        
+        let statsMessage = `📊 *Your Bingo Stats:*\n\n`;
+        if (stats) {
+          statsMessage += `Games Played: ${stats.gamesPlayed}\n`;
+          statsMessage += `Games Won: ${stats.gamesWon}\n`;
+          statsMessage += `Win Rate: ${stats.gamesPlayed > 0 ? ((stats.gamesWon / stats.gamesPlayed) * 100).toFixed(1) : 0}%\n`;
+          statsMessage += `Total Score: ${stats.totalScore}\n\n`;
+          statsMessage += `Keep playing to improve your stats! 🏆`;
+        } else {
+          statsMessage += `No games played yet. Start your first game!`;
+        }
+        
+        await ctx.editMessageText(statsMessage, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 Play Now', 'https://bingominiapp.vercel.app')],
+            [Markup.button.callback('⬅️ Back', 'back_to_start')]
+          ])
+        });
+      } catch (error) {
+        console.error('Error showing stats:', error);
+        await ctx.answerCbQuery('Error loading stats. Please try again.');
       }
-      
-      await ctx.editMessageText(statsMessage, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.webApp('🎮 Play Now', `${process.env.WEB_APP_URL}`)],
-          [Markup.button.callback('⬅️ Back', 'back_to_start')]
-        ])
-      });
     });
 
     this.bot.action('show_help', async (ctx) => {
@@ -81,56 +97,108 @@ class BotController {
 • Shout BINGO! (app does it automatically)
 • Win points and climb the leaderboard!
 
-*4. Game Types*
-• 🎯 Classic - Standard 5x5 bingo
-• 👥 Multiplayer - Play with friends
-• ⚡ Quick Play - Fast games
+*Ready to play? Click the button below!*
       `;
       
       await ctx.editMessageText(helpMessage, {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.webApp('🎮 Try It Now', `${process.env.WEB_APP_URL}`)],
+          [Markup.button.webApp('🎮 Try It Now', 'https://bingominiapp.vercel.app')],
           [Markup.button.callback('⬅️ Back', 'back_to_start')]
         ])
       });
     });
 
     this.bot.action('back_to_start', async (ctx) => {
-      // Return to start message
-      await ctx.deleteMessage();
-      await this.bot.telegram.sendMessage(ctx.chat.id, 'Welcome back! Use the buttons below to play:', 
+      try {
+        // Return to start message
+        await ctx.editMessageText(
+          '🎯 *Welcome back to Bingo Bot!*\n\nReady to play some Bingo?',
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.webApp('🎮 Play Bingo', 'https://bingominiapp.vercel.app')],
+              [Markup.button.callback('📊 My Stats', 'show_stats')],
+              [Markup.button.callback('❓ How to Play', 'show_help')]
+            ])
+          }
+        );
+      } catch (error) {
+        console.error('Error in back action:', error);
+        // If edit fails, send new message
+        await ctx.replyWithMarkdown(
+          '🎯 *Welcome back!*\n\nClick below to play:',
+          Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 Play Bingo', 'https://bingominiapp.vercel.app')]
+          ])
+        );
+      }
+    });
+
+    // Handle any message that might indicate wanting to play
+    this.bot.hears(['play', 'game', 'bingo', 'start', '🎮', '🎯'], async (ctx) => {
+      await ctx.replyWithMarkdown(
+        '🎯 *Ready to play Bingo?*\n\nClick the button below to start!',
         Markup.inlineKeyboard([
-          [Markup.button.webApp('🎮 Play Bingo', `${process.env.WEB_APP_URL}`)],
-          [Markup.button.callback('📊 My Stats', 'show_stats')],
-          [Markup.button.callback('❓ How to Play', 'show_help')]
+          [Markup.button.webApp('🎮 Launch Bingo Game', 'https://bingominiapp.vercel.app')]
         ])
       );
     });
 
-    // Handle direct messages with the game link
-    this.bot.hears(['play', 'game', 'bingo'], async (ctx) => {
-      await ctx.reply(
-        'Ready to play some Bingo? 🎯\n\nClick the button below to start!',
+    // Simple play command
+    this.bot.command('play', async (ctx) => {
+      await ctx.replyWithMarkdown(
+        '🎮 *Opening Bingo Game...*\n\nGet ready to play!',
         Markup.inlineKeyboard([
-          [Markup.button.webApp('🎮 Launch Bingo Game', `${process.env.WEB_APP_URL}`)]
+          [Markup.button.webApp('🎯 PLAY NOW', 'https://bingominiapp.vercel.app')]
         ])
       );
     });
 
-    // Handle web app data (if you want to receive data from web app)
+    // Help command
+    this.bot.help(async (ctx) => {
+      await ctx.replyWithMarkdown(
+        `🤖 *Bingo Bot Help*\n\n*Quick Commands:*\n/play - Start playing Bingo\n\n*Just click the button below to begin!*`,
+        Markup.inlineKeyboard([
+          [Markup.button.webApp('🎮 PLAY BINGO', 'https://bingominiapp.vercel.app')]
+        ])
+      );
+    });
+
+    // Handle web app data
     this.bot.on('web_app_data', async (ctx) => {
-      const data = ctx.webAppData.data.json();
-      console.log('Data from Web App:', data);
-      
-      // You can process data from the web app here
-      // For example: game results, user actions, etc.
+      try {
+        const data = ctx.webAppData.data.json();
+        console.log('Data from Web App:', data);
+        
+        // You can process data from the web app here
+        // For example: game results, user actions, etc.
+        if (data.action === 'game_won') {
+          await ctx.reply(`🎉 Congratulations! You won a Bingo game! 🏆\n\nWant to play again?`);
+        }
+      } catch (error) {
+        console.error('Error processing web app data:', error);
+      }
+    });
+
+    // Handle any other text message
+    this.bot.on('text', async (ctx) => {
+      // If not a command, suggest playing
+      if (!ctx.message.text.startsWith('/')) {
+        await ctx.replyWithMarkdown(
+          'Want to play some Bingo? 🎯',
+          Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 YES, PLAY BINGO!', 'https://bingominiapp.vercel.app')]
+          ])
+        );
+      }
     });
   }
 
   launch() {
     this.bot.launch();
     console.log('🤖 Bingo Bot is running and ready!');
+    console.log('🎯 WebApp URL: https://bingominiapp.vercel.app');
     
     // Enable graceful stop
     process.once('SIGINT', () => this.bot.stop('SIGINT'));
