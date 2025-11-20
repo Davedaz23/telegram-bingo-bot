@@ -10,6 +10,14 @@ const gameRoutes = require('./src/routes/games');
 
 const app = express();
 
+console.log('=== ENVIRONMENT VARIABLES DEBUG ===');
+console.log('BOT_TOKEN:', process.env.BOT_TOKEN ? 'EXISTS' : 'MISSING');
+console.log('MONGODB_URI:', process.env.MONGODB_URI ? 'EXISTS' : 'MISSING'); 
+console.log('WEB_APP_URL:', process.env.WEB_APP_URL ? 'EXISTS' : 'MISSING');
+console.log('Total env vars loaded:', Object.keys(process.env).length);
+console.log('All env keys:', Object.keys(process.env));
+console.log('====================================');
+
 // Connect to MongoDB
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected successfully'))
