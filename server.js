@@ -15,11 +15,15 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected successfully'))
   .catch(err => console.error('MongoDB connection error:', err));
 
-// CORS configuration
+// CORS configuration - UPDATED with your live frontend URL
 app.use(cors({
-  origin: ['http://localhost:3001', 'http://localhost:3000'],
+  origin: [
+    'https://bingominiapp.vercel.app', // Your live frontend
+    'http://localhost:3001', // Development
+    'http://localhost:3000'  // Development
+  ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   credentials: true
 }));
 
@@ -41,7 +45,14 @@ app.get('/health', async (req, res) => {
       status: 'OK',
       timestamp: new Date().toISOString(),
       database: 'MongoDB Connected',
-      uptime: process.uptime()
+      uptime: process.uptime(),
+      cors: {
+        allowedOrigins: [
+          'https://bingominiapp.vercel.app',
+          'http://localhost:3001',
+          'http://localhost:3000'
+        ]
+      }
     });
   } catch (error) {
     res.status(503).json({
@@ -58,7 +69,13 @@ app.get('/', (req, res) => {
   res.json({
     message: 'Bingo API Server',
     version: '1.0.0',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    frontend: 'https://bingominiapp.vercel.app',
+    endpoints: {
+      auth: '/api/auth/telegram',
+      games: '/api/games',
+      health: '/health'
+    }
   });
 });
 
@@ -66,7 +83,13 @@ app.get('/', (req, res) => {
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
-    error: 'Route not found'
+    error: 'Route not found',
+    availableEndpoints: {
+      root: '/',
+      health: '/health',
+      auth: '/api/auth/telegram',
+      games: '/api/games/*'
+    }
   });
 });
 
@@ -100,8 +123,11 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-  console.log(`CORS enabled for: http://localhost:3001, http://localhost:3000`);
+  console.log(`Server is running on port ${PORT}`);
+  console.log(`CORS enabled for:`);
+  console.log(`- https://bingominiapp.vercel.app (Production)`);
+  console.log(`- http://localhost:3001 (Development)`);
+  console.log(`- http://localhost:3000 (Development)`);
 });
 
 module.exports = app;
