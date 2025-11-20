@@ -193,6 +193,84 @@ class BotController {
         );
       }
     });
+     // Handle game creation from web app
+    this.bot.on('web_app_data', async (ctx) => {
+      try {
+        const data = JSON.parse(ctx.webAppData?.data?.json() || '{}');
+        console.log('Data from Web App:', data);
+
+        const user = await UserService.findOrCreateUser(ctx.from);
+        
+        switch (data.action) {
+          case 'create_game':
+            const game = await GameService.createGame(user._id, data.maxPlayers, data.isPrivate);
+            await ctx.reply(`🎮 Game created!\n\nCode: ${game.code}\nPlayers: ${game.currentPlayers}/${game.maxPlayers}\n\nShare the code with friends!`);
+            break;
+            
+          case 'join_game':
+            const joinedGame = await GameService.joinGame(data.gameCode, user._id);
+            await ctx.reply(`✅ Joined game ${data.gameCode}!\n\nHost: ${joinedGame.host.firstName}\nPlayers: ${joinedGame.currentPlayers}/${joinedGame.maxPlayers}`);
+            break;
+            
+          case 'game_won':
+            await ctx.reply(`🎉 Congratulations! You won a Bingo game! 🏆\n\nYour stats have been updated. Want to play again?`,
+              Markup.inlineKeyboard([
+                [Markup.button.webApp('🎮 PLAY AGAIN', 'https://bingominiapp.vercel.app')]
+              ])
+            );
+            break;
+            
+          case 'game_started':
+            await ctx.reply(`🚀 Game ${data.gameCode} has started! Good luck! 🍀`);
+            break;
+        }
+      } catch (error) {
+        console.error('Error processing web app data:', error);
+        await ctx.reply(`❌ Error: ${error.message}`);
+      }
+    });
+
+    // Add game management commands
+    this.bot.command('mygames', async (ctx) => {
+      try {
+        const user = await UserService.findOrCreateUser(ctx.from);
+        const games = await Game.find({ 
+          $or: [
+            { hostId: user._id },
+            { 'players.userId': user._id }
+          ],
+          status: { $in: ['WAITING', 'ACTIVE'] }
+        }).populate('host', 'firstName').sort({ createdAt: -1 }).limit(5);
+
+        if (games.length === 0) {
+          await ctx.reply('You have no active games. Create one!',
+            Markup.inlineKeyboard([
+              [Markup.button.webApp('🎮 CREATE GAME', 'https://bingominiapp.vercel.app')]
+            ])
+          );
+          return;
+        }
+
+        let message = `🎮 Your Active Games:\n\n`;
+        games.forEach(game => {
+          message += `Code: ${game.code}\n`;
+          message += `Host: ${game.host.firstName}\n`;
+          message += `Players: ${game.currentPlayers}/${game.maxPlayers}\n`;
+          message += `Status: ${game.status}\n`;
+          message += `---\n`;
+        });
+
+        await ctx.reply(message,
+          Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 PLAY NOW', 'https://bingominiapp.vercel.app')]
+          ])
+        );
+      } catch (error) {
+        console.error('Error in mygames command:', error);
+        await ctx.reply('Error loading your games');
+      }
+    });
+  
   }
 
   launch() {
