@@ -1,3 +1,4 @@
+// models/Game.js
 const mongoose = require('mongoose');
 
 const gameSchema = new mongoose.Schema({
@@ -35,6 +36,12 @@ const gameSchema = new mongoose.Schema({
   isPrivate: {
     type: Boolean,
     default: false
+  },
+  startedAt: {
+    type: Date
+  },
+  endedAt: {
+    type: Date
   }
 }, {
   timestamps: true
