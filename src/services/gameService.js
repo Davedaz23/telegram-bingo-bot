@@ -8,7 +8,7 @@ const GameUtils = require('../utils/gameUtils');
 
 class GameService {
   // SINGLE GAME MANAGEMENT SYSTEM - NO HOST CONCEPT
-  static async getMainGame() {
+    static async getMainGame() {
     try {
       // First, check for any finished games that can be restarted
       await this.autoRestartFinishedGames();
@@ -30,6 +30,10 @@ class GameService {
         // No active games, create one automatically
         console.log('🎮 No active games found. Creating automatic game...');
         game = await this.createAutoGame();
+      } else if (game.status === 'ACTIVE' && !this.activeIntervals.has(game._id.toString())) {
+        // Game is active but no auto-calling interval - restart it
+        console.log(`🔄 Restarting auto-calling for active game ${game.code}`);
+        this.startAutoNumberCalling(game._id);
       }
 
       return this.formatGameForFrontend(game);
@@ -39,7 +43,8 @@ class GameService {
     }
   }
 
-  static async createAutoGame() {
+
+ static async createAutoGame() {
     try {
       const gameCode = GameUtils.generateGameCode();
       
@@ -74,6 +79,9 @@ class GameService {
       for (const game of finishedGames) {
         console.log(`🔄 Auto-restarting finished game ${game.code}`);
         
+        // Stop any existing interval for this game
+        this.stopAutoNumberCalling(game._id);
+        
         // Reset game state
         game.status = 'WAITING';
         game.numbersCalled = [];
@@ -99,65 +107,83 @@ class GameService {
   }
 
   // Auto-call numbers for active games - NO HOST REQUIRED
-static async startAutoNumberCalling(gameId) {
-  const game = await Game.findById(gameId);
-  
-  if (!game || game.status !== 'ACTIVE') return;
+  static async startAutoNumberCalling(gameId) {
+    // Stop any existing interval for this game first
+    this.stopAutoNumberCalling(gameId);
 
-  console.log(`🔢 Starting auto-number calling for game ${game.code}`);
-
-  // Call first number immediately
-  setTimeout(async () => {
-    try {
-      await this.callNumber(gameId);
-    } catch (error) {
-      console.error('❌ Auto-call error:', error);
+    const game = await Game.findById(gameId);
+    
+    if (!game || game.status !== 'ACTIVE') {
+      console.log(`❌ Cannot start auto-calling: Game ${gameId} not active`);
+      return;
     }
-  }, 3000); // Increased to 3 seconds for better UX
 
-  // Then call numbers every 8-12 seconds (randomized for better feel)
-  const interval = setInterval(async () => {
-    try {
-      const currentGame = await Game.findById(gameId);
-      if (!currentGame || currentGame.status !== 'ACTIVE') {
-        clearInterval(interval);
-        console.log(`🛑 Stopping auto-calling for game ${gameId}`);
-        return;
+    console.log(`🔢 Starting auto-number calling for game ${game.code}`);
+
+    // Call first number immediately
+    setTimeout(async () => {
+      try {
+        await this.callNumber(gameId);
+      } catch (error) {
+        console.error('❌ Auto-call error:', error);
       }
+    }, 3000);
 
-      await this.callNumber(gameId);
-      
-      // Check if all numbers have been called
-      if (currentGame.numbersCalled.length >= 75) {
-        clearInterval(interval);
-        console.log('🎯 All numbers called, ending game');
-        // End game if no winner after all numbers
-        if (!currentGame.winnerId) {
-          await this.endGame(gameId);
+    // Then call numbers every 8-12 seconds (randomized for better feel)
+    const interval = setInterval(async () => {
+      try {
+        const currentGame = await Game.findById(gameId);
+        
+        // Check if game is still active and valid
+        if (!currentGame || currentGame.status !== 'ACTIVE') {
+          console.log(`🛑 Stopping auto-calling: Game ${gameId} no longer active`);
+          this.stopAutoNumberCalling(gameId);
+          return;
         }
+
+        // Check if all numbers have been called
+        if (currentGame.numbersCalled.length >= 75) {
+          console.log(`🎯 All numbers called for game ${currentGame.code}, ending game`);
+          this.stopAutoNumberCalling(gameId);
+          await this.endGame(gameId);
+          return;
+        }
+
+        await this.callNumber(gameId);
+        
+      } catch (error) {
+        console.error('❌ Auto-call error:', error);
+        // Don't stop on single error, but log it
       }
-    } catch (error) {
-      console.error('❌ Auto-call error:', error);
+    }, 8000 + Math.random() * 4000); // Random between 8-12 seconds
+
+    // Store interval reference for cleanup
+    this.activeIntervals.set(gameId.toString(), interval);
+    console.log(`✅ Auto-calling started for game ${game.code}. Active intervals: ${this.activeIntervals.size}`);
+
+    return interval;
+  }
+//clean app
+  static cleanupAllIntervals() {
+    console.log(`🧹 Cleaning up ${this.activeIntervals.size} active intervals`);
+    for (const [gameId, interval] of this.activeIntervals) {
+      clearInterval(interval);
+      console.log(`🛑 Stopped interval for game ${gameId}`);
     }
-  }, 8000 + Math.random() * 4000); // Random between 8-12 seconds
-
-  // Store interval reference for cleanup
-  this.activeIntervals = this.activeIntervals || new Map();
-  this.activeIntervals.set(gameId.toString(), interval);
-
-  return interval;
-}
+    this.activeIntervals.clear();
+  }
 
 // Stop auto-calling when game ends
-static async stopAutoNumberCalling(gameId) {
-  if (this.activeIntervals && this.activeIntervals.has(gameId.toString())) {
-    const interval = this.activeIntervals.get(gameId.toString());
-    clearInterval(interval);
-    this.activeIntervals.delete(gameId.toString());
-    console.log(`🛑 Stopped auto-calling for game ${gameId}`);
+  static async stopAutoNumberCalling(gameId) {
+    const gameIdStr = gameId.toString();
+    
+    if (this.activeIntervals.has(gameIdStr)) {
+      const interval = this.activeIntervals.get(gameIdStr);
+      clearInterval(interval);
+      this.activeIntervals.delete(gameIdStr);
+      console.log(`🛑 Stopped auto-calling for game ${gameId}. Remaining intervals: ${this.activeIntervals.size}`);
+    }
   }
-}
-
   // MODIFIED: Get active games - always returns the main game
   static async getActiveGames() {
     try {
@@ -182,144 +208,136 @@ static async stopAutoNumberCalling(gameId) {
 
   // MODIFIED: Join game - automatically joins the main game
 // services/gameService.js - CORRECTED joinGame method
-static async joinGame(gameCode, userId) {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  static async joinGame(gameCode, userId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-  try {
-    // Always use the main game
-    const mainGame = await this.getMainGame();
-    
-    if (!mainGame) {
-      throw new Error('No game available');
-    }
-
-    const game = await Game.findById(mainGame._id).session(session);
-
-    // Check if user already joined
-    const existingPlayer = await GamePlayer.findOne({ 
-      userId, 
-      gameId: game._id 
-    }).session(session);
-    
-    if (existingPlayer) {
-      await session.commitTransaction();
-      return this.getGameWithDetails(game._id);
-    }
-
-    // Allow joining in both WAITING and ACTIVE states as PLAYER
-    if (game.status === 'WAITING' || game.status === 'ACTIVE') {
-      if (game.currentPlayers >= game.maxPlayers) {
-        await session.abortTransaction();
-        throw new Error('Game is full');
+    try {
+      // Always use the main game
+      const mainGame = await this.getMainGame();
+      
+      if (!mainGame) {
+        throw new Error('No game available');
       }
 
-      // Determine if this is a late joiner
-      const isLateJoiner = game.status === 'ACTIVE';
-      const numbersCalledAtJoin = game.numbersCalled || [];
+      const game = await Game.findById(mainGame._id).session(session);
 
-      // ✅ FIX: Create GamePlayer entry FIRST
-      const gamePlayer = await GamePlayer.create([{
-        userId,
-        gameId: game._id,
-        isReady: true,
-        playerType: 'PLAYER'
-      }], { session });
+      // Check if user already joined
+      const existingPlayer = await GamePlayer.findOne({ 
+        userId, 
+        gameId: game._id 
+      }).session(session);
+      
+      if (existingPlayer) {
+        await session.commitTransaction();
+        return this.getGameWithDetails(game._id);
+      }
 
-      console.log('✅ GamePlayer created:', gamePlayer);
-
-      // Generate bingo card for player
-      const bingoCardNumbers = GameUtils.generateBingoCard();
-      await BingoCard.create([{
-        userId,
-        gameId: game._id,
-        numbers: bingoCardNumbers,
-        markedPositions: [12], // FREE space
-        isLateJoiner: isLateJoiner,
-        joinedAt: new Date(),
-        numbersCalledAtJoin: numbersCalledAtJoin
-      }], { session });
-
-      // ✅ FIX: Atomic update of player count
-      const updatedGame = await Game.findByIdAndUpdate(
-        game._id,
-        { 
-          $inc: { currentPlayers: 1 },
-          $set: { updatedAt: new Date() }
-        },
-        { 
-          new: true, 
-          session
+      // Allow joining in both WAITING and ACTIVE states as PLAYER
+      if (game.status === 'WAITING' || game.status === 'ACTIVE') {
+        if (game.currentPlayers >= game.maxPlayers) {
+          await session.abortTransaction();
+          throw new Error('Game is full');
         }
-      );
+
+        // Determine if this is a late joiner
+        const isLateJoiner = game.status === 'ACTIVE';
+        const numbersCalledAtJoin = game.numbersCalled || [];
+
+        // Create GamePlayer entry
+        await GamePlayer.create([{
+          userId,
+          gameId: game._id,
+          isReady: true,
+          playerType: 'PLAYER',
+          joinedAt: new Date()
+        }], { session });
+
+        // Generate bingo card for player
+        const bingoCardNumbers = GameUtils.generateBingoCard();
+        await BingoCard.create([{
+          userId,
+          gameId: game._id,
+          numbers: bingoCardNumbers,
+          markedPositions: [12], // FREE space
+          isLateJoiner: isLateJoiner,
+          joinedAt: new Date(),
+          numbersCalledAtJoin: numbersCalledAtJoin
+        }], { session });
+
+        // Atomic update of player count
+        game.currentPlayers += 1;
+        game.updatedAt = new Date();
+        await game.save();
+
+        await session.commitTransaction();
+
+        console.log(`✅ User ${userId} joined as ${isLateJoiner ? 'LATE PLAYER' : 'PLAYER'}. Total players: ${game.currentPlayers}`);
+
+        // Auto-start game if it's WAITING and we have players
+        if (game.status === 'WAITING' && game.currentPlayers >= 1) {
+          console.log(`🚀 Auto-starting game ${game.code} with ${game.currentPlayers} player(s)`);
+          await this.startGame(game._id);
+        }
+
+        return this.getGameWithDetails(game._id);
+      } 
+      // If game is FINISHED, show results but don't allow joining
+      else if (game.status === 'FINISHED') {
+        await session.abortTransaction();
+        throw new Error('Game has already finished. A new game will start soon.');
+      }
+
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Join game error:', error);
+      
+      if (error.code === 11000) {
+        throw new Error('You have already joined this game');
+      }
+      
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
+  // MODIFIED: Start game - no host required for auto-games
+  static async startGame(gameId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      const game = await Game.findById(gameId).session(session);
+
+      if (!game) {
+        throw new Error('Game not found');
+      }
+
+      if (game.status !== 'WAITING') {
+        throw new Error('Game already started');
+      }
+
+      game.status = 'ACTIVE';
+      game.startedAt = new Date();
+      await game.save();
 
       await session.commitTransaction();
 
-      console.log(`✅ User ${userId} joined as ${isLateJoiner ? 'LATE PLAYER' : 'PLAYER'}. Total players: ${updatedGame.currentPlayers}`);
+      console.log(`🚀 Game ${game.code} started with ${game.currentPlayers} player(s)`);
 
-      // Auto-start game if it's WAITING and we have players
-      if (updatedGame.status === 'WAITING' && updatedGame.currentPlayers >= 1) {
-        console.log(`🚀 Auto-starting game ${updatedGame.code} with ${updatedGame.currentPlayers} player(s)`);
-        updatedGame.status = 'ACTIVE';
-        updatedGame.startedAt = new Date();
-        await updatedGame.save();
-        
-        // Start auto-calling numbers
-        this.startAutoNumberCalling(updatedGame._id);
-      }
+      // Start auto-calling numbers
+      this.startAutoNumberCalling(gameId);
 
-      return this.getGameWithDetails(updatedGame._id);
-
-    } 
-    // If game is FINISHED, show results but don't allow joining
-    else if (game.status === 'FINISHED') {
+      return this.getGameWithDetails(game._id);
+    } catch (error) {
       await session.abortTransaction();
-      throw new Error('Game has already finished. A new game will start soon.');
+      console.error('❌ Start game error:', error);
+      throw error;
+    } finally {
+      session.endSession();
     }
-
-  } catch (error) {
-    await session.abortTransaction();
-    console.error('❌ Join game error:', error);
-    
-    if (error.code === 11000) {
-      throw new Error('You have already joined this game');
-    }
-    
-    throw error;
-  } finally {
-    session.endSession();
   }
-}
-  // MODIFIED: Start game - no host required for auto-games
-// services/gameService.js - UPDATED startGame method
-// MODIFIED: Start game - no host required for auto-games, works with any number of players
-static async startGame(gameId) {
-  const game = await Game.findById(gameId);
-
-  if (!game) {
-    throw new Error('Game not found');
-  }
-
-  if (game.status !== 'WAITING') {
-    throw new Error('Game already started');
-  }
-
-  // REMOVED: Minimum player check - now starts with any number of players
-  // if (game.currentPlayers < 2) {
-  //   throw new Error('Need at least 2 players to start');
-  // }
-
-  game.status = 'ACTIVE';
-  game.startedAt = new Date();
-  await game.save();
-
-  console.log(`🚀 Game ${game.code} started with ${game.currentPlayers} player(s)`);
-
-  // Start auto-calling numbers regardless of player count
-  this.startAutoNumberCalling(gameId);
-
-  return this.getGameWithDetails(game._id);
-}
 
 // Also update the auto-start logic in joinGame to work with 1 player
 static async joinGame(gameCode, userId) {
@@ -420,42 +438,45 @@ static async joinGame(gameCode, userId) {
 }
 
   // Format game for frontend compatibility - REMOVE HOST REFERENCES
-  // Update formatGameForFrontend to show late joiners
-static formatGameForFrontend(game) {
-  if (!game) return null;
-  
-  const gameObj = game.toObject ? game.toObject() : { ...game };
-  
-  // Remove host mapping since we don't have hosts
-  if (gameObj.hostId) {
-    delete gameObj.hostId;
-  }
-  
-  // Map winnerId to winner
-  if (gameObj.winnerId) {
-    gameObj.winner = gameObj.winnerId;
-    delete gameObj.winnerId;
+   static formatGameForFrontend(game) {
+    if (!game) return null;
+    
+    const gameObj = game.toObject ? game.toObject() : { ...game };
+    
+    // Remove host mapping since we don't have hosts
+    if (gameObj.hostId) {
+      delete gameObj.hostId;
+    }
+    
+    // Map winnerId to winner
+    if (gameObj.winnerId) {
+      gameObj.winner = gameObj.winnerId;
+      delete gameObj.winnerId;
+    }
+
+    // Calculate active players vs spectators vs late joiners
+    if (gameObj.players) {
+      const activePlayers = gameObj.players.filter(p => p.playerType === 'PLAYER' || !p.playerType);
+      const spectators = gameObj.players.filter(p => p.playerType === 'SPECTATOR');
+      
+      gameObj.activePlayers = activePlayers.length;
+      gameObj.spectators = spectators.length;
+      gameObj.totalParticipants = gameObj.players.length;
+      
+      gameObj.acceptsLateJoiners = gameObj.status === 'ACTIVE' && gameObj.currentPlayers < gameObj.maxPlayers;
+      gameObj.numbersCalledCount = gameObj.numbersCalled?.length || 0;
+    }
+
+    return gameObj;
   }
 
-  // Calculate active players vs spectators vs late joiners
-  if (gameObj.players) {
-    const activePlayers = gameObj.players.filter(p => p.playerType === 'PLAYER' || !p.playerType);
-    const spectators = gameObj.players.filter(p => p.playerType === 'SPECTATOR');
-    
-    gameObj.activePlayers = activePlayers.length;
-    gameObj.spectators = spectators.length;
-    gameObj.totalParticipants = gameObj.players.length;
-    
-    // ✅ NEW: Show if game accepts late joiners
-    gameObj.acceptsLateJoiners = gameObj.status === 'ACTIVE' && gameObj.currentPlayers < gameObj.maxPlayers;
-    gameObj.numbersCalledCount = gameObj.numbersCalled?.length || 0;
-  }
 
-  return gameObj;
-}
 
   // Start the auto-game service when server starts
   static startAutoGameService() {
+    // Clean up any existing intervals first
+    this.cleanupAllIntervals();
+
     // Check and maintain the main game every 30 seconds
     const interval = setInterval(async () => {
       try {
@@ -463,7 +484,7 @@ static formatGameForFrontend(game) {
       } catch (error) {
         console.error('❌ Auto-game service error:', error);
       }
-    }, 30000); // Check every 30 seconds
+    }, 30000);
 
     console.log('🚀 Single Game Service Started - One game always available');
     
@@ -480,82 +501,126 @@ static formatGameForFrontend(game) {
   }
 
   // MODIFIED: Call number - no callerId required
-  static async callNumber(gameId) {
-    const game = await Game.findById(gameId);
+   static async callNumber(gameId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-    if (!game || game.status !== 'ACTIVE') {
-      throw new Error('Game not active');
+    try {
+      const game = await Game.findById(gameId).session(session);
+
+      if (!game || game.status !== 'ACTIVE') {
+        await session.abortTransaction();
+        throw new Error('Game not active');
+      }
+
+      const calledNumbers = game.numbersCalled || [];
+      
+      if (calledNumbers.length >= 75) {
+        await session.abortTransaction();
+        console.log(`🎯 All numbers called for game ${game.code}`);
+        await this.endGame(gameId);
+        return;
+      }
+
+      let newNumber;
+      let attempts = 0;
+      do {
+        newNumber = Math.floor(Math.random() * 75) + 1;
+        attempts++;
+        if (attempts > 100) {
+          await session.abortTransaction();
+          throw new Error('Could not find unused number after 100 attempts');
+        }
+      } while (calledNumbers.includes(newNumber));
+
+      calledNumbers.push(newNumber);
+      game.numbersCalled = calledNumbers;
+      game.updatedAt = new Date();
+      await game.save();
+
+      console.log(`🔢 Called number: ${newNumber} for game ${game.code}. Total called: ${calledNumbers.length}`);
+
+      // Check for automatic wins
+      await this.checkForWinners(gameId, newNumber);
+
+      await session.commitTransaction();
+
+      return { 
+        number: newNumber, 
+        letter: GameUtils.getNumberLetter(newNumber),
+        calledNumbers,
+        totalCalled: calledNumbers.length 
+      };
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Call number error:', error);
+      throw error;
+    } finally {
+      session.endSession();
     }
-
-    const calledNumbers = game.numbersCalled || [];
-    
-    if (calledNumbers.length >= 75) {
-      throw new Error('All numbers have been called');
-    }
-
-    let newNumber;
-    do {
-      newNumber = Math.floor(Math.random() * 75) + 1;
-    } while (calledNumbers.includes(newNumber));
-
-    calledNumbers.push(newNumber);
-    game.numbersCalled = calledNumbers;
-    await game.save();
-
-    console.log(`🔢 Called number: ${newNumber} for game ${game.code}`);
-
-    // Check for automatic wins
-    await this.checkForWinners(gameId, newNumber);
-
-    return { 
-      number: newNumber, 
-      letter: GameUtils.getNumberLetter(newNumber),
-      calledNumbers,
-      totalCalled: calledNumbers.length 
-    };
   }
 
-  static async checkForWinners(gameId, lastCalledNumber) {
-    const game = await Game.findById(gameId);
-    if (game.status !== 'ACTIVE') return;
+   static async checkForWinners(gameId, lastCalledNumber) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-    const bingoCards = await BingoCard.find({ gameId });
-    
-    for (const card of bingoCards) {
-      const numbers = card.numbers.flat();
-      const position = numbers.indexOf(lastCalledNumber);
+    try {
+      const game = await Game.findById(gameId).session(session);
+      if (!game || game.status !== 'ACTIVE') {
+        await session.abortTransaction();
+        return;
+      }
+
+      const bingoCards = await BingoCard.find({ gameId }).session(session);
+      let winnerFound = false;
       
-      if (position !== -1 && !card.markedPositions.includes(position)) {
-        card.markedPositions.push(position);
+      for (const card of bingoCards) {
+        const numbers = card.numbers.flat();
+        const position = numbers.indexOf(lastCalledNumber);
         
-        const isWinner = GameUtils.checkWinCondition(numbers, card.markedPositions);
-        card.isWinner = isWinner;
-        await card.save();
+        if (position !== -1 && !card.markedPositions.includes(position)) {
+          card.markedPositions.push(position);
+          
+          const isWinner = GameUtils.checkWinCondition(numbers, card.markedPositions);
+          card.isWinner = isWinner;
+          await card.save();
 
-        if (isWinner) {
-          // Update game winner and status
-          game.status = 'FINISHED';
-          game.winnerId = card.userId;
-          game.endedAt = new Date();
-          await game.save();
+          if (isWinner && !winnerFound) {
+            // Update game winner and status
+            game.status = 'FINISHED';
+            game.winnerId = card.userId;
+            game.endedAt = new Date();
+            await game.save();
 
-          console.log(`🎉 Winner found: ${card.userId} in game ${game.code}`);
+            console.log(`🎉 Winner found: ${card.userId} in game ${game.code}`);
 
-          // Update user stats
-          const UserService = require('./userService');
-          await UserService.updateUserStats(card.userId, true);
+            // Update user stats
+            const UserService = require('./userService');
+            await UserService.updateUserStats(card.userId, true);
 
-          // Update other players' stats (they lost)
-          const losingPlayers = bingoCards.filter(c => c.userId.toString() !== card.userId.toString());
-          for (const losingCard of losingPlayers) {
-            await UserService.updateUserStats(losingCard.userId, false);
+            // Update other players' stats (they lost)
+            const losingPlayers = bingoCards.filter(c => c.userId.toString() !== card.userId.toString());
+            for (const losingCard of losingPlayers) {
+              await UserService.updateUserStats(losingCard.userId, false);
+            }
+
+            winnerFound = true;
+            
+            // Stop auto-calling since we have a winner
+            this.stopAutoNumberCalling(gameId);
           }
-
-          break;
         }
       }
+
+      await session.commitTransaction();
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Check winners error:', error);
+    } finally {
+      session.endSession();
     }
   }
+
 
   // Update the markNumber method to handle late joiners
 static async markNumber(gameId, userId, number) {
@@ -627,26 +692,26 @@ static async markNumber(gameId, userId, number) {
 }
  // services/gameService.js - Update getGameWithDetails
 static async getGameWithDetails(gameId) {
-  if (!mongoose.Types.ObjectId.isValid(gameId)) {
-    throw new Error('Invalid game ID');
+    if (!mongoose.Types.ObjectId.isValid(gameId)) {
+      throw new Error('Invalid game ID');
+    }
+
+    const game = await Game.findById(gameId)
+      .populate('winnerId', 'username firstName')
+      .populate({
+        path: 'players',
+        populate: {
+          path: 'userId',
+          select: 'username firstName telegramId'
+        }
+      });
+
+    if (!game) {
+      return null;
+    }
+
+    return this.formatGameForFrontend(game);
   }
-
-  const game = await Game.findById(gameId)
-    .populate('winnerId', 'username firstName')
-    .populate({
-      path: 'players',
-      populate: {
-        path: 'userId',
-        select: 'username firstName telegramId' // ✅ Ensure user data is populated
-      }
-    });
-
-  if (!game) {
-    return null;
-  }
-
-  return this.formatGameForFrontend(game);
-}
 
   static async getUserBingoCard(gameId, userId) {
     return await BingoCard.findOne({ gameId, userId })
@@ -794,34 +859,52 @@ static async getGameWithDetails(gameId) {
 
   // MODIFIED: End game - no host required
   static async endGame(gameId) {
-    const game = await Game.findById(gameId);
-    
-    if (!game) {
-      throw new Error('Game not found');
-    }
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-    if (game.status === 'FINISHED' || game.status === 'CANCELLED') {
-      throw new Error('Game already ended');
-    }
+    try {
+      // Stop auto-calling first
+      this.stopAutoNumberCalling(gameId);
 
-    game.status = 'FINISHED';
-    game.endedAt = new Date();
-    
-    if (!game.winnerId) {
-      game.winnerId = null;
-    }
-    
-    await game.save();
+      const game = await Game.findById(gameId).session(session);
+      
+      if (!game) {
+        throw new Error('Game not found');
+      }
 
-    const UserService = require('./userService');
-    const players = await GamePlayer.find({ gameId });
-    
-    for (const player of players) {
-      const isWinner = player.userId.toString() === game.winnerId?.toString();
-      await UserService.updateUserStats(player.userId, isWinner);
-    }
+      if (game.status === 'FINISHED' || game.status === 'CANCELLED') {
+        throw new Error('Game already ended');
+      }
 
-    return this.getGameWithDetails(gameId);
+      game.status = 'FINISHED';
+      game.endedAt = new Date();
+      
+      if (!game.winnerId) {
+        game.winnerId = null;
+      }
+      
+      await game.save();
+
+      const UserService = require('./userService');
+      const players = await GamePlayer.find({ gameId }).session(session);
+      
+      for (const player of players) {
+        const isWinner = player.userId.toString() === game.winnerId?.toString();
+        await UserService.updateUserStats(player.userId, isWinner);
+      }
+
+      await session.commitTransaction();
+
+      console.log(`🏁 Game ${game.code} ended`);
+
+      return this.getGameWithDetails(gameId);
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ End game error:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
   }
 
   static async getGameStats(gameId) {
@@ -897,5 +980,15 @@ static async getGameWithDetails(gameId) {
     };
   }
 }
+process.on('SIGINT', () => {
+  console.log('🛑 Server shutting down...');
+  GameService.cleanupAllIntervals();
+  process.exit(0);
+});
 
+process.on('SIGTERM', () => {
+  console.log('🛑 Server terminating...');
+  GameService.cleanupAllIntervals();
+  process.exit(0);
+});
 module.exports = GameService;
