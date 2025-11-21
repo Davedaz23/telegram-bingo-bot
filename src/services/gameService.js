@@ -7,107 +7,372 @@ const BingoCard = require('../models/BingoCard');
 const GameUtils = require('../utils/gameUtils');
 
 class GameService {
-  // Update other methods that return games...
-static async createGame(hostId, maxPlayers = 10, isPrivate = false) {
-  const gameCode = GameUtils.generateGameCode();
+  // AUTO-GAME MANAGEMENT SYSTEM
+  static async ensureActiveGame() {
+    try {
+      // Check if there are any active games
+      const activeGames = await Game.find({ 
+        status: { $in: ['WAITING', 'ACTIVE'] } 
+      }).limit(1);
 
-  const game = new Game({
-    code: gameCode,
-    hostId,
-    maxPlayers,
-    isPrivate,
-    numbersCalled: [],
-    status: 'WAITING',
-    currentPlayers: 1
-  });
+      if (activeGames.length === 0) {
+        // No active games, create one automatically
+        console.log('🎮 No active games found. Creating automatic game...');
+        
+        // Use a system user or the first available user as host
+        const systemUser = await User.findOne().sort({ createdAt: 1 });
+        
+        if (!systemUser) {
+          // Create a system user if none exists
+          const systemUser = new User({
+            username: 'system_bot',
+            firstName: 'System',
+            telegramId: 'system_auto_creator',
+            gamesPlayed: 0,
+            gamesWon: 0,
+            totalScore: 0
+          });
+          await systemUser.save();
+        }
 
-  await game.save();
-  
-  // Add host as first player
-  await GamePlayer.create({
-    userId: hostId,
-    gameId: game._id,
-    isReady: true
-  });
+        const gameCode = GameUtils.generateGameCode();
+        
+        const game = new Game({
+          code: gameCode,
+          hostId: systemUser._id,
+          maxPlayers: 10,
+          isPrivate: false,
+          numbersCalled: [],
+          status: 'WAITING',
+          currentPlayers: 0,
+          isAutoCreated: true // Flag to identify auto-created games
+        });
 
-  // Generate bingo card for host
-  const bingoCardNumbers = GameUtils.generateBingoCard();
-  await BingoCard.create({
-    userId: hostId,
-    gameId: game._id,
-    numbers: bingoCardNumbers,
-    markedPositions: [12], // FREE space
-  });
+        await game.save();
+        console.log(`🎯 Auto-created game: ${gameCode}`);
+        
+        return this.getGameWithDetails(game._id);
+      }
 
-  return this.getGameWithDetails(game._id); // This now returns mapped fields
-}
-
-  
-static async joinGame(gameCode, userId) {
-  const game = await Game.findOne({ code: gameCode, status: 'WAITING' });
-
-  if (!game) {
-    throw new Error('Game not found or already started');
+      return activeGames[0];
+    } catch (error) {
+      console.error('❌ Error ensuring active game:', error);
+      throw error;
+    }
   }
 
-  if (game.currentPlayers >= game.maxPlayers) {
-    throw new Error('Game is full');
+  static async autoRestartFinishedGames() {
+    try {
+      // Find games that finished more than 30 seconds ago
+      const finishedGames = await Game.find({
+        status: 'FINISHED',
+        endedAt: { $lt: new Date(Date.now() - 30000) } // 30 seconds ago
+      });
+
+      let restartedCount = 0;
+
+      for (const game of finishedGames) {
+        console.log(`🔄 Auto-restarting finished game ${game.code}`);
+        
+        // Reset game state
+        game.status = 'WAITING';
+        game.numbersCalled = [];
+        game.winnerId = null;
+        game.startedAt = null;
+        game.endedAt = null;
+        game.currentPlayers = 0;
+        
+        await game.save();
+        
+        // Clear old players and bingo cards
+        await GamePlayer.deleteMany({ gameId: game._id });
+        await BingoCard.deleteMany({ gameId: game._id });
+        
+        console.log(`✅ Game ${game.code} reset and ready for new players`);
+        restartedCount++;
+      }
+      
+      return restartedCount;
+    } catch (error) {
+      console.error('❌ Error auto-restarting games:', error);
+      return 0;
+    }
   }
 
-  // Check if user already joined
-  const existingPlayer = await GamePlayer.findOne({ 
-    userId, 
-    gameId: game._id 
-  });
-  
-  if (existingPlayer) {
-    return this.getGameWithDetails(game._id); // This now returns mapped fields
+  static async getOrCreateActiveGame() {
+    try {
+      // First, restart any finished games
+      await this.autoRestartFinishedGames();
+      
+      // Then ensure there's at least one active game
+      return await this.ensureActiveGame();
+    } catch (error) {
+      console.error('❌ Error in getOrCreateActiveGame:', error);
+      throw error;
+    }
   }
 
-  // Add player to game
-  await GamePlayer.create({
-    userId,
-    gameId: game._id,
-    isReady: false
-  });
+  // Start the auto-restart service when the server starts
+  static startAutoGameService() {
+    // Check for active games every minute
+    const interval = setInterval(async () => {
+      try {
+        await this.getOrCreateActiveGame();
+      } catch (error) {
+        console.error('❌ Auto-game service error:', error);
+      }
+    }, 60000); // Check every minute
 
-  // Generate bingo card for player
-  const bingoCardNumbers = GameUtils.generateBingoCard();
-  await BingoCard.create({
-    userId,
-    gameId: game._id,
-    numbers: bingoCardNumbers,
-    markedPositions: [12], // FREE space
-  });
+    console.log('🚀 Auto-game service started - Games will be automatically created and managed');
+    
+    // Also run immediately on startup
+    setTimeout(async () => {
+      try {
+        await this.getOrCreateActiveGame();
+      } catch (error) {
+        console.error('❌ Initial auto-game creation failed:', error);
+      }
+    }, 5000);
 
-  // Update player count
-  game.currentPlayers += 1;
-  await game.save();
+    return interval;
+  }
 
-  return this.getGameWithDetails(game._id); // This now returns mapped fields
-}
+  // MODIFIED: Get active games - now ensures there's always at least one
+  static async getActiveGames() {
+    try {
+      // First ensure there's at least one active game
+      await this.getOrCreateActiveGame();
+      
+      // Then return all waiting games
+      const games = await Game.find({ status: 'WAITING' })
+        .populate('hostId', 'username firstName telegramId')
+        .populate({
+          path: 'players',
+          populate: {
+            path: 'userId',
+            select: 'username firstName telegramId'
+          }
+        })
+        .sort({ createdAt: -1 })
+        .limit(50);
 
+      // Map fields for frontend compatibility
+      return games.map(game => {
+        const gameObj = game.toObject();
+        
+        // Map hostId to host
+        if (gameObj.hostId) {
+          gameObj.host = gameObj.hostId;
+          delete gameObj.hostId;
+        }
+        
+        return gameObj;
+      });
+    } catch (error) {
+      console.error('❌ Error in getActiveGames:', error);
+      // Fallback to original behavior if auto-creation fails
+      const games = await Game.find({ status: 'WAITING' })
+        .populate('hostId', 'username firstName telegramId')
+        .populate({
+          path: 'players',
+          populate: {
+            path: 'userId',
+            select: 'username firstName telegramId'
+          }
+        })
+        .sort({ createdAt: -1 })
+        .limit(50);
+
+      return games.map(game => {
+        const gameObj = game.toObject();
+        if (gameObj.hostId) {
+          gameObj.host = gameObj.hostId;
+          delete gameObj.hostId;
+        }
+        return gameObj;
+      });
+    }
+  }
+
+  // MODIFIED: Get waiting games - same as getActiveGames but ensures game exists
+  static async getWaitingGames() {
+    try {
+      // Ensure there's at least one game
+      await this.getOrCreateActiveGame();
+      
+      const games = await Game.find({ 
+        status: 'WAITING',
+        isPrivate: false 
+      })
+        .populate('hostId', 'username firstName telegramId')
+        .populate({
+          path: 'players',
+          populate: {
+            path: 'userId',
+            select: 'username firstName telegramId'
+          }
+        })
+        .sort({ createdAt: -1 })
+        .limit(50);
+
+      return games.map(game => {
+        const gameObj = game.toObject();
+        if (gameObj.hostId) {
+          gameObj.host = gameObj.hostId;
+          delete gameObj.hostId;
+        }
+        return gameObj;
+      });
+    } catch (error) {
+      console.error('❌ Error in getWaitingGames:', error);
+      // Fallback
+      const games = await Game.find({ 
+        status: 'WAITING',
+        isPrivate: false 
+      })
+        .populate('hostId', 'username firstName telegramId')
+        .populate({
+          path: 'players',
+          populate: {
+            path: 'userId',
+            select: 'username firstName telegramId'
+          }
+        })
+        .sort({ createdAt: -1 })
+        .limit(50);
+
+      return games.map(game => {
+        const gameObj = game.toObject();
+        if (gameObj.hostId) {
+          gameObj.host = gameObj.hostId;
+          delete gameObj.hostId;
+        }
+        return gameObj;
+      });
+    }
+  }
+
+  // MODIFIED: Join game - automatically uses the main available game
+  static async joinGame(gameCode, userId) {
+    try {
+      // If no specific game code provided, use the main available game
+      if (!gameCode || gameCode === 'auto') {
+        const mainGame = await this.getOrCreateActiveGame();
+        gameCode = mainGame.code;
+      }
+
+      const game = await Game.findOne({ code: gameCode, status: 'WAITING' });
+
+      if (!game) {
+        throw new Error('Game not found or already started');
+      }
+
+      if (game.currentPlayers >= game.maxPlayers) {
+        throw new Error('Game is full');
+      }
+
+      // Check if user already joined
+      const existingPlayer = await GamePlayer.findOne({ 
+        userId, 
+        gameId: game._id 
+      });
+      
+      if (existingPlayer) {
+        return this.getGameWithDetails(game._id);
+      }
+
+      // Add player to game
+      await GamePlayer.create({
+        userId,
+        gameId: game._id,
+        isReady: false
+      });
+
+      // Generate bingo card for player
+      const bingoCardNumbers = GameUtils.generateBingoCard();
+      await BingoCard.create({
+        userId,
+        gameId: game._id,
+        numbers: bingoCardNumbers,
+        markedPositions: [12], // FREE space
+      });
+
+      // Update player count
+      game.currentPlayers += 1;
+      await game.save();
+
+      // Auto-start game if enough players joined
+      if (game.currentPlayers >= 2 && game.currentPlayers === game.maxPlayers) {
+        console.log(`🚀 Auto-starting game ${game.code} with ${game.currentPlayers} players`);
+        game.status = 'ACTIVE';
+        game.startedAt = new Date();
+        await game.save();
+      }
+
+      return this.getGameWithDetails(game._id);
+    } catch (error) {
+      console.error('❌ Join game error:', error);
+      throw error;
+    }
+  }
+
+  // MODIFIED: Start game - with auto-start conditions
   static async startGame(gameId, hostId) {
-  const game = await Game.findById(gameId);
+    const game = await Game.findById(gameId);
 
-  if (!game || game.hostId.toString() !== hostId.toString()) {
-    throw new Error('Game not found or unauthorized');
+    if (!game || game.hostId.toString() !== hostId.toString()) {
+      throw new Error('Game not found or unauthorized');
+    }
+
+    if (game.status !== 'WAITING') {
+      throw new Error('Game already started');
+    }
+
+    if (game.currentPlayers < 2) {
+      throw new Error('Need at least 2 players to start');
+    }
+
+    game.status = 'ACTIVE';
+    game.startedAt = new Date();
+    await game.save();
+
+    return this.getGameWithDetails(game._id);
   }
 
-  if (game.status !== 'WAITING') {
-    throw new Error('Game already started');
+  // KEEP ALL YOUR EXISTING METHODS BELOW - THEY STAY THE SAME
+  static async createGame(hostId, maxPlayers = 10, isPrivate = false) {
+    const gameCode = GameUtils.generateGameCode();
+
+    const game = new Game({
+      code: gameCode,
+      hostId,
+      maxPlayers,
+      isPrivate,
+      numbersCalled: [],
+      status: 'WAITING',
+      currentPlayers: 1
+    });
+
+    await game.save();
+    
+    // Add host as first player
+    await GamePlayer.create({
+      userId: hostId,
+      gameId: game._id,
+      isReady: true
+    });
+
+    // Generate bingo card for host
+    const bingoCardNumbers = GameUtils.generateBingoCard();
+    await BingoCard.create({
+      userId: hostId,
+      gameId: game._id,
+      numbers: bingoCardNumbers,
+      markedPositions: [12], // FREE space
+    });
+
+    return this.getGameWithDetails(game._id);
   }
-
-  if (game.currentPlayers < 2) {
-    throw new Error('Need at least 2 players to start');
-  }
-
-  game.status = 'ACTIVE';
-  game.startedAt = new Date();
-  await game.save();
-
-  return this.getGameWithDetails(game._id); // This now returns mapped fields
-}
 
   static async callNumber(gameId, callerId) {
     const game = await Game.findById(gameId);
@@ -176,7 +441,7 @@ static async joinGame(gameCode, userId) {
             await UserService.updateUserStats(losingCard.userId, false);
           }
 
-          break; // First winner wins
+          break;
         }
       }
     }
@@ -188,7 +453,6 @@ static async joinGame(gameCode, userId) {
       throw new Error('Bingo card not found');
     }
 
-    // Don't allow marking the FREE space
     if (number === 'FREE') {
       throw new Error('Cannot mark FREE space');
     }
@@ -224,178 +488,108 @@ static async joinGame(gameCode, userId) {
     return { bingoCard, isWinner };
   }
 
- static async getGameWithDetails(gameId) {
-  // Validate gameId is a valid ObjectId
-  if (!mongoose.Types.ObjectId.isValid(gameId)) {
-    throw new Error('Invalid game ID');
-  }
+  static async getGameWithDetails(gameId) {
+    if (!mongoose.Types.ObjectId.isValid(gameId)) {
+      throw new Error('Invalid game ID');
+    }
 
-  const game = await Game.findById(gameId)
-    .populate('hostId', 'username firstName telegramId')
-    .populate('winnerId', 'username firstName')
-    .populate({
-      path: 'players',
-      populate: {
-        path: 'userId',
-        select: 'username firstName telegramId'
-      }
-    });
+    const game = await Game.findById(gameId)
+      .populate('hostId', 'username firstName telegramId')
+      .populate('winnerId', 'username firstName')
+      .populate({
+        path: 'players',
+        populate: {
+          path: 'userId',
+          select: 'username firstName telegramId'
+        }
+      });
 
-  if (!game) {
-    return null;
-  }
+    if (!game) {
+      return null;
+    }
 
-  // Convert to plain object and map fields for frontend
-  const gameObj = game.toObject();
-  
-  // Map hostId to host for frontend compatibility
-  if (gameObj.hostId) {
-    gameObj.host = gameObj.hostId;
-    delete gameObj.hostId;
-  }
-  
-  // Map winnerId to winner for frontend compatibility
-  if (gameObj.winnerId) {
-    gameObj.winner = gameObj.winnerId;
-    delete gameObj.winnerId;
-  }
+    const gameObj = game.toObject();
+    
+    if (gameObj.hostId) {
+      gameObj.host = gameObj.hostId;
+      delete gameObj.hostId;
+    }
+    
+    if (gameObj.winnerId) {
+      gameObj.winner = gameObj.winnerId;
+      delete gameObj.winnerId;
+    }
 
-  return gameObj;
-}
+    return gameObj;
+  }
 
   static async getUserBingoCard(gameId, userId) {
     return await BingoCard.findOne({ gameId, userId })
-      .populate('userId', 'username firstName'); // Fixed: populate userId, not user
+      .populate('userId', 'username firstName');
   }
 
-  static async getActiveGames() {
-  const games = await Game.find({ status: 'WAITING' })
-    .populate('hostId', 'username firstName telegramId')
-    .populate({
-      path: 'players',
-      populate: {
-        path: 'userId',
-        select: 'username firstName telegramId'
-      }
-    })
-    .sort({ createdAt: -1 })
-    .limit(50);
+  static async findByCode(code) {
+    const game = await Game.findOne({ code })
+      .populate('hostId', 'username firstName telegramId')
+      .populate('winnerId', 'username firstName')
+      .populate({
+        path: 'players',
+        populate: {
+          path: 'userId',
+          select: 'username firstName telegramId'
+        }
+      });
 
-  // Map fields for frontend compatibility
-  return games.map(game => {
+    if (!game) {
+      return null;
+    }
+
     const gameObj = game.toObject();
     
-    // Map hostId to host
     if (gameObj.hostId) {
       gameObj.host = gameObj.hostId;
       delete gameObj.hostId;
     }
     
+    if (gameObj.winnerId) {
+      gameObj.winner = gameObj.winnerId;
+      delete gameObj.winnerId;
+    }
+
     return gameObj;
-  });
-}
-
- static async findByCode(code) {
-  const game = await Game.findOne({ code })
-    .populate('hostId', 'username firstName telegramId')
-    .populate('winnerId', 'username firstName')
-    .populate({
-      path: 'players',
-      populate: {
-        path: 'userId',
-        select: 'username firstName telegramId'
-      }
-    });
-
-  if (!game) {
-    return null;
   }
 
-  // Convert to plain object and map fields for frontend
-  const gameObj = game.toObject();
-  
-  // Map hostId to host for frontend compatibility
-  if (gameObj.hostId) {
-    gameObj.host = gameObj.hostId;
-    delete gameObj.hostId;
-  }
-  
-  // Map winnerId to winner for frontend compatibility
-  if (gameObj.winnerId) {
-    gameObj.winner = gameObj.winnerId;
-    delete gameObj.winnerId;
-  }
+  static async leaveGame(gameId, userId) {
+    const game = await Game.findById(gameId);
+    if (!game) {
+      throw new Error('Game not found');
+    }
 
-  return gameObj;
-}
+    await GamePlayer.deleteOne({ gameId, userId });
+    await BingoCard.deleteOne({ gameId, userId });
 
-static async leaveGame(gameId, userId) {
-  const game = await Game.findById(gameId);
-  if (!game) {
-    throw new Error('Game not found');
-  }
-
-  // Remove player
-  await GamePlayer.deleteOne({ gameId, userId });
-  await BingoCard.deleteOne({ gameId, userId });
-
-  // Update player count
-  game.currentPlayers = Math.max(0, game.currentPlayers - 1);
-  
-  // If no players left or host left, end game
-  if (game.currentPlayers === 0 || game.hostId.toString() === userId.toString()) {
-    game.status = 'CANCELLED';
-    game.endedAt = new Date();
-  }
-  
-  await game.save();
-  return this.getGameWithDetails(game._id); // This now returns mapped fields
-}
-
-  // NEW METHODS - ADDED BASED ON API REQUIREMENTS
-
-  static async getWaitingGames() {
-  const games = await Game.find({ 
-    status: 'WAITING',
-    isPrivate: false 
-  })
-    .populate('hostId', 'username firstName telegramId')
-    .populate({
-      path: 'players',
-      populate: {
-        path: 'userId',
-        select: 'username firstName telegramId'
-      }
-    })
-    .sort({ createdAt: -1 })
-    .limit(50);
-
-  // Map fields for frontend compatibility
-  return games.map(game => {
-    const gameObj = game.toObject();
+    game.currentPlayers = Math.max(0, game.currentPlayers - 1);
     
-    // Map hostId to host
-    if (gameObj.hostId) {
-      gameObj.host = gameObj.hostId;
-      delete gameObj.hostId;
+    if (game.currentPlayers === 0 || game.hostId.toString() === userId.toString()) {
+      game.status = 'CANCELLED';
+      game.endedAt = new Date();
     }
     
-    return gameObj;
-  });
-}
-
+    await game.save();
+    return this.getGameWithDetails(game._id);
+  }
 
   static async getUserActiveGames(userId) {
     return await Game.find({
       'players.userId': userId,
       status: { $in: ['WAITING', 'ACTIVE'] }
     })
-      .populate('hostId', 'username firstName telegramId') // Fixed: populate hostId, not host
-      .populate('winnerId', 'username firstName') // Fixed: populate winnerId, not winner
+      .populate('hostId', 'username firstName telegramId')
+      .populate('winnerId', 'username firstName')
       .populate({
         path: 'players',
         populate: {
-          path: 'userId', // Fixed: populate userId, not user
+          path: 'userId',
           select: 'username firstName telegramId'
         }
       })
@@ -410,12 +604,12 @@ static async leaveGame(gameId, userId) {
       'players.userId': userId,
       status: { $in: ['FINISHED', 'CANCELLED'] }
     })
-      .populate('hostId', 'username firstName telegramId') // Fixed: populate hostId, not host
-      .populate('winnerId', 'username firstName') // Fixed: populate winnerId, not winner
+      .populate('hostId', 'username firstName telegramId')
+      .populate('winnerId', 'username firstName')
       .populate({
         path: 'players',
         populate: {
-          path: 'userId', // Fixed: populate userId, not user
+          path: 'userId',
           select: 'username firstName telegramId'
         }
       })
@@ -453,19 +647,16 @@ static async leaveGame(gameId, userId) {
     const numbers = bingoCard.numbers.flat();
     const isWinner = GameUtils.checkWinCondition(numbers, bingoCard.markedPositions);
     
-    // Update card if winner
     if (isWinner && !bingoCard.isWinner) {
       bingoCard.isWinner = true;
       await bingoCard.save();
 
-      // Update game if active
       if (game.status === 'ACTIVE') {
         game.status = 'FINISHED';
         game.winnerId = userId;
         game.endedAt = new Date();
         await game.save();
 
-        // Update stats
         const UserService = require('./userService');
         await UserService.updateUserStats(userId, true);
       }
@@ -493,18 +684,15 @@ static async leaveGame(gameId, userId) {
       throw new Error('Game already ended');
     }
 
-    // Update game status
     game.status = 'FINISHED';
     game.endedAt = new Date();
     
-    // If no winner, mark as completed without winner
     if (!game.winnerId) {
       game.winnerId = null;
     }
     
     await game.save();
 
-    // Update player stats for all participants
     const UserService = require('./userService');
     const players = await GamePlayer.find({ gameId });
     
@@ -525,7 +713,6 @@ static async leaveGame(gameId, userId) {
     const bingoCards = await BingoCard.find({ gameId });
     const calledNumbers = game.numbersCalled || [];
     
-    // Calculate average marked numbers per player
     let totalMarked = 0;
     let cardsWithBingo = 0;
     
@@ -544,7 +731,7 @@ static async leaveGame(gameId, userId) {
       totalNumbersCalled: calledNumbers.length,
       averageMarkedPerPlayer: Math.round(averageMarked * 100) / 100,
       cardsWithBingo,
-      gameDuration: game.startedAt ? Math.floor((new Date() - game.startedAt) / 60000) : 0, // in minutes
+      gameDuration: game.startedAt ? Math.floor((new Date() - game.startedAt) / 60000) : 0,
       numbersByLetter: this._getNumbersByLetter(calledNumbers)
     };
   }
@@ -577,7 +764,6 @@ static async leaveGame(gameId, userId) {
       throw new Error('Cannot update settings after game has started');
     }
 
-    // Validate maxPlayers
     if (settings.maxPlayers !== undefined) {
       if (settings.maxPlayers < game.currentPlayers) {
         throw new Error(`Cannot set max players lower than current player count (${game.currentPlayers})`);
@@ -588,7 +774,6 @@ static async leaveGame(gameId, userId) {
       game.maxPlayers = settings.maxPlayers;
     }
 
-    // Update isPrivate if provided
     if (settings.isPrivate !== undefined) {
       game.isPrivate = settings.isPrivate;
     }

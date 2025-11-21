@@ -40,6 +40,14 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   credentials: true
 }));
+// ✅ ADD THIS: Initialize auto-game service
+const GameService = require('./services/gameService');
+try {
+  GameService.startAutoGameService();
+  console.log('🎮 Auto-game service initialized successfully');
+} catch (error) {
+  console.error('❌ Failed to initialize auto-game service:', error);
+}
 
 // Middleware
 app.use(express.json());
