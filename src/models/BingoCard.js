@@ -1,4 +1,4 @@
-// models/BingoCard.js
+// models/BingoCard.js - UPDATED with late joiner support
 const mongoose = require('mongoose');
 
 const bingoCardSchema = new mongoose.Schema({
@@ -27,6 +27,20 @@ const bingoCardSchema = new mongoose.Schema({
   isSpectator: {
     type: Boolean,
     default: false
+  },
+  // ✅ NEW: Track late joiners
+  isLateJoiner: {
+    type: Boolean,
+    default: false
+  },
+  joinedAt: {
+    type: Date,
+    default: Date.now
+  },
+  // Track which numbers were already called when they joined
+  numbersCalledAtJoin: {
+    type: [Number],
+    default: []
   }
 }, {
   timestamps: true
