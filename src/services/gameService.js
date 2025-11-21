@@ -7,69 +7,86 @@ const BingoCard = require('../models/BingoCard');
 const GameUtils = require('../utils/gameUtils');
 
 class GameService {
-  // AUTO-GAME MANAGEMENT SYSTEM
-  static async ensureActiveGame() {
+  // SINGLE GAME MANAGEMENT SYSTEM
+  static async getMainGame() {
     try {
-      // Check if there are any active games
-      const activeGames = await Game.find({ 
+      // First, check for any finished games that can be restarted
+      await this.autoRestartFinishedGames();
+      
+      // Then look for active/waiting games
+      let game = await Game.findOne({ 
         status: { $in: ['WAITING', 'ACTIVE'] } 
-      }).limit(1);
+      })
+      .populate('hostId', 'username firstName telegramId')
+      .populate({
+        path: 'players',
+        populate: {
+          path: 'userId',
+          select: 'username firstName telegramId'
+        }
+      });
 
-      if (activeGames.length === 0) {
+      if (!game) {
         // No active games, create one automatically
         console.log('🎮 No active games found. Creating automatic game...');
-        
-        // Use a system user or the first available user as host
-        const systemUser = await User.findOne().sort({ createdAt: 1 });
-        
-        if (!systemUser) {
-          // Create a system user if none exists
-          const systemUser = new User({
-            username: 'system_bot',
-            firstName: 'System',
-            telegramId: 'system_auto_creator',
-            gamesPlayed: 0,
-            gamesWon: 0,
-            totalScore: 0
-          });
-          await systemUser.save();
-        }
-
-        const gameCode = GameUtils.generateGameCode();
-        
-        const game = new Game({
-          code: gameCode,
-          hostId: systemUser._id,
-          maxPlayers: 10,
-          isPrivate: false,
-          numbersCalled: [],
-          status: 'WAITING',
-          currentPlayers: 0,
-          isAutoCreated: true // Flag to identify auto-created games
-        });
-
-        await game.save();
-        console.log(`🎯 Auto-created game: ${gameCode}`);
-        
-        return this.getGameWithDetails(game._id);
+        game = await this.createAutoGame();
       }
 
-      return activeGames[0];
+      return this.formatGameForFrontend(game);
     } catch (error) {
-      console.error('❌ Error ensuring active game:', error);
+      console.error('❌ Error in getMainGame:', error);
+      throw error;
+    }
+  }
+
+  static async createAutoGame() {
+    try {
+      // Use a system user or the first available user as host
+      let systemUser = await User.findOne({ username: 'system_bot' });
+      
+      if (!systemUser) {
+        // Create a system user if none exists
+        systemUser = new User({
+          username: 'system_bot',
+          firstName: 'System',
+          telegramId: 'system_auto_creator',
+          gamesPlayed: 0,
+          gamesWon: 0,
+          totalScore: 0
+        });
+        await systemUser.save();
+      }
+
+      const gameCode = GameUtils.generateGameCode();
+      
+      const game = new Game({
+        code: gameCode,
+        hostId: systemUser._id,
+        maxPlayers: 10,
+        isPrivate: false,
+        numbersCalled: [],
+        status: 'WAITING',
+        currentPlayers: 0,
+        isAutoCreated: true
+      });
+
+      await game.save();
+      console.log(`🎯 Auto-created game: ${gameCode}`);
+      
+      return this.getGameWithDetails(game._id);
+    } catch (error) {
+      console.error('❌ Error creating auto game:', error);
       throw error;
     }
   }
 
   static async autoRestartFinishedGames() {
     try {
-      // Find games that finished more than 30 seconds ago
+      // Find games that finished more than 10 seconds ago
       const finishedGames = await Game.find({
         status: 'FINISHED',
-        endedAt: { $lt: new Date(Date.now() - 30000) } // 30 seconds ago
+        endedAt: { $lt: new Date(Date.now() - 10000) } // 10 seconds ago
       });
-
-      let restartedCount = 0;
 
       for (const game of finishedGames) {
         console.log(`🔄 Auto-restarting finished game ${game.code}`);
@@ -89,182 +106,98 @@ class GameService {
         await BingoCard.deleteMany({ gameId: game._id });
         
         console.log(`✅ Game ${game.code} reset and ready for new players`);
-        restartedCount++;
       }
       
-      return restartedCount;
+      return finishedGames.length;
     } catch (error) {
       console.error('❌ Error auto-restarting games:', error);
       return 0;
     }
   }
 
-  static async getOrCreateActiveGame() {
-    try {
-      // First, restart any finished games
-      await this.autoRestartFinishedGames();
-      
-      // Then ensure there's at least one active game
-      return await this.ensureActiveGame();
-    } catch (error) {
-      console.error('❌ Error in getOrCreateActiveGame:', error);
-      throw error;
-    }
-  }
-
-  // Start the auto-restart service when the server starts
-  static startAutoGameService() {
-    // Check for active games every minute
-    const interval = setInterval(async () => {
-      try {
-        await this.getOrCreateActiveGame();
-      } catch (error) {
-        console.error('❌ Auto-game service error:', error);
-      }
-    }, 60000); // Check every minute
-
-    console.log('🚀 Auto-game service started - Games will be automatically created and managed');
+  // Auto-call numbers for active games
+  static async startAutoNumberCalling(gameId) {
+    const game = await Game.findById(gameId);
     
-    // Also run immediately on startup
+    if (!game || game.status !== 'ACTIVE') return;
+
+    console.log(`🔢 Starting auto-number calling for game ${game.code}`);
+
+    // Call first number immediately
     setTimeout(async () => {
       try {
-        await this.getOrCreateActiveGame();
+        await this.callNumber(gameId, game.hostId.toString());
       } catch (error) {
-        console.error('❌ Initial auto-game creation failed:', error);
+        console.error('❌ Auto-call error:', error);
       }
-    }, 5000);
+    }, 2000);
+
+    // Then call numbers every 10 seconds
+    const interval = setInterval(async () => {
+      try {
+        const currentGame = await Game.findById(gameId);
+        if (!currentGame || currentGame.status !== 'ACTIVE') {
+          clearInterval(interval);
+          return;
+        }
+
+        await this.callNumber(gameId, currentGame.hostId.toString());
+        
+        // Check if all numbers have been called
+        if (currentGame.numbersCalled.length >= 75) {
+          clearInterval(interval);
+          console.log('🎯 All numbers called, ending game');
+          // End game if no winner after all numbers
+          if (!currentGame.winnerId) {
+            currentGame.status = 'FINISHED';
+            currentGame.endedAt = new Date();
+            await currentGame.save();
+          }
+        }
+      } catch (error) {
+        console.error('❌ Auto-call error:', error);
+      }
+    }, 10000); // Call every 10 seconds
 
     return interval;
   }
 
-  // MODIFIED: Get active games - now ensures there's always at least one
+  // MODIFIED: Get active games - always returns the main game
   static async getActiveGames() {
     try {
-      // First ensure there's at least one active game
-      await this.getOrCreateActiveGame();
-      
-      // Then return all waiting games
-      const games = await Game.find({ status: 'WAITING' })
-        .populate('hostId', 'username firstName telegramId')
-        .populate({
-          path: 'players',
-          populate: {
-            path: 'userId',
-            select: 'username firstName telegramId'
-          }
-        })
-        .sort({ createdAt: -1 })
-        .limit(50);
-
-      // Map fields for frontend compatibility
-      return games.map(game => {
-        const gameObj = game.toObject();
-        
-        // Map hostId to host
-        if (gameObj.hostId) {
-          gameObj.host = gameObj.hostId;
-          delete gameObj.hostId;
-        }
-        
-        return gameObj;
-      });
+      const mainGame = await this.getMainGame();
+      return [mainGame].filter(game => game !== null);
     } catch (error) {
       console.error('❌ Error in getActiveGames:', error);
-      // Fallback to original behavior if auto-creation fails
-      const games = await Game.find({ status: 'WAITING' })
-        .populate('hostId', 'username firstName telegramId')
-        .populate({
-          path: 'players',
-          populate: {
-            path: 'userId',
-            select: 'username firstName telegramId'
-          }
-        })
-        .sort({ createdAt: -1 })
-        .limit(50);
-
-      return games.map(game => {
-        const gameObj = game.toObject();
-        if (gameObj.hostId) {
-          gameObj.host = gameObj.hostId;
-          delete gameObj.hostId;
-        }
-        return gameObj;
-      });
+      return [];
     }
   }
 
-  // MODIFIED: Get waiting games - same as getActiveGames but ensures game exists
+  // MODIFIED: Get waiting games - same as getActiveGames
   static async getWaitingGames() {
     try {
-      // Ensure there's at least one game
-      await this.getOrCreateActiveGame();
-      
-      const games = await Game.find({ 
-        status: 'WAITING',
-        isPrivate: false 
-      })
-        .populate('hostId', 'username firstName telegramId')
-        .populate({
-          path: 'players',
-          populate: {
-            path: 'userId',
-            select: 'username firstName telegramId'
-          }
-        })
-        .sort({ createdAt: -1 })
-        .limit(50);
-
-      return games.map(game => {
-        const gameObj = game.toObject();
-        if (gameObj.hostId) {
-          gameObj.host = gameObj.hostId;
-          delete gameObj.hostId;
-        }
-        return gameObj;
-      });
+      const mainGame = await this.getMainGame();
+      return [mainGame].filter(game => game !== null && game.status === 'WAITING');
     } catch (error) {
       console.error('❌ Error in getWaitingGames:', error);
-      // Fallback
-      const games = await Game.find({ 
-        status: 'WAITING',
-        isPrivate: false 
-      })
-        .populate('hostId', 'username firstName telegramId')
-        .populate({
-          path: 'players',
-          populate: {
-            path: 'userId',
-            select: 'username firstName telegramId'
-          }
-        })
-        .sort({ createdAt: -1 })
-        .limit(50);
-
-      return games.map(game => {
-        const gameObj = game.toObject();
-        if (gameObj.hostId) {
-          gameObj.host = gameObj.hostId;
-          delete gameObj.hostId;
-        }
-        return gameObj;
-      });
+      return [];
     }
   }
 
-  // MODIFIED: Join game - automatically uses the main available game
+  // MODIFIED: Join game - automatically joins the main game
   static async joinGame(gameCode, userId) {
     try {
-      // If no specific game code provided, use the main available game
-      if (!gameCode || gameCode === 'auto') {
-        const mainGame = await this.getOrCreateActiveGame();
-        gameCode = mainGame.code;
+      // Always use the main game, ignore provided code for auto-created system
+      const mainGame = await this.getMainGame();
+      
+      if (!mainGame) {
+        throw new Error('No game available');
       }
 
-      const game = await Game.findOne({ code: gameCode, status: 'WAITING' });
+      const game = await Game.findById(mainGame._id);
 
-      if (!game) {
-        throw new Error('Game not found or already started');
+      if (game.status !== 'WAITING') {
+        throw new Error('Game already started');
       }
 
       if (game.currentPlayers >= game.maxPlayers) {
@@ -285,7 +218,7 @@ class GameService {
       await GamePlayer.create({
         userId,
         gameId: game._id,
-        isReady: false
+        isReady: true // Auto-ready for system games
       });
 
       // Generate bingo card for player
@@ -301,12 +234,15 @@ class GameService {
       game.currentPlayers += 1;
       await game.save();
 
-      // Auto-start game if enough players joined
-      if (game.currentPlayers >= 2 && game.currentPlayers === game.maxPlayers) {
+      // Auto-start game if enough players joined (2 or more)
+      if (game.currentPlayers >= 2 && game.status === 'WAITING') {
         console.log(`🚀 Auto-starting game ${game.code} with ${game.currentPlayers} players`);
         game.status = 'ACTIVE';
         game.startedAt = new Date();
         await game.save();
+        
+        // Start auto-calling numbers
+        this.startAutoNumberCalling(game._id);
       }
 
       return this.getGameWithDetails(game._id);
@@ -316,12 +252,12 @@ class GameService {
     }
   }
 
-  // MODIFIED: Start game - with auto-start conditions
+  // MODIFIED: Start game - simplified for auto-games
   static async startGame(gameId, hostId) {
     const game = await Game.findById(gameId);
 
-    if (!game || game.hostId.toString() !== hostId.toString()) {
-      throw new Error('Game not found or unauthorized');
+    if (!game) {
+      throw new Error('Game not found');
     }
 
     if (game.status !== 'WAITING') {
@@ -336,10 +272,60 @@ class GameService {
     game.startedAt = new Date();
     await game.save();
 
+    // Start auto-calling numbers
+    this.startAutoNumberCalling(gameId);
+
     return this.getGameWithDetails(game._id);
   }
 
-  // KEEP ALL YOUR EXISTING METHODS BELOW - THEY STAY THE SAME
+  // Format game for frontend compatibility
+  static formatGameForFrontend(game) {
+    if (!game) return null;
+    
+    const gameObj = game.toObject ? game.toObject() : { ...game };
+    
+    // Map hostId to host
+    if (gameObj.hostId) {
+      gameObj.host = gameObj.hostId;
+      delete gameObj.hostId;
+    }
+    
+    // Map winnerId to winner
+    if (gameObj.winnerId) {
+      gameObj.winner = gameObj.winnerId;
+      delete gameObj.winnerId;
+    }
+
+    return gameObj;
+  }
+
+  // Start the auto-game service when server starts
+  static startAutoGameService() {
+    // Check and maintain the main game every 30 seconds
+    const interval = setInterval(async () => {
+      try {
+        await this.getMainGame();
+      } catch (error) {
+        console.error('❌ Auto-game service error:', error);
+      }
+    }, 30000); // Check every 30 seconds
+
+    console.log('🚀 Single Game Service Started - One game always available');
+    
+    // Run immediately on startup
+    setTimeout(async () => {
+      try {
+        await this.getMainGame();
+      } catch (error) {
+        console.error('❌ Initial game setup failed:', error);
+      }
+    }, 5000);
+
+    return interval;
+  }
+
+  // EXISTING METHODS (updated to use formatGameForFrontend)
+
   static async createGame(hostId, maxPlayers = 10, isPrivate = false) {
     const gameCode = GameUtils.generateGameCode();
 
@@ -396,6 +382,8 @@ class GameService {
     game.numbersCalled = calledNumbers;
     await game.save();
 
+    console.log(`🔢 Called number: ${newNumber} for game ${game.code}`);
+
     // Check for automatic wins
     await this.checkForWinners(gameId, newNumber);
 
@@ -430,6 +418,8 @@ class GameService {
           game.winnerId = card.userId;
           game.endedAt = new Date();
           await game.save();
+
+          console.log(`🎉 Winner found: ${card.userId} in game ${game.code}`);
 
           // Update user stats
           const UserService = require('./userService');
@@ -508,19 +498,7 @@ class GameService {
       return null;
     }
 
-    const gameObj = game.toObject();
-    
-    if (gameObj.hostId) {
-      gameObj.host = gameObj.hostId;
-      delete gameObj.hostId;
-    }
-    
-    if (gameObj.winnerId) {
-      gameObj.winner = gameObj.winnerId;
-      delete gameObj.winnerId;
-    }
-
-    return gameObj;
+    return this.formatGameForFrontend(game);
   }
 
   static async getUserBingoCard(gameId, userId) {
@@ -544,19 +522,7 @@ class GameService {
       return null;
     }
 
-    const gameObj = game.toObject();
-    
-    if (gameObj.hostId) {
-      gameObj.host = gameObj.hostId;
-      delete gameObj.hostId;
-    }
-    
-    if (gameObj.winnerId) {
-      gameObj.winner = gameObj.winnerId;
-      delete gameObj.winnerId;
-    }
-
-    return gameObj;
+    return this.formatGameForFrontend(game);
   }
 
   static async leaveGame(gameId, userId) {
@@ -580,7 +546,7 @@ class GameService {
   }
 
   static async getUserActiveGames(userId) {
-    return await Game.find({
+    const games = await Game.find({
       'players.userId': userId,
       status: { $in: ['WAITING', 'ACTIVE'] }
     })
@@ -595,6 +561,8 @@ class GameService {
       })
       .sort({ createdAt: -1 })
       .limit(20);
+
+    return games.map(game => this.formatGameForFrontend(game));
   }
 
   static async getUserGameHistory(userId, limit = 10, page = 1) {
@@ -623,7 +591,7 @@ class GameService {
     });
     
     return {
-      games,
+      games: games.map(game => this.formatGameForFrontend(game)),
       pagination: {
         page,
         limit,
