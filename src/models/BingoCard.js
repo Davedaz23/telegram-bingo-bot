@@ -13,14 +13,18 @@ const bingoCardSchema = new mongoose.Schema({
     required: true
   },
   numbers: {
-    type: [[mongoose.Schema.Types.Mixed]], // Change to Mixed to allow numbers and strings
+    type: [[mongoose.Schema.Types.Mixed]],
     required: true
   },
   markedPositions: {
     type: [Number],
-    default: [12] // FREE space is always marked
+    default: [12] // FREE space
   },
   isWinner: {
+    type: Boolean,
+    default: false
+  },
+  isSpectator: {
     type: Boolean,
     default: false
   }

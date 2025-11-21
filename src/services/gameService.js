@@ -8,7 +8,7 @@ const GameUtils = require('../utils/gameUtils');
 
 class GameService {
   // SINGLE GAME MANAGEMENT SYSTEM
-  static async getMainGame() {
+static async getMainGame() {
     try {
       // First, check for any finished games that can be restarted
       await this.autoRestartFinishedGames();
@@ -116,7 +116,7 @@ class GameService {
   }
 
   // Auto-call numbers for active games
-  static async startAutoNumberCalling(gameId) {
+static async startAutoNumberCalling(gameId) {
     const game = await Game.findById(gameId);
     
     if (!game || game.status !== 'ACTIVE') return;
@@ -161,9 +161,8 @@ class GameService {
 
     return interval;
   }
-
   // MODIFIED: Get active games - always returns the main game
-  static async getActiveGames() {
+ static async getActiveGames() {
     try {
       const mainGame = await this.getMainGame();
       return [mainGame].filter(game => game !== null);
@@ -184,6 +183,7 @@ class GameService {
     }
   }
 
+
   // MODIFIED: Join game - automatically joins the main game
   static async joinGame(gameCode, userId) {
     try {
@@ -196,14 +196,6 @@ class GameService {
 
       const game = await Game.findById(mainGame._id);
 
-      if (game.status !== 'WAITING') {
-        throw new Error('Game already started');
-      }
-
-      if (game.currentPlayers >= game.maxPlayers) {
-        throw new Error('Game is full');
-      }
-
       // Check if user already joined
       const existingPlayer = await GamePlayer.findOne({ 
         userId, 
@@ -214,35 +206,73 @@ class GameService {
         return this.getGameWithDetails(game._id);
       }
 
-      // Add player to game
-      await GamePlayer.create({
-        userId,
-        gameId: game._id,
-        isReady: true // Auto-ready for system games
-      });
+      // If game is WAITING, join as active player
+      if (game.status === 'WAITING') {
+        if (game.currentPlayers >= game.maxPlayers) {
+          throw new Error('Game is full');
+        }
 
-      // Generate bingo card for player
-      const bingoCardNumbers = GameUtils.generateBingoCard();
-      await BingoCard.create({
-        userId,
-        gameId: game._id,
-        numbers: bingoCardNumbers,
-        markedPositions: [12], // FREE space
-      });
+        // Add player to game
+        await GamePlayer.create({
+          userId,
+          gameId: game._id,
+          isReady: true,
+          playerType: 'PLAYER'
+        });
 
-      // Update player count
-      game.currentPlayers += 1;
-      await game.save();
+        // Generate bingo card for player
+        const bingoCardNumbers = GameUtils.generateBingoCard();
+        await BingoCard.create({
+          userId,
+          gameId: game._id,
+          numbers: bingoCardNumbers,
+          markedPositions: [12], // FREE space
+        });
 
-      // Auto-start game if enough players joined (2 or more)
-      if (game.currentPlayers >= 2 && game.status === 'WAITING') {
-        console.log(`🚀 Auto-starting game ${game.code} with ${game.currentPlayers} players`);
-        game.status = 'ACTIVE';
-        game.startedAt = new Date();
+        // Update player count
+        game.currentPlayers += 1;
         await game.save();
+
+        // Auto-start game if enough players joined (2 or more)
+        if (game.currentPlayers >= 2 && game.status === 'WAITING') {
+          console.log(`🚀 Auto-starting game ${game.code} with ${game.currentPlayers} players`);
+          game.status = 'ACTIVE';
+          game.startedAt = new Date();
+          await game.save();
+          
+          // Start auto-calling numbers
+          this.startAutoNumberCalling(game._id);
+        }
+
+      } 
+      // If game is ACTIVE, join as SPECTATOR
+      else if (game.status === 'ACTIVE') {
+        console.log(`👀 User ${userId} joining game ${game.code} as spectator`);
         
-        // Start auto-calling numbers
-        this.startAutoNumberCalling(game._id);
+        // Add user as spectator
+        await GamePlayer.create({
+          userId,
+          gameId: game._id,
+          isReady: false,
+          playerType: 'SPECTATOR'
+        });
+
+        // Generate bingo card for spectator (they can still play along)
+        const bingoCardNumbers = GameUtils.generateBingoCard();
+        await BingoCard.create({
+          userId,
+          gameId: game._id,
+          numbers: bingoCardNumbers,
+          markedPositions: [12], // FREE space
+          isSpectator: true
+        });
+
+        // Don't increment currentPlayers for spectators
+        console.log(`✅ User ${userId} joined as spectator`);
+      }
+      // If game is FINISHED, show results but don't allow joining
+      else if (game.status === 'FINISHED') {
+        throw new Error('Game has already finished. A new game will start soon.');
       }
 
       return this.getGameWithDetails(game._id);
@@ -251,6 +281,7 @@ class GameService {
       throw error;
     }
   }
+
 
   // MODIFIED: Start game - simplified for auto-games
   static async startGame(gameId, hostId) {
@@ -279,7 +310,7 @@ class GameService {
   }
 
   // Format game for frontend compatibility
-  static formatGameForFrontend(game) {
+    static formatGameForFrontend(game) {
     if (!game) return null;
     
     const gameObj = game.toObject ? game.toObject() : { ...game };
@@ -296,8 +327,19 @@ class GameService {
       delete gameObj.winnerId;
     }
 
+    // Calculate active players vs spectators
+    if (gameObj.players) {
+      const activePlayers = gameObj.players.filter(p => p.playerType === 'PLAYER' || !p.playerType);
+      const spectators = gameObj.players.filter(p => p.playerType === 'SPECTATOR');
+      
+      gameObj.activePlayers = activePlayers.length;
+      gameObj.spectators = spectators.length;
+      gameObj.totalParticipants = gameObj.players.length;
+    }
+
     return gameObj;
   }
+
 
   // Start the auto-game service when server starts
   static startAutoGameService() {
@@ -460,11 +502,19 @@ class GameService {
 
     bingoCard.markedPositions.push(position);
     
-    const isWinner = GameUtils.checkWinCondition(numbers, bingoCard.markedPositions);
-    bingoCard.isWinner = isWinner;
+    // Only check for win if user is an actual player (not spectator)
+    const player = await GamePlayer.findOne({ gameId, userId });
+    const isSpectator = player?.playerType === 'SPECTATOR';
+    
+    let isWinner = false;
+    if (!isSpectator) {
+      isWinner = GameUtils.checkWinCondition(numbers, bingoCard.markedPositions);
+      bingoCard.isWinner = isWinner;
+    }
+    
     await bingoCard.save();
 
-    if (isWinner) {
+    if (isWinner && !isSpectator) {
       const game = await Game.findById(gameId);
       game.status = 'FINISHED';
       game.winnerId = userId;
@@ -475,8 +525,9 @@ class GameService {
       await UserService.updateUserStats(userId, true);
     }
 
-    return { bingoCard, isWinner };
+    return { bingoCard, isWinner, isSpectator };
   }
+
 
   static async getGameWithDetails(gameId) {
     if (!mongoose.Types.ObjectId.isValid(gameId)) {
@@ -564,6 +615,16 @@ class GameService {
 
     return games.map(game => this.formatGameForFrontend(game));
   }
+   static async getUserGameRole(gameId, userId) {
+      const player = await GamePlayer.findOne({ gameId, userId });
+      if (!player) return null;
+      
+      return {
+        playerType: player.playerType || 'PLAYER',
+        isReady: player.isReady,
+        joinedAt: player.joinedAt
+      };
+    }
 
   static async getUserGameHistory(userId, limit = 10, page = 1) {
     const skip = (page - 1) * limit;
