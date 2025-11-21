@@ -7,9 +7,18 @@ const BingoCard = require('../models/BingoCard');
 const GameUtils = require('../utils/gameUtils');
 
 class GameService {
+  // FIXED: Initialize static properties at the class level
+  static activeIntervals = new Map();
+  static isAutoCallingActive = false;
+
   // SINGLE GAME MANAGEMENT SYSTEM - NO HOST CONCEPT
-    static async getMainGame() {
+  static async getMainGame() {
     try {
+      // FIXED: Ensure activeIntervals is initialized
+      if (!this.activeIntervals) {
+        this.activeIntervals = new Map();
+      }
+
       // First, check for any finished games that can be restarted
       await this.autoRestartFinishedGames();
       
@@ -30,7 +39,7 @@ class GameService {
         // No active games, create one automatically
         console.log('🎮 No active games found. Creating automatic game...');
         game = await this.createAutoGame();
-      } else if (game.status === 'ACTIVE' && !this.activeIntervals.has(game._id.toString())) {
+      } else if (game.status === 'ACTIVE' && this.activeIntervals && !this.activeIntervals.has(game._id.toString())) {
         // Game is active but no auto-calling interval - restart it
         console.log(`🔄 Restarting auto-calling for active game ${game.code}`);
         this.startAutoNumberCalling(game._id);
@@ -43,8 +52,7 @@ class GameService {
     }
   }
 
-
- static async createAutoGame() {
+  static async createAutoGame() {
     try {
       const gameCode = GameUtils.generateGameCode();
       
@@ -70,6 +78,11 @@ class GameService {
 
   static async autoRestartFinishedGames() {
     try {
+      // FIXED: Ensure activeIntervals is initialized
+      if (!this.activeIntervals) {
+        this.activeIntervals = new Map();
+      }
+
       // Find games that finished more than 10 seconds ago
       const finishedGames = await Game.find({
         status: 'FINISHED',
@@ -108,6 +121,11 @@ class GameService {
 
   // Auto-call numbers for active games - NO HOST REQUIRED
   static async startAutoNumberCalling(gameId) {
+    // FIXED: Ensure activeIntervals is initialized
+    if (!this.activeIntervals) {
+      this.activeIntervals = new Map();
+    }
+
     // Stop any existing interval for this game first
     this.stopAutoNumberCalling(gameId);
 
@@ -159,12 +177,20 @@ class GameService {
 
     // Store interval reference for cleanup
     this.activeIntervals.set(gameId.toString(), interval);
-    console.log(`✅ Auto-calling started for game ${game.code}. Active intervals: ${this.activeIntervals.size}`);
+    console.log(`✅ Auto-calling started for game ${game.code}. Active intervals: ${this.activeIntervals ? this.activeIntervals.size : 0}`);
 
     return interval;
   }
-//clean app
+
+  // FIXED: Clean up all intervals with proper null checking
   static cleanupAllIntervals() {
+    // FIXED: Ensure activeIntervals is initialized
+    if (!this.activeIntervals) {
+      this.activeIntervals = new Map();
+      console.log('🧹 No active intervals to clean up (activeIntervals was not initialized)');
+      return;
+    }
+
     console.log(`🧹 Cleaning up ${this.activeIntervals.size} active intervals`);
     for (const [gameId, interval] of this.activeIntervals) {
       clearInterval(interval);
@@ -173,8 +199,14 @@ class GameService {
     this.activeIntervals.clear();
   }
 
-// Stop auto-calling when game ends
+  // FIXED: Stop auto-calling with proper null checking
   static async stopAutoNumberCalling(gameId) {
+    // FIXED: Ensure activeIntervals is initialized
+    if (!this.activeIntervals) {
+      this.activeIntervals = new Map();
+      return;
+    }
+
     const gameIdStr = gameId.toString();
     
     if (this.activeIntervals.has(gameIdStr)) {
@@ -184,6 +216,7 @@ class GameService {
       console.log(`🛑 Stopped auto-calling for game ${gameId}. Remaining intervals: ${this.activeIntervals.size}`);
     }
   }
+
   // MODIFIED: Get active games - always returns the main game
   static async getActiveGames() {
     try {
@@ -207,7 +240,6 @@ class GameService {
   }
 
   // MODIFIED: Join game - automatically joins the main game
-// services/gameService.js - CORRECTED joinGame method
   static async joinGame(gameCode, userId) {
     const session = await mongoose.startSession();
     session.startTransaction();
@@ -339,106 +371,8 @@ class GameService {
     }
   }
 
-// Also update the auto-start logic in joinGame to work with 1 player
-static async joinGame(gameCode, userId) {
-  try {
-    // Always use the main game, ignore provided code for auto-created system
-    const mainGame = await this.getMainGame();
-    
-    if (!mainGame) {
-      throw new Error('No game available');
-    }
-
-    const game = await Game.findById(mainGame._id);
-
-    // Check if user already joined
-    const existingPlayer = await GamePlayer.findOne({ 
-      userId, 
-      gameId: game._id 
-    });
-    
-    if (existingPlayer) {
-      return this.getGameWithDetails(game._id);
-    }
-
-    // If game is WAITING, join as active player
-    if (game.status === 'WAITING') {
-      if (game.currentPlayers >= game.maxPlayers) {
-        throw new Error('Game is full');
-      }
-
-      // Add player to game
-      await GamePlayer.create({
-        userId,
-        gameId: game._id,
-        isReady: true,
-        playerType: 'PLAYER'
-      });
-
-      // Generate bingo card for player
-      const bingoCardNumbers = GameUtils.generateBingoCard();
-      await BingoCard.create({
-        userId,
-        gameId: game._id,
-        numbers: bingoCardNumbers,
-        markedPositions: [12], // FREE space
-      });
-
-      // Update player count
-      game.currentPlayers += 1;
-      await game.save();
-
-      // MODIFIED: Auto-start game if ANY players joined (even just 1)
-      if (game.currentPlayers >= 1 && game.status === 'WAITING') {
-        console.log(`🚀 Auto-starting game ${game.code} with ${game.currentPlayers} player(s)`);
-        game.status = 'ACTIVE';
-        game.startedAt = new Date();
-        await game.save();
-        
-        // Start auto-calling numbers
-        this.startAutoNumberCalling(game._id);
-      }
-
-    } 
-    // If game is ACTIVE, join as SPECTATOR
-    else if (game.status === 'ACTIVE') {
-      console.log(`👀 User ${userId} joining game ${game.code} as spectator`);
-      
-      // Add user as spectator
-      await GamePlayer.create({
-        userId,
-        gameId: game._id,
-        isReady: false,
-        playerType: 'SPECTATOR'
-      });
-
-      // Generate bingo card for spectator (they can still play along)
-      const bingoCardNumbers = GameUtils.generateBingoCard();
-      await BingoCard.create({
-        userId,
-        gameId: game._id,
-        numbers: bingoCardNumbers,
-        markedPositions: [12], // FREE space
-        isSpectator: true
-      });
-
-      // Don't increment currentPlayers for spectators
-      console.log(`✅ User ${userId} joined as spectator`);
-    }
-    // If game is FINISHED, show results but don't allow joining
-    else if (game.status === 'FINISHED') {
-      throw new Error('Game has already finished. A new game will start soon.');
-    }
-
-    return this.getGameWithDetails(game._id);
-  } catch (error) {
-    console.error('❌ Join game error:', error);
-    throw error;
-  }
-}
-
   // Format game for frontend compatibility - REMOVE HOST REFERENCES
-   static formatGameForFrontend(game) {
+  static formatGameForFrontend(game) {
     if (!game) return null;
     
     const gameObj = game.toObject ? game.toObject() : { ...game };
@@ -470,10 +404,13 @@ static async joinGame(gameCode, userId) {
     return gameObj;
   }
 
-
-
-  // Start the auto-game service when server starts
+  // FIXED: Start the auto-game service when server starts
   static startAutoGameService() {
+    // FIXED: Ensure activeIntervals is initialized before cleanup
+    if (!this.activeIntervals) {
+      this.activeIntervals = new Map();
+    }
+
     // Clean up any existing intervals first
     this.cleanupAllIntervals();
 
@@ -501,7 +438,7 @@ static async joinGame(gameCode, userId) {
   }
 
   // MODIFIED: Call number - no callerId required
-   static async callNumber(gameId) {
+  static async callNumber(gameId) {
     const session = await mongoose.startSession();
     session.startTransaction();
 
@@ -560,7 +497,7 @@ static async joinGame(gameCode, userId) {
     }
   }
 
-   static async checkForWinners(gameId, lastCalledNumber) {
+  static async checkForWinners(gameId, lastCalledNumber) {
     const session = await mongoose.startSession();
     session.startTransaction();
 
@@ -621,77 +558,78 @@ static async joinGame(gameCode, userId) {
     }
   }
 
-
+  // ... rest of your methods remain the same (getGameWithDetails, markNumber, etc.)
   // Update the markNumber method to handle late joiners
-static async markNumber(gameId, userId, number) {
-  const bingoCard = await BingoCard.findOne({ gameId, userId });
-  if (!bingoCard) {
-    throw new Error('Bingo card not found');
-  }
-
-  // Get the game to check current state
-  const game = await Game.findById(gameId);
-  if (!game) {
-    throw new Error('Game not found');
-  }
-
-  // For late joiners: check if this number was called before they joined
-  if (bingoCard.isLateJoiner && number !== 'FREE') {
-    const numbersCalledAtJoin = bingoCard.numbersCalledAtJoin || [];
-    if (!numbersCalledAtJoin.includes(number)) {
-      throw new Error('This number was called before you joined. You can only mark numbers called after you joined.');
+  static async markNumber(gameId, userId, number) {
+    const bingoCard = await BingoCard.findOne({ gameId, userId });
+    if (!bingoCard) {
+      throw new Error('Bingo card not found');
     }
+
+    // Get the game to check current state
+    const game = await Game.findById(gameId);
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    // For late joiners: check if this number was called before they joined
+    if (bingoCard.isLateJoiner && number !== 'FREE') {
+      const numbersCalledAtJoin = bingoCard.numbersCalledAtJoin || [];
+      if (!numbersCalledAtJoin.includes(number)) {
+        throw new Error('This number was called before you joined. You can only mark numbers called after you joined.');
+      }
+    }
+
+    // For all players: check if this number has been called in the game
+    const calledNumbers = game.numbersCalled || [];
+    if (!calledNumbers.includes(number) && number !== 'FREE') {
+      throw new Error('This number has not been called yet');
+    }
+
+    if (number === 'FREE') {
+      throw new Error('Cannot mark FREE space');
+    }
+
+    const numbers = bingoCard.numbers.flat();
+    const position = numbers.indexOf(number);
+
+    if (position === -1) {
+      throw new Error('Number not found in your card');
+    }
+
+    if (bingoCard.markedPositions.includes(position)) {
+      throw new Error('Number already marked');
+    }
+
+    bingoCard.markedPositions.push(position);
+    
+    // Check if user is a player (not spectator)
+    const player = await GamePlayer.findOne({ gameId, userId });
+    const isSpectator = player?.playerType === 'SPECTATOR';
+    
+    let isWinner = false;
+    if (!isSpectator) {
+      isWinner = GameUtils.checkWinCondition(numbers, bingoCard.markedPositions);
+      bingoCard.isWinner = isWinner;
+    }
+    
+    await bingoCard.save();
+
+    if (isWinner && !isSpectator) {
+      game.status = 'FINISHED';
+      game.winnerId = userId;
+      game.endedAt = new Date();
+      await game.save();
+
+      const UserService = require('./userService');
+      await UserService.updateUserStats(userId, true);
+    }
+
+    return { bingoCard, isWinner, isSpectator };
   }
 
-  // For all players: check if this number has been called in the game
-  const calledNumbers = game.numbersCalled || [];
-  if (!calledNumbers.includes(number) && number !== 'FREE') {
-    throw new Error('This number has not been called yet');
-  }
-
-  if (number === 'FREE') {
-    throw new Error('Cannot mark FREE space');
-  }
-
-  const numbers = bingoCard.numbers.flat();
-  const position = numbers.indexOf(number);
-
-  if (position === -1) {
-    throw new Error('Number not found in your card');
-  }
-
-  if (bingoCard.markedPositions.includes(position)) {
-    throw new Error('Number already marked');
-  }
-
-  bingoCard.markedPositions.push(position);
-  
-  // Check if user is a player (not spectator)
-  const player = await GamePlayer.findOne({ gameId, userId });
-  const isSpectator = player?.playerType === 'SPECTATOR';
-  
-  let isWinner = false;
-  if (!isSpectator) {
-    isWinner = GameUtils.checkWinCondition(numbers, bingoCard.markedPositions);
-    bingoCard.isWinner = isWinner;
-  }
-  
-  await bingoCard.save();
-
-  if (isWinner && !isSpectator) {
-    game.status = 'FINISHED';
-    game.winnerId = userId;
-    game.endedAt = new Date();
-    await game.save();
-
-    const UserService = require('./userService');
-    await UserService.updateUserStats(userId, true);
-  }
-
-  return { bingoCard, isWinner, isSpectator };
-}
- // services/gameService.js - Update getGameWithDetails
-static async getGameWithDetails(gameId) {
+  // services/gameService.js - Update getGameWithDetails
+  static async getGameWithDetails(gameId) {
     if (!mongoose.Types.ObjectId.isValid(gameId)) {
       throw new Error('Invalid game ID');
     }
@@ -952,8 +890,6 @@ static async getGameWithDetails(gameId) {
     return result;
   }
 
-  // REMOVED: updateGameSettings since no hosts can update settings
-
   static async getGameById(gameId) {
     if (!mongoose.Types.ObjectId.isValid(gameId)) {
       throw new Error('Invalid game ID');
@@ -980,6 +916,8 @@ static async getGameWithDetails(gameId) {
     };
   }
 }
+
+// Add cleanup on process termination
 process.on('SIGINT', () => {
   console.log('🛑 Server shutting down...');
   GameService.cleanupAllIntervals();
@@ -991,4 +929,5 @@ process.on('SIGTERM', () => {
   GameService.cleanupAllIntervals();
   process.exit(0);
 });
+
 module.exports = GameService;
