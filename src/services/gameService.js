@@ -99,51 +99,64 @@ class GameService {
   }
 
   // Auto-call numbers for active games - NO HOST REQUIRED
-  static async startAutoNumberCalling(gameId) {
-    const game = await Game.findById(gameId);
-    
-    if (!game || game.status !== 'ACTIVE') return;
+static async startAutoNumberCalling(gameId) {
+  const game = await Game.findById(gameId);
+  
+  if (!game || game.status !== 'ACTIVE') return;
 
-    console.log(`🔢 Starting auto-number calling for game ${game.code}`);
+  console.log(`🔢 Starting auto-number calling for game ${game.code}`);
 
-    // Call first number immediately
-    setTimeout(async () => {
-      try {
-        await this.callNumber(gameId);
-      } catch (error) {
-        console.error('❌ Auto-call error:', error);
+  // Call first number immediately
+  setTimeout(async () => {
+    try {
+      await this.callNumber(gameId);
+    } catch (error) {
+      console.error('❌ Auto-call error:', error);
+    }
+  }, 3000); // Increased to 3 seconds for better UX
+
+  // Then call numbers every 8-12 seconds (randomized for better feel)
+  const interval = setInterval(async () => {
+    try {
+      const currentGame = await Game.findById(gameId);
+      if (!currentGame || currentGame.status !== 'ACTIVE') {
+        clearInterval(interval);
+        console.log(`🛑 Stopping auto-calling for game ${gameId}`);
+        return;
       }
-    }, 2000);
 
-    // Then call numbers every 10 seconds
-    const interval = setInterval(async () => {
-      try {
-        const currentGame = await Game.findById(gameId);
-        if (!currentGame || currentGame.status !== 'ACTIVE') {
-          clearInterval(interval);
-          return;
+      await this.callNumber(gameId);
+      
+      // Check if all numbers have been called
+      if (currentGame.numbersCalled.length >= 75) {
+        clearInterval(interval);
+        console.log('🎯 All numbers called, ending game');
+        // End game if no winner after all numbers
+        if (!currentGame.winnerId) {
+          await this.endGame(gameId);
         }
-
-        await this.callNumber(gameId);
-        
-        // Check if all numbers have been called
-        if (currentGame.numbersCalled.length >= 75) {
-          clearInterval(interval);
-          console.log('🎯 All numbers called, ending game');
-          // End game if no winner after all numbers
-          if (!currentGame.winnerId) {
-            currentGame.status = 'FINISHED';
-            currentGame.endedAt = new Date();
-            await currentGame.save();
-          }
-        }
-      } catch (error) {
-        console.error('❌ Auto-call error:', error);
       }
-    }, 10000); // Call every 10 seconds
+    } catch (error) {
+      console.error('❌ Auto-call error:', error);
+    }
+  }, 8000 + Math.random() * 4000); // Random between 8-12 seconds
 
-    return interval;
+  // Store interval reference for cleanup
+  this.activeIntervals = this.activeIntervals || new Map();
+  this.activeIntervals.set(gameId.toString(), interval);
+
+  return interval;
+}
+
+// Stop auto-calling when game ends
+static async stopAutoNumberCalling(gameId) {
+  if (this.activeIntervals && this.activeIntervals.has(gameId.toString())) {
+    const interval = this.activeIntervals.get(gameId.toString());
+    clearInterval(interval);
+    this.activeIntervals.delete(gameId.toString());
+    console.log(`🛑 Stopped auto-calling for game ${gameId}`);
   }
+}
 
   // MODIFIED: Get active games - always returns the main game
   static async getActiveGames() {

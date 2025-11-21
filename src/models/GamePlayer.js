@@ -1,3 +1,4 @@
+// models/GamePlayer.js
 const mongoose = require('mongoose');
 
 const gamePlayerSchema = new mongoose.Schema({
@@ -14,6 +15,11 @@ const gamePlayerSchema = new mongoose.Schema({
   isReady: {
     type: Boolean,
     default: false
+  },
+  playerType: {
+    type: String,
+    enum: ['PLAYER', 'SPECTATOR'],
+    default: 'PLAYER'
   }
 }, {
   timestamps: { createdAt: 'joinedAt', updatedAt: false }
