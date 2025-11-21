@@ -7,7 +7,7 @@ const BingoCard = require('../models/BingoCard');
 const GameUtils = require('../utils/gameUtils');
 
 class GameService {
-  // FIXED: Initialize static properties at the top of the class
+  // FIXED: Initialize static properties at the class level
   static activeIntervals = new Map();
   static isAutoCallingActive = false;
 
@@ -177,12 +177,29 @@ class GameService {
 
     // Store interval reference for cleanup
     this.activeIntervals.set(gameId.toString(), interval);
-    console.log(`✅ Auto-calling started for game ${game.code}. Active intervals: ${this.activeIntervals.size}`);
+    console.log(`✅ Auto-calling started for game ${game.code}. Active intervals: ${this.activeIntervals ? this.activeIntervals.size : 0}`);
 
     return interval;
   }
 
-  // Stop auto-calling when game ends
+  // FIXED: Clean up all intervals with proper null checking
+  static cleanupAllIntervals() {
+    // FIXED: Ensure activeIntervals is initialized
+    if (!this.activeIntervals) {
+      this.activeIntervals = new Map();
+      console.log('🧹 No active intervals to clean up (activeIntervals was not initialized)');
+      return;
+    }
+
+    console.log(`🧹 Cleaning up ${this.activeIntervals.size} active intervals`);
+    for (const [gameId, interval] of this.activeIntervals) {
+      clearInterval(interval);
+      console.log(`🛑 Stopped interval for game ${gameId}`);
+    }
+    this.activeIntervals.clear();
+  }
+
+  // FIXED: Stop auto-calling with proper null checking
   static async stopAutoNumberCalling(gameId) {
     // FIXED: Ensure activeIntervals is initialized
     if (!this.activeIntervals) {
@@ -198,22 +215,6 @@ class GameService {
       this.activeIntervals.delete(gameIdStr);
       console.log(`🛑 Stopped auto-calling for game ${gameId}. Remaining intervals: ${this.activeIntervals.size}`);
     }
-  }
-
-  // Clean up all intervals
-  static cleanupAllIntervals() {
-    // FIXED: Ensure activeIntervals is initialized
-    if (!this.activeIntervals) {
-      this.activeIntervals = new Map();
-      return;
-    }
-
-    console.log(`🧹 Cleaning up ${this.activeIntervals.size} active intervals`);
-    for (const [gameId, interval] of this.activeIntervals) {
-      clearInterval(interval);
-      console.log(`🛑 Stopped interval for game ${gameId}`);
-    }
-    this.activeIntervals.clear();
   }
 
   // MODIFIED: Get active games - always returns the main game
@@ -239,7 +240,7 @@ class GameService {
   }
 
   // MODIFIED: Join game - automatically joins the main game
-  static async joinGame(gameCode, userId) {
+   static async joinGame(gameCode, userId) {
     const session = await mongoose.startSession();
     session.startTransaction();
 
@@ -273,6 +274,7 @@ class GameService {
 
         // Determine if this is a late joiner
         const isLateJoiner = game.status === 'ACTIVE';
+        // FIXED: Store ALL numbers called up to this point for late joiners
         const numbersCalledAtJoin = game.numbersCalled || [];
 
         // Create GamePlayer entry
@@ -293,7 +295,7 @@ class GameService {
           markedPositions: [12], // FREE space
           isLateJoiner: isLateJoiner,
           joinedAt: new Date(),
-          numbersCalledAtJoin: numbersCalledAtJoin
+          numbersCalledAtJoin: numbersCalledAtJoin // Store ALL numbers called so far
         }], { session });
 
         // Atomic update of player count
@@ -304,6 +306,9 @@ class GameService {
         await session.commitTransaction();
 
         console.log(`✅ User ${userId} joined as ${isLateJoiner ? 'LATE PLAYER' : 'PLAYER'}. Total players: ${game.currentPlayers}`);
+        if (isLateJoiner) {
+          console.log(`📊 Late joiner will have ${numbersCalledAtJoin.length} pre-called numbers considered`);
+        }
 
         // Auto-start game if it's WAITING and we have players
         if (game.status === 'WAITING' && game.currentPlayers >= 1) {
@@ -332,6 +337,7 @@ class GameService {
       session.endSession();
     }
   }
+
 
   // MODIFIED: Start game - no host required for auto-games
   static async startGame(gameId) {
@@ -403,7 +409,7 @@ class GameService {
     return gameObj;
   }
 
-  // Start the auto-game service when server starts
+  // FIXED: Start the auto-game service when server starts
   static startAutoGameService() {
     // FIXED: Ensure activeIntervals is initialized before cleanup
     if (!this.activeIntervals) {
@@ -496,7 +502,7 @@ class GameService {
     }
   }
 
-  static async checkForWinners(gameId, lastCalledNumber) {
+    static async checkForWinners(gameId, lastCalledNumber) {
     const session = await mongoose.startSession();
     session.startTransaction();
 
@@ -514,14 +520,41 @@ class GameService {
         const numbers = card.numbers.flat();
         const position = numbers.indexOf(lastCalledNumber);
         
+        // If this number is in the player's card, mark it
         if (position !== -1 && !card.markedPositions.includes(position)) {
           card.markedPositions.push(position);
+          await card.save();
+        }
+
+        // FIXED: For late joiners, we need to check ALL numbers that match their card
+        // not just the ones called after they joined
+        let effectiveMarkedPositions = [...card.markedPositions];
+        
+        if (card.isLateJoiner) {
+          // For late joiners, also mark any numbers that were called before they joined
+          const numbersCalledAtJoin = card.numbersCalledAtJoin || [];
+          const allCalledNumbers = game.numbersCalled || [];
           
-          const isWinner = GameUtils.checkWinCondition(numbers, card.markedPositions);
-          card.isWinner = isWinner;
+          // Find all numbers in the player's card that were called in the game
+          for (let i = 0; i < numbers.length; i++) {
+            const cardNumber = numbers[i];
+            // If this number was called in the game AND it's not already marked
+            if (allCalledNumbers.includes(cardNumber) && !effectiveMarkedPositions.includes(i)) {
+              effectiveMarkedPositions.push(i);
+            }
+          }
+        }
+
+        // Check win condition with all marked positions (including pre-join numbers for late joiners)
+        const isWinner = GameUtils.checkWinCondition(numbers, effectiveMarkedPositions);
+        
+        if (isWinner && !card.isWinner) {
+          card.isWinner = true;
+          // Also update the actual marked positions to include all winning numbers
+          card.markedPositions = effectiveMarkedPositions;
           await card.save();
 
-          if (isWinner && !winnerFound) {
+          if (!winnerFound) {
             // Update game winner and status
             game.status = 'FINISHED';
             game.winnerId = card.userId;
@@ -529,6 +562,7 @@ class GameService {
             await game.save();
 
             console.log(`🎉 Winner found: ${card.userId} in game ${game.code}`);
+            console.log(`🏆 Late joiner won: ${card.isLateJoiner ? 'YES' : 'NO'}`);
 
             // Update user stats
             const UserService = require('./userService');
@@ -557,8 +591,9 @@ class GameService {
     }
   }
 
+  // ... rest of your methods remain the same (getGameWithDetails, markNumber, etc.)
   // Update the markNumber method to handle late joiners
-  static async markNumber(gameId, userId, number) {
+   static async markNumber(gameId, userId, number) {
     const bingoCard = await BingoCard.findOne({ gameId, userId });
     if (!bingoCard) {
       throw new Error('Bingo card not found');
@@ -570,18 +605,23 @@ class GameService {
       throw new Error('Game not found');
     }
 
-    // For late joiners: check if this number was called before they joined
+    // For late joiners: ALLOW marking numbers called before they joined
+    // (We'll handle the validation in the win checking logic)
     if (bingoCard.isLateJoiner && number !== 'FREE') {
       const numbersCalledAtJoin = bingoCard.numbersCalledAtJoin || [];
-      if (!numbersCalledAtJoin.includes(number)) {
-        throw new Error('This number was called before you joined. You can only mark numbers called after you joined.');
+      const allCalledNumbers = game.numbersCalled || [];
+      
+      // Allow marking if the number was called at any time in the game
+      if (!allCalledNumbers.includes(number)) {
+        throw new Error('This number has not been called yet in the game');
       }
-    }
-
-    // For all players: check if this number has been called in the game
-    const calledNumbers = game.numbersCalled || [];
-    if (!calledNumbers.includes(number) && number !== 'FREE') {
-      throw new Error('This number has not been called yet');
+      // Note: We don't restrict based on when they joined anymore
+    } else {
+      // For regular players: check if this number has been called in the game
+      const calledNumbers = game.numbersCalled || [];
+      if (!calledNumbers.includes(number) && number !== 'FREE') {
+        throw new Error('This number has not been called yet');
+      }
     }
 
     if (number === 'FREE') {
@@ -607,7 +647,23 @@ class GameService {
     
     let isWinner = false;
     if (!isSpectator) {
-      isWinner = GameUtils.checkWinCondition(numbers, bingoCard.markedPositions);
+      // FIXED: For late joiners, check win condition with all possible marked numbers
+      let effectiveMarkedPositions = [...bingoCard.markedPositions];
+      
+      if (bingoCard.isLateJoiner) {
+        // Include numbers that were called before they joined
+        const numbersCalledAtJoin = bingoCard.numbersCalledAtJoin || [];
+        const allCalledNumbers = game.numbersCalled || [];
+        
+        for (let i = 0; i < numbers.length; i++) {
+          const cardNumber = numbers[i];
+          if (allCalledNumbers.includes(cardNumber) && !effectiveMarkedPositions.includes(i)) {
+            effectiveMarkedPositions.push(i);
+          }
+        }
+      }
+      
+      isWinner = GameUtils.checkWinCondition(numbers, effectiveMarkedPositions);
       bingoCard.isWinner = isWinner;
     }
     
@@ -621,6 +677,9 @@ class GameService {
 
       const UserService = require('./userService');
       await UserService.updateUserStats(userId, true);
+      
+      console.log(`🎉 Manual win declared for user ${userId}`);
+      console.log(`🏆 Late joiner won: ${bingoCard.isLateJoiner ? 'YES' : 'NO'}`);
     }
 
     return { bingoCard, isWinner, isSpectator };
@@ -757,7 +816,7 @@ class GameService {
     };
   }
 
-  static async checkForWin(gameId, userId) {
+ static async checkForWin(gameId, userId) {
     const bingoCard = await BingoCard.findOne({ gameId, userId });
     if (!bingoCard) {
       throw new Error('Bingo card not found');
@@ -769,10 +828,29 @@ class GameService {
     }
 
     const numbers = bingoCard.numbers.flat();
-    const isWinner = GameUtils.checkWinCondition(numbers, bingoCard.markedPositions);
+    
+    // FIXED: For late joiners, consider ALL numbers called in the game
+    let effectiveMarkedPositions = [...bingoCard.markedPositions];
+    
+    if (bingoCard.isLateJoiner) {
+      const numbersCalledAtJoin = bingoCard.numbersCalledAtJoin || [];
+      const allCalledNumbers = game.numbersCalled || [];
+      
+      // Mark all numbers in the player's card that were called in the game
+      for (let i = 0; i < numbers.length; i++) {
+        const cardNumber = numbers[i];
+        if (allCalledNumbers.includes(cardNumber) && !effectiveMarkedPositions.includes(i)) {
+          effectiveMarkedPositions.push(i);
+        }
+      }
+    }
+
+    const isWinner = GameUtils.checkWinCondition(numbers, effectiveMarkedPositions);
     
     if (isWinner && !bingoCard.isWinner) {
       bingoCard.isWinner = true;
+      // Update the actual marked positions to reflect all winning numbers
+      bingoCard.markedPositions = effectiveMarkedPositions;
       await bingoCard.save();
 
       if (game.status === 'ACTIVE') {
@@ -783,13 +861,16 @@ class GameService {
 
         const UserService = require('./userService');
         await UserService.updateUserStats(userId, true);
+        
+        console.log(`🎉 Manual win check: Winner found for user ${userId}`);
+        console.log(`🏆 Late joiner won: ${bingoCard.isLateJoiner ? 'YES' : 'NO'}`);
       }
     }
 
     return {
       isWinner,
       bingoCard,
-      winningPattern: isWinner ? GameUtils.getWinningPattern(bingoCard.markedPositions) : null
+      winningPattern: isWinner ? GameUtils.getWinningPattern(effectiveMarkedPositions) : null
     };
   }
 

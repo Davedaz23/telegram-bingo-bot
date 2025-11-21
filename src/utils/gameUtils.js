@@ -52,33 +52,93 @@ class GameUtils {
     return rows;
   }
 
-  static checkWinCondition(numbers, markedPositions) {
-    if (!markedPositions || markedPositions.length < 4) return false;
+ static async checkForWinners(gameId, lastCalledNumber) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-    // Always include the FREE space (position 12) in marked positions
-    const effectiveMarked = [...new Set([...markedPositions, 12])];
+    try {
+      const game = await Game.findById(gameId).session(session);
+      if (!game || game.status !== 'ACTIVE') {
+        await session.abortTransaction();
+        return;
+      }
 
-    const winPatterns = [
-      // Rows
-      [0, 1, 2, 3, 4],     // Row 1
-      [5, 6, 7, 8, 9],     // Row 2
-      [10, 11, 12, 13, 14], // Row 3
-      [15, 16, 17, 18, 19], // Row 4
-      [20, 21, 22, 23, 24], // Row 5
-      // Columns
-      [0, 5, 10, 15, 20],  // Col 1
-      [1, 6, 11, 16, 21],  // Col 2
-      [2, 7, 12, 17, 22],  // Col 3
-      [3, 8, 13, 18, 23],  // Col 4
-      [4, 9, 14, 19, 24],  // Col 5
-      // Diagonals
-      [0, 6, 12, 18, 24],  // Diagonal \
-      [4, 8, 12, 16, 20]   // Diagonal /
-    ];
+      const bingoCards = await BingoCard.find({ gameId }).session(session);
+      let winnerFound = false;
+      
+      for (const card of bingoCards) {
+        const numbers = card.numbers.flat();
+        const position = numbers.indexOf(lastCalledNumber);
+        
+        // If this number is in the player's card, mark it
+        if (position !== -1 && !card.markedPositions.includes(position)) {
+          card.markedPositions.push(position);
+          await card.save();
+        }
 
-    return winPatterns.some(pattern => 
-      pattern.every(position => effectiveMarked.includes(position))
-    );
+        // FIXED: For late joiners, we need to check ALL numbers that match their card
+        // not just the ones called after they joined
+        let effectiveMarkedPositions = [...card.markedPositions];
+        
+        if (card.isLateJoiner) {
+          // For late joiners, also mark any numbers that were called before they joined
+          const numbersCalledAtJoin = card.numbersCalledAtJoin || [];
+          const allCalledNumbers = game.numbersCalled || [];
+          
+          // Find all numbers in the player's card that were called in the game
+          for (let i = 0; i < numbers.length; i++) {
+            const cardNumber = numbers[i];
+            // If this number was called in the game AND it's not already marked
+            if (allCalledNumbers.includes(cardNumber) && !effectiveMarkedPositions.includes(i)) {
+              effectiveMarkedPositions.push(i);
+            }
+          }
+        }
+
+        // Check win condition with all marked positions (including pre-join numbers for late joiners)
+        const isWinner = GameUtils.checkWinCondition(numbers, effectiveMarkedPositions);
+        
+        if (isWinner && !card.isWinner) {
+          card.isWinner = true;
+          // Also update the actual marked positions to include all winning numbers
+          card.markedPositions = effectiveMarkedPositions;
+          await card.save();
+
+          if (!winnerFound) {
+            // Update game winner and status
+            game.status = 'FINISHED';
+            game.winnerId = card.userId;
+            game.endedAt = new Date();
+            await game.save();
+
+            console.log(`🎉 Winner found: ${card.userId} in game ${game.code}`);
+            console.log(`🏆 Late joiner won: ${card.isLateJoiner ? 'YES' : 'NO'}`);
+
+            // Update user stats
+            const UserService = require('./userService');
+            await UserService.updateUserStats(card.userId, true);
+
+            // Update other players' stats (they lost)
+            const losingPlayers = bingoCards.filter(c => c.userId.toString() !== card.userId.toString());
+            for (const losingCard of losingPlayers) {
+              await UserService.updateUserStats(losingCard.userId, false);
+            }
+
+            winnerFound = true;
+            
+            // Stop auto-calling since we have a winner
+            this.stopAutoNumberCalling(gameId);
+          }
+        }
+      }
+
+      await session.commitTransaction();
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Check winners error:', error);
+    } finally {
+      session.endSession();
+    }
   }
 
   static getNumberLetter(number) {
