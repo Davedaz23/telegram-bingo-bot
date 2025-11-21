@@ -279,30 +279,133 @@ static async stopAutoNumberCalling(gameId) {
   }
 
   // MODIFIED: Start game - no host required for auto-games
-  static async startGame(gameId) {
-    const game = await Game.findById(gameId);
+// services/gameService.js - UPDATED startGame method
+// MODIFIED: Start game - no host required for auto-games, works with any number of players
+static async startGame(gameId) {
+  const game = await Game.findById(gameId);
 
-    if (!game) {
-      throw new Error('Game not found');
+  if (!game) {
+    throw new Error('Game not found');
+  }
+
+  if (game.status !== 'WAITING') {
+    throw new Error('Game already started');
+  }
+
+  // REMOVED: Minimum player check - now starts with any number of players
+  // if (game.currentPlayers < 2) {
+  //   throw new Error('Need at least 2 players to start');
+  // }
+
+  game.status = 'ACTIVE';
+  game.startedAt = new Date();
+  await game.save();
+
+  console.log(`🚀 Game ${game.code} started with ${game.currentPlayers} player(s)`);
+
+  // Start auto-calling numbers regardless of player count
+  this.startAutoNumberCalling(gameId);
+
+  return this.getGameWithDetails(game._id);
+}
+
+// Also update the auto-start logic in joinGame to work with 1 player
+static async joinGame(gameCode, userId) {
+  try {
+    // Always use the main game, ignore provided code for auto-created system
+    const mainGame = await this.getMainGame();
+    
+    if (!mainGame) {
+      throw new Error('No game available');
     }
 
-    if (game.status !== 'WAITING') {
-      throw new Error('Game already started');
+    const game = await Game.findById(mainGame._id);
+
+    // Check if user already joined
+    const existingPlayer = await GamePlayer.findOne({ 
+      userId, 
+      gameId: game._id 
+    });
+    
+    if (existingPlayer) {
+      return this.getGameWithDetails(game._id);
     }
 
-    if (game.currentPlayers < 2) {
-      throw new Error('Need at least 2 players to start');
+    // If game is WAITING, join as active player
+    if (game.status === 'WAITING') {
+      if (game.currentPlayers >= game.maxPlayers) {
+        throw new Error('Game is full');
+      }
+
+      // Add player to game
+      await GamePlayer.create({
+        userId,
+        gameId: game._id,
+        isReady: true,
+        playerType: 'PLAYER'
+      });
+
+      // Generate bingo card for player
+      const bingoCardNumbers = GameUtils.generateBingoCard();
+      await BingoCard.create({
+        userId,
+        gameId: game._id,
+        numbers: bingoCardNumbers,
+        markedPositions: [12], // FREE space
+      });
+
+      // Update player count
+      game.currentPlayers += 1;
+      await game.save();
+
+      // MODIFIED: Auto-start game if ANY players joined (even just 1)
+      if (game.currentPlayers >= 1 && game.status === 'WAITING') {
+        console.log(`🚀 Auto-starting game ${game.code} with ${game.currentPlayers} player(s)`);
+        game.status = 'ACTIVE';
+        game.startedAt = new Date();
+        await game.save();
+        
+        // Start auto-calling numbers
+        this.startAutoNumberCalling(game._id);
+      }
+
+    } 
+    // If game is ACTIVE, join as SPECTATOR
+    else if (game.status === 'ACTIVE') {
+      console.log(`👀 User ${userId} joining game ${game.code} as spectator`);
+      
+      // Add user as spectator
+      await GamePlayer.create({
+        userId,
+        gameId: game._id,
+        isReady: false,
+        playerType: 'SPECTATOR'
+      });
+
+      // Generate bingo card for spectator (they can still play along)
+      const bingoCardNumbers = GameUtils.generateBingoCard();
+      await BingoCard.create({
+        userId,
+        gameId: game._id,
+        numbers: bingoCardNumbers,
+        markedPositions: [12], // FREE space
+        isSpectator: true
+      });
+
+      // Don't increment currentPlayers for spectators
+      console.log(`✅ User ${userId} joined as spectator`);
     }
-
-    game.status = 'ACTIVE';
-    game.startedAt = new Date();
-    await game.save();
-
-    // Start auto-calling numbers
-    this.startAutoNumberCalling(gameId);
+    // If game is FINISHED, show results but don't allow joining
+    else if (game.status === 'FINISHED') {
+      throw new Error('Game has already finished. A new game will start soon.');
+    }
 
     return this.getGameWithDetails(game._id);
+  } catch (error) {
+    console.error('❌ Join game error:', error);
+    throw error;
   }
+}
 
   // Format game for frontend compatibility - REMOVE HOST REFERENCES
   static formatGameForFrontend(game) {
