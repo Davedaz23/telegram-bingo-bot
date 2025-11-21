@@ -7,7 +7,7 @@ const BingoCard = require('../models/BingoCard');
 const GameUtils = require('../utils/gameUtils');
 
 class GameService {
-  // FIXED: Initialize static properties at the class level
+  // FIXED: Initialize static properties at the top of the class
   static activeIntervals = new Map();
   static isAutoCallingActive = false;
 
@@ -177,29 +177,12 @@ class GameService {
 
     // Store interval reference for cleanup
     this.activeIntervals.set(gameId.toString(), interval);
-    console.log(`✅ Auto-calling started for game ${game.code}. Active intervals: ${this.activeIntervals ? this.activeIntervals.size : 0}`);
+    console.log(`✅ Auto-calling started for game ${game.code}. Active intervals: ${this.activeIntervals.size}`);
 
     return interval;
   }
 
-  // FIXED: Clean up all intervals with proper null checking
-  static cleanupAllIntervals() {
-    // FIXED: Ensure activeIntervals is initialized
-    if (!this.activeIntervals) {
-      this.activeIntervals = new Map();
-      console.log('🧹 No active intervals to clean up (activeIntervals was not initialized)');
-      return;
-    }
-
-    console.log(`🧹 Cleaning up ${this.activeIntervals.size} active intervals`);
-    for (const [gameId, interval] of this.activeIntervals) {
-      clearInterval(interval);
-      console.log(`🛑 Stopped interval for game ${gameId}`);
-    }
-    this.activeIntervals.clear();
-  }
-
-  // FIXED: Stop auto-calling with proper null checking
+  // Stop auto-calling when game ends
   static async stopAutoNumberCalling(gameId) {
     // FIXED: Ensure activeIntervals is initialized
     if (!this.activeIntervals) {
@@ -215,6 +198,22 @@ class GameService {
       this.activeIntervals.delete(gameIdStr);
       console.log(`🛑 Stopped auto-calling for game ${gameId}. Remaining intervals: ${this.activeIntervals.size}`);
     }
+  }
+
+  // Clean up all intervals
+  static cleanupAllIntervals() {
+    // FIXED: Ensure activeIntervals is initialized
+    if (!this.activeIntervals) {
+      this.activeIntervals = new Map();
+      return;
+    }
+
+    console.log(`🧹 Cleaning up ${this.activeIntervals.size} active intervals`);
+    for (const [gameId, interval] of this.activeIntervals) {
+      clearInterval(interval);
+      console.log(`🛑 Stopped interval for game ${gameId}`);
+    }
+    this.activeIntervals.clear();
   }
 
   // MODIFIED: Get active games - always returns the main game
@@ -404,7 +403,7 @@ class GameService {
     return gameObj;
   }
 
-  // FIXED: Start the auto-game service when server starts
+  // Start the auto-game service when server starts
   static startAutoGameService() {
     // FIXED: Ensure activeIntervals is initialized before cleanup
     if (!this.activeIntervals) {
@@ -558,7 +557,6 @@ class GameService {
     }
   }
 
-  // ... rest of your methods remain the same (getGameWithDetails, markNumber, etc.)
   // Update the markNumber method to handle late joiners
   static async markNumber(gameId, userId, number) {
     const bingoCard = await BingoCard.findOne({ gameId, userId });
