@@ -7,8 +7,9 @@ require('dotenv').config();
 
 const authRoutes = require('./src/routes/auth');
 const gameRoutes = require('./src/routes/games');
-const BotController = require('./src/controllers/botController'); // Add this line
+const BotController = require('./src/controllers/botController');
 
+// Import GameService - make sure the path is correct
 const GameService = require('./src/services/gameService');
 
 const app = express();
@@ -17,6 +18,7 @@ const app = express();
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected successfully'))
   .catch(err => console.error('MongoDB connection error:', err));
+
 // ✅ ADD THIS: Initialize and launch the bot
 let botController;
 try {
@@ -30,6 +32,7 @@ try {
 } catch (error) {
   console.error('❌ Failed to initialize Telegram bot:', error);
 }
+
 // CORS configuration - UPDATED with your live frontend URL
 app.use(cors({
   origin: [
@@ -41,13 +44,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   credentials: true
 }));
-// ✅ ADD THIS: Initialize auto-game service
-try {
-  GameService.startAutoGameService();
-  console.log('🎮 Auto-game service initialized successfully');
-} catch (error) {
-  console.error('❌ Failed to initialize auto-game service:', error);
-}
 
 // Middleware
 app.use(express.json());
@@ -56,6 +52,23 @@ app.use(express.static(path.join(__dirname, '../public')));
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/games', gameRoutes);
+
+// ✅ MODIFIED: Initialize auto-game service AFTER server starts
+const initializeGameService = () => {
+  try {
+    // Check if GameService and the method exist
+    if (GameService && typeof GameService.startAutoGameService === 'function') {
+      GameService.startAutoGameService();
+      console.log('🎮 Auto-game service initialized successfully');
+    } else {
+      console.error('❌ GameService.startAutoGameService is not available');
+    }
+  } catch (error) {
+    console.error('❌ Failed to initialize auto-game service:', error);
+    console.error('Error details:', error.message);
+    console.error('Error stack:', error.stack);
+  }
+};
 
 // Health check
 app.get('/health', async (req, res) => {
@@ -144,12 +157,57 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+
+// Start server and THEN initialize game service
+const server = app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`CORS enabled for:`);
   console.log(`- https://bingominiapp.vercel.app (Production)`);
   console.log(`- http://localhost:3001 (Development)`);
   console.log(`- http://localhost:3000 (Development)`);
+  
+  // Initialize game service after server is running
+  setTimeout(() => {
+    console.log('🔄 Initializing game service...');
+    initializeGameService();
+  }, 1000);
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('🛑 Server shutting down gracefully...');
+  
+  // Clean up game service intervals
+  if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
+    GameService.cleanupAllIntervals();
+  }
+  
+  // Close MongoDB connection
+  await mongoose.connection.close();
+  console.log('✅ MongoDB connection closed');
+  
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGTERM', async () => {
+  console.log('🛑 Server terminating gracefully...');
+  
+  // Clean up game service intervals
+  if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
+    GameService.cleanupAllIntervals();
+  }
+  
+  // Close MongoDB connection
+  await mongoose.connection.close();
+  console.log('✅ MongoDB connection closed');
+  
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
 });
 
 module.exports = app;
