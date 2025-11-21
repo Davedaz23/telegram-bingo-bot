@@ -7,8 +7,8 @@ const BingoCard = require('../models/BingoCard');
 const GameUtils = require('../utils/gameUtils');
 
 class GameService {
-  // SINGLE GAME MANAGEMENT SYSTEM
-static async getMainGame() {
+  // SINGLE GAME MANAGEMENT SYSTEM - NO HOST CONCEPT
+  static async getMainGame() {
     try {
       // First, check for any finished games that can be restarted
       await this.autoRestartFinishedGames();
@@ -17,7 +17,7 @@ static async getMainGame() {
       let game = await Game.findOne({ 
         status: { $in: ['WAITING', 'ACTIVE'] } 
       })
-      .populate('hostId', 'username firstName telegramId')
+      .populate('winnerId', 'username firstName')
       .populate({
         path: 'players',
         populate: {
@@ -41,27 +41,10 @@ static async getMainGame() {
 
   static async createAutoGame() {
     try {
-      // Use a system user or the first available user as host
-      let systemUser = await User.findOne({ username: 'system_bot' });
-      
-      if (!systemUser) {
-        // Create a system user if none exists
-        systemUser = new User({
-          username: 'system_bot',
-          firstName: 'System',
-          telegramId: 'system_auto_creator',
-          gamesPlayed: 0,
-          gamesWon: 0,
-          totalScore: 0
-        });
-        await systemUser.save();
-      }
-
       const gameCode = GameUtils.generateGameCode();
       
       const game = new Game({
         code: gameCode,
-        hostId: systemUser._id,
         maxPlayers: 10,
         isPrivate: false,
         numbersCalled: [],
@@ -115,8 +98,8 @@ static async getMainGame() {
     }
   }
 
-  // Auto-call numbers for active games
-static async startAutoNumberCalling(gameId) {
+  // Auto-call numbers for active games - NO HOST REQUIRED
+  static async startAutoNumberCalling(gameId) {
     const game = await Game.findById(gameId);
     
     if (!game || game.status !== 'ACTIVE') return;
@@ -126,7 +109,7 @@ static async startAutoNumberCalling(gameId) {
     // Call first number immediately
     setTimeout(async () => {
       try {
-        await this.callNumber(gameId, game.hostId.toString());
+        await this.callNumber(gameId);
       } catch (error) {
         console.error('❌ Auto-call error:', error);
       }
@@ -141,7 +124,7 @@ static async startAutoNumberCalling(gameId) {
           return;
         }
 
-        await this.callNumber(gameId, currentGame.hostId.toString());
+        await this.callNumber(gameId);
         
         // Check if all numbers have been called
         if (currentGame.numbersCalled.length >= 75) {
@@ -161,8 +144,9 @@ static async startAutoNumberCalling(gameId) {
 
     return interval;
   }
+
   // MODIFIED: Get active games - always returns the main game
- static async getActiveGames() {
+  static async getActiveGames() {
     try {
       const mainGame = await this.getMainGame();
       return [mainGame].filter(game => game !== null);
@@ -182,7 +166,6 @@ static async startAutoNumberCalling(gameId) {
       return [];
     }
   }
-
 
   // MODIFIED: Join game - automatically joins the main game
   static async joinGame(gameCode, userId) {
@@ -282,9 +265,8 @@ static async startAutoNumberCalling(gameId) {
     }
   }
 
-
-  // MODIFIED: Start game - simplified for auto-games
-  static async startGame(gameId, hostId) {
+  // MODIFIED: Start game - no host required for auto-games
+  static async startGame(gameId) {
     const game = await Game.findById(gameId);
 
     if (!game) {
@@ -309,15 +291,14 @@ static async startAutoNumberCalling(gameId) {
     return this.getGameWithDetails(game._id);
   }
 
-  // Format game for frontend compatibility
-    static formatGameForFrontend(game) {
+  // Format game for frontend compatibility - REMOVE HOST REFERENCES
+  static formatGameForFrontend(game) {
     if (!game) return null;
     
     const gameObj = game.toObject ? game.toObject() : { ...game };
     
-    // Map hostId to host
+    // Remove host mapping since we don't have hosts
     if (gameObj.hostId) {
-      gameObj.host = gameObj.hostId;
       delete gameObj.hostId;
     }
     
@@ -339,7 +320,6 @@ static async startAutoNumberCalling(gameId) {
 
     return gameObj;
   }
-
 
   // Start the auto-game service when server starts
   static startAutoGameService() {
@@ -366,43 +346,8 @@ static async startAutoNumberCalling(gameId) {
     return interval;
   }
 
-  // EXISTING METHODS (updated to use formatGameForFrontend)
-
-  static async createGame(hostId, maxPlayers = 10, isPrivate = false) {
-    const gameCode = GameUtils.generateGameCode();
-
-    const game = new Game({
-      code: gameCode,
-      hostId,
-      maxPlayers,
-      isPrivate,
-      numbersCalled: [],
-      status: 'WAITING',
-      currentPlayers: 1
-    });
-
-    await game.save();
-    
-    // Add host as first player
-    await GamePlayer.create({
-      userId: hostId,
-      gameId: game._id,
-      isReady: true
-    });
-
-    // Generate bingo card for host
-    const bingoCardNumbers = GameUtils.generateBingoCard();
-    await BingoCard.create({
-      userId: hostId,
-      gameId: game._id,
-      numbers: bingoCardNumbers,
-      markedPositions: [12], // FREE space
-    });
-
-    return this.getGameWithDetails(game._id);
-  }
-
-  static async callNumber(gameId, callerId) {
+  // MODIFIED: Call number - no callerId required
+  static async callNumber(gameId) {
     const game = await Game.findById(gameId);
 
     if (!game || game.status !== 'ACTIVE') {
@@ -528,14 +473,12 @@ static async startAutoNumberCalling(gameId) {
     return { bingoCard, isWinner, isSpectator };
   }
 
-
   static async getGameWithDetails(gameId) {
     if (!mongoose.Types.ObjectId.isValid(gameId)) {
       throw new Error('Invalid game ID');
     }
 
     const game = await Game.findById(gameId)
-      .populate('hostId', 'username firstName telegramId')
       .populate('winnerId', 'username firstName')
       .populate({
         path: 'players',
@@ -559,7 +502,6 @@ static async startAutoNumberCalling(gameId) {
 
   static async findByCode(code) {
     const game = await Game.findOne({ code })
-      .populate('hostId', 'username firstName telegramId')
       .populate('winnerId', 'username firstName')
       .populate({
         path: 'players',
@@ -587,7 +529,7 @@ static async startAutoNumberCalling(gameId) {
 
     game.currentPlayers = Math.max(0, game.currentPlayers - 1);
     
-    if (game.currentPlayers === 0 || game.hostId.toString() === userId.toString()) {
+    if (game.currentPlayers === 0) {
       game.status = 'CANCELLED';
       game.endedAt = new Date();
     }
@@ -601,7 +543,6 @@ static async startAutoNumberCalling(gameId) {
       'players.userId': userId,
       status: { $in: ['WAITING', 'ACTIVE'] }
     })
-      .populate('hostId', 'username firstName telegramId')
       .populate('winnerId', 'username firstName')
       .populate({
         path: 'players',
@@ -615,16 +556,17 @@ static async startAutoNumberCalling(gameId) {
 
     return games.map(game => this.formatGameForFrontend(game));
   }
-   static async getUserGameRole(gameId, userId) {
-      const player = await GamePlayer.findOne({ gameId, userId });
-      if (!player) return null;
-      
-      return {
-        playerType: player.playerType || 'PLAYER',
-        isReady: player.isReady,
-        joinedAt: player.joinedAt
-      };
-    }
+
+  static async getUserGameRole(gameId, userId) {
+    const player = await GamePlayer.findOne({ gameId, userId });
+    if (!player) return null;
+    
+    return {
+      playerType: player.playerType || 'PLAYER',
+      isReady: player.isReady,
+      joinedAt: player.joinedAt
+    };
+  }
 
   static async getUserGameHistory(userId, limit = 10, page = 1) {
     const skip = (page - 1) * limit;
@@ -633,7 +575,6 @@ static async startAutoNumberCalling(gameId) {
       'players.userId': userId,
       status: { $in: ['FINISHED', 'CANCELLED'] }
     })
-      .populate('hostId', 'username firstName telegramId')
       .populate('winnerId', 'username firstName')
       .populate({
         path: 'players',
@@ -698,15 +639,12 @@ static async startAutoNumberCalling(gameId) {
     };
   }
 
-  static async endGame(gameId, hostId) {
+  // MODIFIED: End game - no host required
+  static async endGame(gameId) {
     const game = await Game.findById(gameId);
     
     if (!game) {
       throw new Error('Game not found');
-    }
-
-    if (game.hostId.toString() !== hostId.toString()) {
-      throw new Error('Only host can end the game');
     }
 
     if (game.status === 'FINISHED' || game.status === 'CANCELLED') {
@@ -778,38 +716,7 @@ static async startAutoNumberCalling(gameId) {
     return result;
   }
 
-  static async updateGameSettings(gameId, hostId, settings) {
-    const game = await Game.findById(gameId);
-    
-    if (!game) {
-      throw new Error('Game not found');
-    }
-
-    if (game.hostId.toString() !== hostId.toString()) {
-      throw new Error('Only host can update game settings');
-    }
-
-    if (game.status !== 'WAITING') {
-      throw new Error('Cannot update settings after game has started');
-    }
-
-    if (settings.maxPlayers !== undefined) {
-      if (settings.maxPlayers < game.currentPlayers) {
-        throw new Error(`Cannot set max players lower than current player count (${game.currentPlayers})`);
-      }
-      if (settings.maxPlayers < 2 || settings.maxPlayers > 50) {
-        throw new Error('Max players must be between 2 and 50');
-      }
-      game.maxPlayers = settings.maxPlayers;
-    }
-
-    if (settings.isPrivate !== undefined) {
-      game.isPrivate = settings.isPrivate;
-    }
-
-    await game.save();
-    return this.getGameWithDetails(gameId);
-  }
+  // REMOVED: updateGameSettings since no hosts can update settings
 
   static async getGameById(gameId) {
     if (!mongoose.Types.ObjectId.isValid(gameId)) {
@@ -817,6 +724,24 @@ static async startAutoNumberCalling(gameId) {
     }
 
     return await this.getGameWithDetails(gameId);
+  }
+
+  // NEW: Get winner information for popup
+  static async getWinnerInfo(gameId) {
+    const game = await Game.findById(gameId)
+      .populate('winnerId', 'username firstName telegramId');
+    
+    if (!game || !game.winnerId) {
+      return null;
+    }
+
+    return {
+      winner: game.winnerId,
+      gameCode: game.code,
+      endedAt: game.endedAt,
+      totalPlayers: game.currentPlayers,
+      numbersCalled: game.numbersCalled?.length || 0
+    };
   }
 }
 

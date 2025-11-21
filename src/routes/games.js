@@ -2,32 +2,10 @@ const express = require('express');
 const router = express.Router();
 const GameService = require('../services/gameService');
 
-// Create new game
-router.post('/', async (req, res) => {
-  try {
-    const { hostId, maxPlayers = 10, isPrivate = false } = req.body;
-    
-    if (!hostId) {
-      return res.status(400).json({
-        success: false,
-        error: 'hostId is required',
-      });
-    }
-
-    const game = await GameService.createGame(hostId, maxPlayers, isPrivate);
-    
-    res.json({
-      success: true,
-      game,
-    });
-  } catch (error) {
-    console.error('Create game error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+// Create new game - REMOVED since we only have auto-created games
+// router.post('/', async (req, res) => {
+//   // This endpoint is no longer needed as games are auto-created
+// });
 
 // Join game by code
 router.post('/:code/join', async (req, res) => {
@@ -57,20 +35,12 @@ router.post('/:code/join', async (req, res) => {
   }
 });
 
-// Start game
+// Start game - NO HOST REQUIRED
 router.post('/:id/start', async (req, res) => {
   try {
     const { id } = req.params;
-    const { hostId } = req.body;
     
-    if (!hostId) {
-      return res.status(400).json({
-        success: false,
-        error: 'hostId is required',
-      });
-    }
-
-    const game = await GameService.startGame(id, hostId);
+    const game = await GameService.startGame(id);
     
     res.json({
       success: true,
@@ -85,13 +55,12 @@ router.post('/:id/start', async (req, res) => {
   }
 });
 
-// Call number
+// Call number - NO CALLER ID REQUIRED
 router.post('/:id/call-number', async (req, res) => {
   try {
     const { id } = req.params;
-    const { callerId } = req.body; // Added callerId for validation
     
-    const result = await GameService.callNumber(id, callerId);
+    const result = await GameService.callNumber(id);
     
     res.json({
       success: true,
@@ -161,7 +130,6 @@ router.get('/code/:code', async (req, res) => {
   }
 });
 
-// ADD THESE ROUTES BEFORE THE /:id ROUTE
 // Get active games - simple endpoint
 router.get('/active', async (req, res) => {
   try {
@@ -182,7 +150,7 @@ router.get('/active', async (req, res) => {
   }
 });
 
-// Get waiting games - simple endpoint (MISSING ROUTE)
+// Get waiting games - simple endpoint
 router.get('/waiting', async (req, res) => {
   try {
     console.log('GET /api/games/waiting called');
@@ -202,7 +170,34 @@ router.get('/waiting', async (req, res) => {
   }
 });
 
-// Get game by ID - THIS SHOULD BE AFTER SPECIFIC ROUTES
+// Get winner information
+router.get('/:id/winner', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const winnerInfo = await GameService.getWinnerInfo(id);
+    
+    if (!winnerInfo) {
+      return res.status(404).json({
+        success: false,
+        error: 'No winner found for this game',
+      });
+    }
+
+    res.json({
+      success: true,
+      winnerInfo,
+    });
+  } catch (error) {
+    console.error('Get winner info error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// Get game by ID
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -272,7 +267,7 @@ router.get('/:gameId/card/:userId', async (req, res) => {
   }
 });
 
-// Get active games (list endpoint)
+// Get active games (list endpoint) - DEPRECATED, use /active instead
 router.get('/list/active', async (req, res) => {
   try {
     const games = await GameService.getActiveGames();
@@ -318,7 +313,7 @@ router.post('/:id/leave', async (req, res) => {
   }
 });
 
-// Get waiting games (public games that haven't started) - list endpoint
+// Get waiting games (public games that haven't started) - list endpoint - DEPRECATED
 router.get('/list/waiting', async (req, res) => {
   try {
     const games = await GameService.getWaitingGames();
@@ -419,20 +414,12 @@ router.post('/:id/check-win', async (req, res) => {
   }
 });
 
-// End game (host only)
+// End game - NO HOST REQUIRED
 router.post('/:id/end', async (req, res) => {
   try {
     const { id } = req.params;
-    const { hostId } = req.body;
     
-    if (!hostId) {
-      return res.status(400).json({
-        success: false,
-        error: 'hostId is required',
-      });
-    }
-
-    const game = await GameService.endGame(id, hostId);
+    const game = await GameService.endGame(id);
     
     res.json({
       success: true,
@@ -467,32 +454,9 @@ router.get('/:id/stats', async (req, res) => {
   }
 });
 
-// Update game settings
-router.put('/:id/settings', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { hostId, maxPlayers, isPrivate } = req.body;
-    
-    if (!hostId) {
-      return res.status(400).json({
-        success: false,
-        error: 'hostId is required',
-      });
-    }
-
-    const game = await GameService.updateGameSettings(id, hostId, { maxPlayers, isPrivate });
-    
-    res.json({
-      success: true,
-      game,
-    });
-  } catch (error) {
-    console.error('Update game settings error:', error);
-    res.status(400).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+// Update game settings - REMOVED since no hosts can update settings
+// router.put('/:id/settings', async (req, res) => {
+//   // This endpoint is no longer needed
+// });
 
 module.exports = router;
