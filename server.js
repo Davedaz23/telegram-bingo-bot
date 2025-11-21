@@ -9,6 +9,7 @@ const authRoutes = require('./src/routes/auth');
 const gameRoutes = require('./src/routes/games');
 const BotController = require('./src/controllers/botController'); // Add this line
 
+const GameService = require('./src/services/gameService');
 
 const app = express();
 
@@ -41,7 +42,6 @@ app.use(cors({
   credentials: true
 }));
 // ✅ ADD THIS: Initialize auto-game service
-const GameService = require('./services/gameService');
 try {
   GameService.startAutoGameService();
   console.log('🎮 Auto-game service initialized successfully');
