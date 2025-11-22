@@ -1,4 +1,4 @@
-// utils/gameUtils.js
+// utils/gameUtils.js - FIXED VERSION
 class GameUtils {
   static generateGameCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -52,93 +52,61 @@ class GameUtils {
     return rows;
   }
 
- static async checkForWinners(gameId, lastCalledNumber) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    try {
-      const game = await Game.findById(gameId).session(session);
-      if (!game || game.status !== 'ACTIVE') {
-        await session.abortTransaction();
-        return;
-      }
-
-      const bingoCards = await BingoCard.find({ gameId }).session(session);
-      let winnerFound = false;
-      
-      for (const card of bingoCards) {
-        const numbers = card.numbers.flat();
-        const position = numbers.indexOf(lastCalledNumber);
-        
-        // If this number is in the player's card, mark it
-        if (position !== -1 && !card.markedPositions.includes(position)) {
-          card.markedPositions.push(position);
-          await card.save();
-        }
-
-        // FIXED: For late joiners, we need to check ALL numbers that match their card
-        // not just the ones called after they joined
-        let effectiveMarkedPositions = [...card.markedPositions];
-        
-        if (card.isLateJoiner) {
-          // For late joiners, also mark any numbers that were called before they joined
-          const numbersCalledAtJoin = card.numbersCalledAtJoin || [];
-          const allCalledNumbers = game.numbersCalled || [];
-          
-          // Find all numbers in the player's card that were called in the game
-          for (let i = 0; i < numbers.length; i++) {
-            const cardNumber = numbers[i];
-            // If this number was called in the game AND it's not already marked
-            if (allCalledNumbers.includes(cardNumber) && !effectiveMarkedPositions.includes(i)) {
-              effectiveMarkedPositions.push(i);
-            }
-          }
-        }
-
-        // Check win condition with all marked positions (including pre-join numbers for late joiners)
-        const isWinner = GameUtils.checkWinCondition(numbers, effectiveMarkedPositions);
-        
-        if (isWinner && !card.isWinner) {
-          card.isWinner = true;
-          // Also update the actual marked positions to include all winning numbers
-          card.markedPositions = effectiveMarkedPositions;
-          await card.save();
-
-          if (!winnerFound) {
-            // Update game winner and status
-            game.status = 'FINISHED';
-            game.winnerId = card.userId;
-            game.endedAt = new Date();
-            await game.save();
-
-            console.log(`🎉 Winner found: ${card.userId} in game ${game.code}`);
-            console.log(`🏆 Late joiner won: ${card.isLateJoiner ? 'YES' : 'NO'}`);
-
-            // Update user stats
-            const UserService = require('./userService');
-            await UserService.updateUserStats(card.userId, true);
-
-            // Update other players' stats (they lost)
-            const losingPlayers = bingoCards.filter(c => c.userId.toString() !== card.userId.toString());
-            for (const losingCard of losingPlayers) {
-              await UserService.updateUserStats(losingCard.userId, false);
-            }
-
-            winnerFound = true;
-            
-            // Stop auto-calling since we have a winner
-            this.stopAutoNumberCalling(gameId);
-          }
-        }
-      }
-
-      await session.commitTransaction();
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Check winners error:', error);
-    } finally {
-      session.endSession();
+  // FIXED: Add the missing checkWinCondition method
+  static checkWinCondition(cardNumbers, markedPositions) {
+    if (!cardNumbers || !markedPositions) {
+      console.log('❌ checkWinCondition: Missing cardNumbers or markedPositions');
+      return false;
     }
+
+    // Always include the FREE space (position 12) in marked positions
+    const effectiveMarked = [...new Set([...markedPositions, 12])];
+    
+    console.log(`🔍 Checking win condition: ${effectiveMarked.length} marked positions`);
+    console.log(`📊 Marked positions: [${effectiveMarked.join(', ')}]`);
+
+    const winningPatterns = [
+      // Rows
+      { type: 'ROW', positions: [0, 1, 2, 3, 4] },
+      { type: 'ROW', positions: [5, 6, 7, 8, 9] },
+      { type: 'ROW', positions: [10, 11, 12, 13, 14] },
+      { type: 'ROW', positions: [15, 16, 17, 18, 19] },
+      { type: 'ROW', positions: [20, 21, 22, 23, 24] },
+      
+      // Columns
+      { type: 'COLUMN', positions: [0, 5, 10, 15, 20] },
+      { type: 'COLUMN', positions: [1, 6, 11, 16, 21] },
+      { type: 'COLUMN', positions: [2, 7, 12, 17, 22] },
+      { type: 'COLUMN', positions: [3, 8, 13, 18, 23] },
+      { type: 'COLUMN', positions: [4, 9, 14, 19, 24] },
+      
+      // Diagonals
+      { type: 'DIAGONAL', positions: [0, 6, 12, 18, 24] }, // Top-left to bottom-right
+      { type: 'DIAGONAL', positions: [4, 8, 12, 16, 20] }  // Top-right to bottom-left
+    ];
+
+    for (const pattern of winningPatterns) {
+      const isComplete = pattern.positions.every(pos => effectiveMarked.includes(pos));
+      
+      if (isComplete) {
+        console.log(`🎯 WINNING ${pattern.type} PATTERN DETECTED!`);
+        console.log(`🏆 Winning positions: [${pattern.positions.join(', ')}]`);
+        
+        // Log the actual numbers in the winning pattern
+        const winningNumbers = pattern.positions.map(pos => {
+          const number = cardNumbers[pos];
+          const row = Math.floor(pos / 5);
+          const col = pos % 5;
+          return `${number} (${row},${col})`;
+        });
+        console.log(`🔢 Winning numbers: ${winningNumbers.join(' → ')}`);
+        
+        return true;
+      }
+    }
+
+    console.log('❌ No winning pattern found');
+    return false;
   }
 
   static getNumberLetter(number) {
@@ -195,7 +163,7 @@ class GameUtils {
       [0, 6, 12, 18, 24], [4, 8, 12, 16, 20]
     ];
 
-    const posStr = JSON.stringify(positions);
+    const posStr = JSON.stringify(positions.sort((a, b) => a - b));
     
     if (rowPatterns.some(pattern => JSON.stringify(pattern) === posStr)) return 'ROW';
     if (colPatterns.some(pattern => JSON.stringify(pattern) === posStr)) return 'COLUMN';
@@ -237,6 +205,33 @@ class GameUtils {
       row: Math.floor(position / 5),
       col: position % 5
     };
+  }
+
+  // NEW: Debug method to print card with marked positions
+  static debugCard(cardNumbers, markedPositions, title = "Bingo Card") {
+    console.log(`\n🎯 ${title}`);
+    console.log('B   I   N   G   O');
+    console.log('-----------------');
+    
+    for (let row = 0; row < 5; row++) {
+      let rowStr = '';
+      for (let col = 0; col < 5; col++) {
+        const position = row * 5 + col;
+        const number = cardNumbers[position];
+        const isMarked = markedPositions.includes(position);
+        const isFree = number === 'FREE';
+        
+        let display = number.toString().padStart(2);
+        if (isMarked) display = `[${display}]`;
+        if (isFree) display = 'FREE';
+        
+        rowStr += display.padEnd(6);
+      }
+      console.log(rowStr);
+    }
+    
+    console.log(`Marked: ${markedPositions.length}/25 positions`);
+    console.log('-----------------\n');
   }
 }
 
