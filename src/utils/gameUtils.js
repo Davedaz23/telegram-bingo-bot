@@ -52,7 +52,7 @@ class GameUtils {
     return rows;
   }
 
-  // FIXED: Add the missing checkWinCondition method
+  // FIXED: Enhanced checkWinCondition method
   static checkWinCondition(cardNumbers, markedPositions) {
     if (!cardNumbers || !markedPositions) {
       console.log('❌ checkWinCondition: Missing cardNumbers or markedPositions');
