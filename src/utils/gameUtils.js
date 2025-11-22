@@ -1,4 +1,4 @@
-// utils/gameUtils.js - FIXED VERSION
+// utils/gameUtils.js - COMPLETE FIXED VERSION
 class GameUtils {
   static generateGameCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -10,7 +10,6 @@ class GameUtils {
   }
 
   static generateBingoCard() {
-    // Standard Bingo: 5 columns B-I-N-G-O with numbers 1-75
     const ranges = [
       { min: 1, max: 15 },   // B
       { min: 16, max: 30 },  // I
@@ -21,22 +20,18 @@ class GameUtils {
 
     const card = [];
     
-    // Generate each column
     for (let col = 0; col < 5; col++) {
       const numbers = new Set();
       
-      // Generate 5 unique numbers for this column
       while (numbers.size < 5) {
         const num = Math.floor(Math.random() * (ranges[col].max - ranges[col].min + 1)) + ranges[col].min;
         numbers.add(num);
       }
       
-      // Convert to sorted array
       const sortedNumbers = Array.from(numbers).sort((a, b) => a - b);
       card.push(sortedNumbers);
     }
 
-    // Transpose columns to rows to create the final card
     const rows = [];
     for (let row = 0; row < 5; row++) {
       const currentRow = [];
@@ -46,24 +41,20 @@ class GameUtils {
       rows.push(currentRow);
     }
 
-    // Set the center position (2,2) as FREE
     rows[2][2] = 'FREE';
     
     return rows;
   }
 
-  // FIXED: Enhanced checkWinCondition method
   static checkWinCondition(cardNumbers, markedPositions) {
     if (!cardNumbers || !markedPositions) {
       console.log('❌ checkWinCondition: Missing cardNumbers or markedPositions');
       return false;
     }
 
-    // Always include the FREE space (position 12) in marked positions
     const effectiveMarked = [...new Set([...markedPositions, 12])];
     
     console.log(`🔍 Checking win condition: ${effectiveMarked.length} marked positions`);
-    console.log(`📊 Marked positions: [${effectiveMarked.join(', ')}]`);
 
     const winningPatterns = [
       // Rows
@@ -81,8 +72,8 @@ class GameUtils {
       { type: 'COLUMN', positions: [4, 9, 14, 19, 24] },
       
       // Diagonals
-      { type: 'DIAGONAL', positions: [0, 6, 12, 18, 24] }, // Top-left to bottom-right
-      { type: 'DIAGONAL', positions: [4, 8, 12, 16, 20] }  // Top-right to bottom-left
+      { type: 'DIAGONAL', positions: [0, 6, 12, 18, 24] },
+      { type: 'DIAGONAL', positions: [4, 8, 12, 16, 20] }
     ];
 
     for (const pattern of winningPatterns) {
@@ -92,7 +83,6 @@ class GameUtils {
         console.log(`🎯 WINNING ${pattern.type} PATTERN DETECTED!`);
         console.log(`🏆 Winning positions: [${pattern.positions.join(', ')}]`);
         
-        // Log the actual numbers in the winning pattern
         const winningNumbers = pattern.positions.map(pos => {
           const number = cardNumbers[pos];
           const row = Math.floor(pos / 5);
@@ -123,7 +113,6 @@ class GameUtils {
   }
 
   static getWinningPattern(markedPositions) {
-    // Always include the FREE space (position 12) in marked positions
     const effectiveMarked = [...new Set([...markedPositions, 12])];
 
     const winningPatterns = [
@@ -172,7 +161,6 @@ class GameUtils {
     return 'CUSTOM';
   }
 
-  // Helper method to validate a bingo card
   static validateBingoCard(card) {
     if (!Array.isArray(card) || card.length !== 5) return false;
     
@@ -181,11 +169,9 @@ class GameUtils {
       
       for (let j = 0; j < 5; j++) {
         const value = card[i][j];
-        // Center should be FREE
         if (i === 2 && j === 2) {
           if (value !== 'FREE') return false;
         } else {
-          // Other positions should be numbers
           if (typeof value !== 'number' || value < 1 || value > 75) return false;
         }
       }
@@ -194,12 +180,10 @@ class GameUtils {
     return true;
   }
 
-  // Helper method to get card position from row and column
   static getCardPosition(row, col) {
     return row * 5 + col;
   }
 
-  // Helper method to get row and column from position
   static getRowColFromPosition(position) {
     return {
       row: Math.floor(position / 5),
@@ -207,7 +191,6 @@ class GameUtils {
     };
   }
 
-  // NEW: Debug method to print card with marked positions
   static debugCard(cardNumbers, markedPositions, title = "Bingo Card") {
     console.log(`\n🎯 ${title}`);
     console.log('B   I   N   G   O');
