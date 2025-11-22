@@ -1,4 +1,4 @@
-// services/gameService.js - COMPLETE FIXED VERSION
+// services/gameService.js - COMPLETE FIXED VERSION WITH CONFLICT RESOLUTION
 const mongoose = require('mongoose');
 const Game = require('../models/Game');
 const User = require('../models/User');
@@ -10,6 +10,7 @@ class GameService {
   static activeIntervals = new Map();
   static isAutoCallingActive = false;
   static winnerDeclared = new Set();
+  static processingGames = new Set(); // Track games being processed
 
   // SINGLE GAME MANAGEMENT SYSTEM
   static async getMainGame() {
@@ -87,6 +88,7 @@ class GameService {
         
         this.stopAutoNumberCalling(game._id);
         this.winnerDeclared.delete(game._id.toString());
+        this.processingGames.delete(game._id.toString());
         
         game.status = 'WAITING';
         game.numbersCalled = [];
@@ -126,6 +128,7 @@ class GameService {
     }
 
     this.winnerDeclared.delete(gameId.toString());
+    this.processingGames.delete(gameId.toString());
 
     console.log(`🔢 Starting auto-number calling for game ${game.code}`);
 
@@ -187,6 +190,7 @@ class GameService {
     }
     this.activeIntervals.clear();
     this.winnerDeclared.clear();
+    this.processingGames.clear();
   }
 
   static async stopAutoNumberCalling(gameId) {
@@ -205,29 +209,23 @@ class GameService {
     }
   }
 
-  // ENHANCED CALL NUMBER WITH WIN DETECTION
+  // FIXED: CALL NUMBER WITHOUT TRANSACTION TO AVOID CONFLICTS
   static async callNumber(gameId) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
     try {
-      const game = await Game.findById(gameId).session(session);
+      const game = await Game.findById(gameId);
 
       if (!game || game.status !== 'ACTIVE') {
-        await session.abortTransaction();
         throw new Error('Game not active');
       }
 
       if (this.winnerDeclared.has(gameId.toString())) {
         console.log(`✅ Winner already declared for game ${game.code}, stopping calls`);
-        await session.abortTransaction();
         return;
       }
 
       const calledNumbers = game.numbersCalled || [];
       
       if (calledNumbers.length >= 75) {
-        await session.abortTransaction();
         console.log(`🎯 All numbers called for game ${game.code}, ending game`);
         await this.endGameDueToNoWinner(gameId);
         return;
@@ -239,11 +237,11 @@ class GameService {
         newNumber = Math.floor(Math.random() * 75) + 1;
         attempts++;
         if (attempts > 100) {
-          await session.abortTransaction();
           throw new Error('Could not find unused number after 100 attempts');
         }
       } while (calledNumbers.includes(newNumber));
 
+      // FIXED: Update without transaction to avoid conflicts
       calledNumbers.push(newNumber);
       game.numbersCalled = calledNumbers;
       game.updatedAt = new Date();
@@ -251,9 +249,10 @@ class GameService {
 
       console.log(`🔢 Called number: ${newNumber} for game ${game.code}. Total called: ${calledNumbers.length}`);
 
-      await this.checkForWinners(gameId, newNumber);
-
-      await session.commitTransaction();
+      // FIXED: Async win check without blocking
+      setTimeout(async () => {
+        await this.checkForWinners(gameId, newNumber);
+      }, 100);
 
       return { 
         number: newNumber, 
@@ -262,35 +261,34 @@ class GameService {
         totalCalled: calledNumbers.length 
       };
     } catch (error) {
-      await session.abortTransaction();
       console.error('❌ Call number error:', error);
       throw error;
-    } finally {
-      session.endSession();
     }
   }
 
-  // ENHANCED WIN DETECTION
+  // FIXED: ENHANCED WIN DETECTION WITH TRANSACTION RETRY LOGIC
   static async checkForWinners(gameId, lastCalledNumber) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    // Prevent multiple concurrent win checks for the same game
+    if (this.processingGames.has(gameId.toString())) {
+      console.log(`⏳ Win check already in progress for game ${gameId}, skipping...`);
+      return;
+    }
+
+    this.processingGames.add(gameId.toString());
 
     try {
-      const game = await Game.findById(gameId).session(session);
+      const game = await Game.findById(gameId);
       if (!game || game.status !== 'ACTIVE') {
-        await session.abortTransaction();
         return;
       }
 
       if (this.winnerDeclared.has(gameId.toString())) {
         console.log(`✅ Winner already declared for game ${game.code}, skipping check`);
-        await session.abortTransaction();
         return;
       }
 
-      const bingoCards = await BingoCard.find({ gameId }).session(session);
+      const bingoCards = await BingoCard.find({ gameId });
       let winnerFound = false;
-      let winningUserId = null;
       
       console.log(`\n🔍 ENHANCED WIN CHECK for game ${game.code}`);
       console.log(`📊 Total cards: ${bingoCards.length}, Numbers called: ${game.numbersCalled?.length || 0}`);
@@ -333,38 +331,13 @@ class GameService {
 
       if (potentialWinners.length > 0) {
         const winner = potentialWinners[0];
-        winningUserId = winner.userId;
+        const winningUserId = winner.userId;
         
         console.log(`🏁 DECLARING WINNER: ${winningUserId} with ${winner.patternType} pattern`);
         
-        winner.card.isWinner = true;
-        winner.card.markedPositions = [...new Set([...winner.card.markedPositions, ...winner.winningPositions])];
-        await winner.card.save();
-
-        game.status = 'FINISHED';
-        game.winnerId = winningUserId;
-        game.endedAt = new Date();
-        await game.save();
-
-        this.winnerDeclared.add(gameId.toString());
-
-        console.log(`🎊 Game ${game.code} ENDED - Winner: ${winningUserId}`);
-
-        const UserService = require('./userService');
-        await UserService.updateUserStats(winningUserId, true);
-
-        const losingPlayers = bingoCards.filter(c => c.userId.toString() !== winningUserId.toString());
-        for (const losingCard of losingPlayers) {
-          await UserService.updateUserStats(losingCard.userId, false);
-        }
-
+        // FIXED: Use retry logic for winner declaration
+        await this.declareWinnerWithRetry(gameId, winningUserId, winner.card, winner.winningPositions);
         winnerFound = true;
-        
-        this.stopAutoNumberCalling(gameId);
-        
-        setTimeout(() => {
-          this.autoRestartGame(gameId);
-        }, 5000);
       }
 
       if (!winnerFound) {
@@ -372,16 +345,103 @@ class GameService {
         
         if (game.numbersCalled.length >= 75) {
           console.log(`🎯 All 75 numbers called for game ${game.code}, ending game`);
-          await this.endGameDueToNoWinner(gameId, session);
+          await this.endGameDueToNoWinner(gameId);
         }
       }
 
-      await session.commitTransaction();
     } catch (error) {
-      await session.abortTransaction();
       console.error('❌ Enhanced check winners error:', error);
     } finally {
-      session.endSession();
+      // Always remove from processing set
+      this.processingGames.delete(gameId.toString());
+    }
+  }
+
+  // NEW: DECLARE WINNER WITH TRANSACTION RETRY LOGIC
+  static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions) {
+    const maxRetries = 3;
+    let retryCount = 0;
+
+    while (retryCount < maxRetries) {
+      const session = await mongoose.startSession();
+      
+      try {
+        session.startTransaction();
+        
+        console.log(`🔄 Attempt ${retryCount + 1} to declare winner for game ${gameId}`);
+
+        // Refresh game and card in transaction
+        const game = await Game.findById(gameId).session(session);
+        const card = await BingoCard.findById(winningCard._id).session(session);
+
+        if (!game || game.status !== 'ACTIVE') {
+          console.log('❌ Game no longer active, aborting winner declaration');
+          await session.abortTransaction();
+          return;
+        }
+
+        if (this.winnerDeclared.has(gameId.toString())) {
+          console.log('✅ Winner already declared, aborting');
+          await session.abortTransaction();
+          return;
+        }
+
+        // Update the winning card
+        card.isWinner = true;
+        card.markedPositions = [...new Set([...card.markedPositions, ...winningPositions])];
+        await card.save({ session });
+
+        // Update game state
+        game.status = 'FINISHED';
+        game.winnerId = winningUserId;
+        game.endedAt = new Date();
+        await game.save({ session });
+
+        // Mark winner as declared
+        this.winnerDeclared.add(gameId.toString());
+
+        await session.commitTransaction();
+        
+        console.log(`🎊 Game ${game.code} ENDED - Winner: ${winningUserId}`);
+
+        // Update user stats (outside transaction for better performance)
+        const UserService = require('./userService');
+        await UserService.updateUserStats(winningUserId, true);
+
+        // Update other players' stats
+        const bingoCards = await BingoCard.find({ gameId });
+        const losingPlayers = bingoCards.filter(c => c.userId.toString() !== winningUserId.toString());
+        for (const losingCard of losingPlayers) {
+          await UserService.updateUserStats(losingCard.userId, false);
+        }
+
+        // Stop auto-calling and schedule restart
+        this.stopAutoNumberCalling(gameId);
+        setTimeout(() => {
+          this.autoRestartGame(gameId);
+        }, 5000);
+
+        return; // Success - exit retry loop
+
+      } catch (error) {
+        await session.abortTransaction();
+        
+        if (error.code === 112) { // WriteConflict error code
+          retryCount++;
+          console.log(`🔄 Write conflict detected, retrying... (${retryCount}/${maxRetries})`);
+          
+          if (retryCount < maxRetries) {
+            // Wait before retry (exponential backoff)
+            await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
+            continue;
+          }
+        }
+        
+        console.error('❌ Failed to declare winner after retries:', error);
+        throw error;
+      } finally {
+        session.endSession();
+      }
     }
   }
 
@@ -434,12 +494,9 @@ class GameService {
     return { isWinner: false, patternType: null, winningPositions: [] };
   }
 
-  static async endGameDueToNoWinner(gameId, session = null) {
+  static async endGameDueToNoWinner(gameId) {
     try {
-      const game = session ? 
-        await Game.findById(gameId).session(session) : 
-        await Game.findById(gameId);
-        
+      const game = await Game.findById(gameId);
       if (!game || game.status !== 'ACTIVE') return;
 
       console.log(`🏁 Ending game ${game.code} - no winner after 75 numbers`);
@@ -450,6 +507,7 @@ class GameService {
       await game.save();
 
       this.winnerDeclared.add(gameId.toString());
+      this.processingGames.delete(gameId.toString());
       
       this.stopAutoNumberCalling(gameId);
       
@@ -472,7 +530,9 @@ class GameService {
         return;
       }
 
+      // Clear all tracking
       this.winnerDeclared.delete(gameId.toString());
+      this.processingGames.delete(gameId.toString());
 
       game.status = 'WAITING';
       game.numbersCalled = [];
