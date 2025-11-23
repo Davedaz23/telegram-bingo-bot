@@ -359,91 +359,102 @@ class GameService {
 
   // NEW: DECLARE WINNER WITH TRANSACTION RETRY LOGIC
   static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions) {
-    const maxRetries = 3;
-    let retryCount = 0;
+  const maxRetries = 3;
+  let retryCount = 0;
 
-    while (retryCount < maxRetries) {
-      const session = await mongoose.startSession();
+  while (retryCount < maxRetries) {
+    const session = await mongoose.startSession();
+    
+    try {
+      session.startTransaction();
       
-      try {
-        session.startTransaction();
-        
-        console.log(`🔄 Attempt ${retryCount + 1} to declare winner for game ${gameId}`);
+      console.log(`🔄 Attempt ${retryCount + 1} to declare winner for game ${gameId}`);
 
-        // Refresh game and card in transaction
-        const game = await Game.findById(gameId).session(session);
-        const card = await BingoCard.findById(winningCard._id).session(session);
+      // Refresh game and card in transaction
+      const game = await Game.findById(gameId).session(session);
+      const card = await BingoCard.findById(winningCard._id).session(session);
 
-        if (!game || game.status !== 'ACTIVE') {
-          console.log('❌ Game no longer active, aborting winner declaration');
-          await session.abortTransaction();
-          return;
-        }
-
-        if (this.winnerDeclared.has(gameId.toString())) {
-          console.log('✅ Winner already declared, aborting');
-          await session.abortTransaction();
-          return;
-        }
-
-        // Update the winning card
-        card.isWinner = true;
-        card.markedPositions = [...new Set([...card.markedPositions, ...winningPositions])];
-        await card.save({ session });
-
-        // Update game state
-        game.status = 'FINISHED';
-        game.winnerId = winningUserId;
-        game.endedAt = new Date();
-        await game.save({ session });
-
-        // Mark winner as declared
-        this.winnerDeclared.add(gameId.toString());
-
-        await session.commitTransaction();
-        
-        console.log(`🎊 Game ${game.code} ENDED - Winner: ${winningUserId}`);
-
-        // Update user stats (outside transaction for better performance)
-        const UserService = require('./userService');
-        await UserService.updateUserStats(winningUserId, true);
-
-        // Update other players' stats
-        const bingoCards = await BingoCard.find({ gameId });
-        const losingPlayers = bingoCards.filter(c => c.userId.toString() !== winningUserId.toString());
-        for (const losingCard of losingPlayers) {
-          await UserService.updateUserStats(losingCard.userId, false);
-        }
-
-        // Stop auto-calling and schedule restart
-        this.stopAutoNumberCalling(gameId);
-        setTimeout(() => {
-          this.autoRestartGame(gameId);
-        }, 5000);
-
-        return; // Success - exit retry loop
-
-      } catch (error) {
+      if (!game || game.status !== 'ACTIVE') {
+        console.log('❌ Game no longer active, aborting winner declaration');
         await session.abortTransaction();
-        
-        if (error.code === 112) { // WriteConflict error code
-          retryCount++;
-          console.log(`🔄 Write conflict detected, retrying... (${retryCount}/${maxRetries})`);
-          
-          if (retryCount < maxRetries) {
-            // Wait before retry (exponential backoff)
-            await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
-            continue;
-          }
-        }
-        
-        console.error('❌ Failed to declare winner after retries:', error);
-        throw error;
-      } finally {
-        session.endSession();
+        return;
       }
+
+      if (this.winnerDeclared.has(gameId.toString())) {
+        console.log('✅ Winner already declared, aborting');
+        await session.abortTransaction();
+        return;
+      }
+
+      // Update the winning card
+      card.isWinner = true;
+      card.markedPositions = [...new Set([...card.markedPositions, ...winningPositions])];
+      await card.save({ session });
+
+      // Update game state
+      game.status = 'FINISHED';
+      game.winnerId = winningUserId;
+      game.endedAt = new Date();
+      await game.save({ session });
+
+      // Calculate and distribute winnings
+      const totalPlayers = game.currentPlayers;
+      const entryFee = 10; // Default entry fee
+      const totalPot = totalPlayers * entryFee;
+      const platformFee = totalPot * 0.1; // 10% platform fee
+      const winnerPrize = totalPot - platformFee;
+
+      // Add winnings to winner's wallet
+      const WalletService = require('./walletService');
+      await WalletService.addWinning(winningUserId, gameId, winnerPrize, `Winner prize for game ${game.code}`);
+
+      // Mark winner as declared
+      this.winnerDeclared.add(gameId.toString());
+
+      await session.commitTransaction();
+      
+      console.log(`🎊 Game ${game.code} ENDED - Winner: ${winningUserId} won $${winnerPrize}`);
+
+      // Update user stats (outside transaction for better performance)
+      const UserService = require('./userService');
+      await UserService.updateUserStats(winningUserId, true);
+
+      // Update other players' stats
+      const bingoCards = await BingoCard.find({ gameId });
+      const losingPlayers = bingoCards.filter(c => c.userId.toString() !== winningUserId.toString());
+      for (const losingCard of losingPlayers) {
+        await UserService.updateUserStats(losingCard.userId, false);
+      }
+
+      // Stop auto-calling and schedule restart
+      this.stopAutoNumberCalling(gameId);
+      setTimeout(() => {
+        this.autoRestartGame(gameId);
+      }, 5000);
+
+      return; // Success - exit retry loop
+
+    } catch (error) {
+      await session.abortTransaction();
+      
+      if (error.code === 112) { // WriteConflict error code
+        retryCount++;
+        console.log(`🔄 Write conflict detected, retrying... (${retryCount}/${maxRetries})`);
+        
+        if (retryCount < maxRetries) {
+          // Wait before retry (exponential backoff)
+          await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
+          continue;
+        }
+      }
+      
+      console.error('❌ Failed to declare winner after retries:', error);
+      throw error;
+    } finally {
+      session.endSession();
     }
   }
+}
 
   static checkEnhancedWinCondition(cardNumbers, markedPositions) {
     if (!cardNumbers || !markedPositions) {
@@ -676,7 +687,43 @@ class GameService {
       session.endSession();
     }
   }
+static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
+  try {
+    // Check if user has sufficient balance
+    const WalletService = require('./walletService');
+    const balance = await WalletService.getBalance(userId);
+    
+    if (balance < entryFee) {
+      throw new Error(`Insufficient balance. Required: $${entryFee}, Available: $${balance}`);
+    }
+
+    // Deduct entry fee
+    await WalletService.deductGameEntry(userId, null, entryFee, `Entry fee for game ${gameCode}`);
+
+    // Join the game
+    const game = await this.joinGame(gameCode, userId);
+
+    // Update the transaction with game ID
+    await Transaction.findOneAndUpdate(
+      { userId, gameId: null, type: 'GAME_ENTRY', status: 'COMPLETED' },
+      { gameId: game._id },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return game;
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Join game with wallet error:', error);
+    throw error;
+  } finally {
+    session.endSession();
+  }
+}
   static async startGame(gameId) {
     const session = await mongoose.startSession();
     session.startTransaction();
