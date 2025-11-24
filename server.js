@@ -7,11 +7,14 @@ require('dotenv').config();
 
 const authRoutes = require('./src/routes/auth');
 const gameRoutes = require('./src/routes/games');
-const walletRoutes = require('./src/routes/wallet'); // ADD THIS
+const walletRoutes = require('./src/routes/wallet');
+
 const BotController = require('./src/controllers/botController');
 
 // Import GameService - make sure the path is correct
 const GameService = require('./src/services/gameService');
+
+// Add this route (after your other routes)
 
 const app = express();
 
@@ -47,14 +50,13 @@ app.use(cors({
 }));
 
 // Middleware
-app.use(express.json({ limit: '10mb' })); // ADD limit for receipt images
+app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/games', gameRoutes);
-app.use('/api/wallet', walletRoutes); // ADD THIS
-
+app.use('/api/wallet', walletRoutes);
 // ✅ MODIFIED: Initialize auto-game service AFTER server starts
 const initializeGameService = () => {
   try {
@@ -72,23 +74,16 @@ const initializeGameService = () => {
   }
 };
 
-// Health check - ENHANCED with wallet status
+// Health check
 app.get('/health', async (req, res) => {
   try {
     // Simple MongoDB health check
     await mongoose.connection.db.admin().ping();
     
-    // Check if wallet models are available
-    const walletModels = {
-      Wallet: mongoose.models.Wallet !== undefined,
-      Transaction: mongoose.models.Transaction !== undefined
-    };
-    
     res.json({ 
       status: 'OK',
       timestamp: new Date().toISOString(),
       database: 'MongoDB Connected',
-      walletSystem: walletModels,
       uptime: process.uptime(),
       cors: {
         allowedOrigins: [
@@ -108,29 +103,22 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Root route - UPDATED with wallet info
+// Root route
 app.get('/', (req, res) => {
   res.json({
     message: 'Bingo API Server',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
-    features: {
-      authentication: true,
-      games: true,
-      wallet: true, // ADD THIS
-      telegramBot: !!process.env.BOT_TOKEN
-    },
     frontend: 'https://bingominiapp.vercel.app',
     endpoints: {
       auth: '/api/auth/telegram',
       games: '/api/games',
-      wallet: '/api/wallet', // ADD THIS
       health: '/health'
     }
   });
 });
 
-// 404 handler - UPDATED with wallet endpoints
+// 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
@@ -139,8 +127,7 @@ app.use('*', (req, res) => {
       root: '/',
       health: '/health',
       auth: '/api/auth/telegram',
-      games: '/api/games/*',
-      wallet: '/api/wallet/*' // ADD THIS
+      games: '/api/games/*'
     }
   });
 });
@@ -167,14 +154,6 @@ app.use((err, req, res, next) => {
     });
   }
   
-  // Wallet-specific errors
-  if (err.message.includes('balance') || err.message.includes('wallet')) {
-    return res.status(400).json({
-      success: false,
-      error: err.message
-    });
-  }
-  
   res.status(500).json({
     success: false,
     error: process.env.NODE_ENV === 'production' ? 'Something went wrong!' : err.message
@@ -190,7 +169,6 @@ const server = app.listen(PORT, () => {
   console.log(`- https://bingominiapp.vercel.app (Production)`);
   console.log(`- http://localhost:3001 (Development)`);
   console.log(`- http://localhost:3000 (Development)`);
-  console.log(`💰 Wallet system: ENABLED`); // ADD THIS
   
   // Initialize game service after server is running
   setTimeout(() => {
