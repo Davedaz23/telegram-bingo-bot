@@ -1,25 +1,41 @@
 const express = require('express');
 const router = express.Router();
 const WalletService = require('../services/walletService');
-const auth = require('../middleware/auth');
 
-// Get wallet balance
-router.get('/balance', auth, async (req, res) => {
+// Get wallet balance - userId in query params
+router.get('/balance', async (req, res) => {
   try {
-    const balance = await WalletService.getBalance(req.user._id);
+    const { userId } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required in query parameters',
+      });
+    }
+
+    const balance = await WalletService.getBalance(userId);
     res.json({ success: true, balance });
   } catch (error) {
+    console.error('Get balance error:', error);
     res.status(400).json({ success: false, error: error.message });
   }
 });
 
-// Create deposit request
-router.post('/deposit', auth, async (req, res) => {
+// Create deposit request - userId in request body
+router.post('/deposit', async (req, res) => {
   try {
-    const { amount, receiptImage, reference, description } = req.body;
+    const { userId, amount, receiptImage, reference, description } = req.body;
     
+    if (!userId || !amount || !receiptImage || !reference) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId, amount, receiptImage, and reference are required',
+      });
+    }
+
     const transaction = await WalletService.createDepositRequest(
-      req.user._id,
+      userId,
       amount,
       receiptImage,
       reference,
@@ -28,55 +44,165 @@ router.post('/deposit', auth, async (req, res) => {
     
     res.json({ success: true, transaction });
   } catch (error) {
+    console.error('Create deposit error:', error);
     res.status(400).json({ success: false, error: error.message });
   }
 });
 
-// Get transaction history
-router.get('/transactions', auth, async (req, res) => {
+// Get transaction history - userId in query params
+router.get('/transactions', async (req, res) => {
   try {
-    const { limit = 10, page = 1 } = req.query;
+    const { userId, limit = 10, page = 1 } = req.query;
     
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required in query parameters',
+      });
+    }
+
     const history = await WalletService.getTransactionHistory(
-      req.user._id,
+      userId,
       parseInt(limit),
       parseInt(page)
     );
     
     res.json({ success: true, ...history });
   } catch (error) {
+    console.error('Get transactions error:', error);
     res.status(400).json({ success: false, error: error.message });
   }
 });
 
-// Admin route - Get pending deposits
-router.get('/admin/pending-deposits', auth, async (req, res) => {
+// Admin route - Get pending deposits - userId in query params
+router.get('/admin/pending-deposits', async (req, res) => {
   try {
-    // Check if user is admin (you'll need to implement this check)
-    // if (!req.user.isAdmin) {
+    const { userId } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required in query parameters',
+      });
+    }
+
+    // Optional: Add admin check here if needed
+    // const isAdmin = await checkIfAdmin(userId);
+    // if (!isAdmin) {
     //   return res.status(403).json({ success: false, error: 'Access denied' });
     // }
     
     const pendingDeposits = await WalletService.getPendingDeposits();
     res.json({ success: true, deposits: pendingDeposits });
   } catch (error) {
+    console.error('Get pending deposits error:', error);
     res.status(400).json({ success: false, error: error.message });
   }
 });
 
-// Admin route - Approve deposit
-router.post('/admin/approve-deposit/:transactionId', auth, async (req, res) => {
+// Admin route - Approve deposit - userId in request body
+router.post('/admin/approve-deposit/:transactionId', async (req, res) => {
   try {
-    // Check if user is admin
-    // if (!req.user.isAdmin) {
+    const { transactionId } = req.params;
+    const { userId } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required in request body',
+      });
+    }
+
+    // Optional: Add admin check here if needed
+    // const isAdmin = await checkIfAdmin(userId);
+    // if (!isAdmin) {
     //   return res.status(403).json({ success: false, error: 'Access denied' });
     // }
     
-    const { transactionId } = req.params;
-    
-    const result = await WalletService.approveDeposit(transactionId, req.user._id);
+    const result = await WalletService.approveDeposit(transactionId, userId);
     res.json({ success: true, ...result });
   } catch (error) {
+    console.error('Approve deposit error:', error);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Join game with wallet payment
+router.post('/join-with-wallet', async (req, res) => {
+  try {
+    const { userId, gameCode, entryFee = 10 } = req.body;
+    
+    if (!userId || !gameCode) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId and gameCode are required',
+      });
+    }
+
+    const result = await WalletService.deductGameEntry(userId, gameCode, entryFee);
+    
+    res.json({ 
+      success: true, 
+      message: 'Successfully joined game with wallet payment',
+      ...result 
+    });
+  } catch (error) {
+    console.error('Join with wallet error:', error);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Add winning to wallet
+router.post('/add-winning', async (req, res) => {
+  try {
+    const { userId, gameId, amount, description } = req.body;
+    
+    if (!userId || !gameId || !amount) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId, gameId, and amount are required',
+      });
+    }
+
+    const result = await WalletService.addWinning(
+      userId, 
+      gameId, 
+      amount, 
+      description || 'Game winning'
+    );
+    
+    res.json({ 
+      success: true, 
+      message: 'Winning added to wallet',
+      ...result 
+    });
+  } catch (error) {
+    console.error('Add winning error:', error);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Initialize wallet for user
+router.post('/initialize', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required',
+      });
+    }
+
+    const wallet = await WalletService.initializeWallet(userId);
+    
+    res.json({ 
+      success: true, 
+      message: 'Wallet initialized successfully',
+      wallet 
+    });
+  } catch (error) {
+    console.error('Initialize wallet error:', error);
     res.status(400).json({ success: false, error: error.message });
   }
 });
