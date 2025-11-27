@@ -1,12 +1,13 @@
+// models/User.js
 const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema({
   telegramId: {
     type: String,
     required: true,
-    unique: true  // This automatically creates a unique index
+    unique: true  // This creates one index - NO additional index definitions
   },
-  username: String,  // REMOVED sparse: true - let it be optional naturally
+  username: String,
   firstName: String,
   lastName: String,
   languageCode: String,
@@ -28,10 +29,22 @@ const userSchema = new mongoose.Schema({
     type: Number,
     default: 0,
     min: 0
+  },
+  walletBalance: {
+    type: Number,
+    default: 100,
+    min: 0
+  },
+  isActive: {
+    type: Boolean,
+    default: true
   }
 }, {
   timestamps: true
 });
 
+// ⚠️ REMOVE ANY ADDITIONAL INDEX DEFINITIONS LIKE THIS:
+// userSchema.index({ telegramId: 1 }); // DELETE THIS LINE IF IT EXISTS
+// userSchema.index({ userId: 1 }); // DELETE THIS LINE IF IT EXISTS
 
 module.exports = mongoose.model('User', userSchema);

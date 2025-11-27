@@ -454,9 +454,6 @@ router.get('/:id/stats', async (req, res) => {
   }
 });
 
-// Update game settings - REMOVED since no hosts can update settings
-// router.put('/:id/settings', async (req, res) => {
-//   // This endpoint is no longer needed
-// });
+
 
 module.exports = router;
