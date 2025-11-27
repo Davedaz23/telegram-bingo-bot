@@ -11,6 +11,7 @@ class GameService {
   static isAutoCallingActive = false;
   static winnerDeclared = new Set();
   static processingGames = new Set(); // Track games being processed
+  static MIN_PLAYERS_TO_START = 2;
 
   // SINGLE GAME MANAGEMENT SYSTEM
   static async getMainGame() {
@@ -531,7 +532,7 @@ class GameService {
     }
   }
 
-  static async autoRestartGame(gameId) {
+ static async autoRestartGame(gameId) {
     try {
       console.log(`🔄 Auto-restarting game ${gameId}...`);
       
@@ -571,10 +572,13 @@ class GameService {
       
       console.log(`✅ Game ${game.code} restarted with ${players.length} players`);
       
-      if (players.length > 0) {
+      // MODIFIED: Only auto-start if we have enough players
+      if (players.length >= this.MIN_PLAYERS_TO_START) {
         setTimeout(() => {
           this.startGame(gameId);
         }, 3000);
+      } else {
+        console.log(`⏳ Waiting for more players to join before starting: ${players.length}/${this.MIN_PLAYERS_TO_START}`);
       }
       
     } catch (error) {
@@ -603,7 +607,7 @@ class GameService {
     }
   }
 
-  static async joinGame(gameCode, userId) {
+ static async joinGame(gameCode, userId) {
     const session = await mongoose.startSession();
     session.startTransaction();
 
@@ -662,9 +666,12 @@ class GameService {
 
         console.log(`✅ User ${userId} joined as ${isLateJoiner ? 'LATE PLAYER' : 'PLAYER'}. Total players: ${game.currentPlayers}`);
 
-        if (game.status === 'WAITING' && game.currentPlayers >= 1) {
+        // MODIFIED: Only start game if we have at least 2 players
+        if (game.status === 'WAITING' && game.currentPlayers >= this.MIN_PLAYERS_TO_START) {
           console.log(`🚀 Auto-starting game ${game.code} with ${game.currentPlayers} player(s)`);
           await this.startGame(game._id);
+        } else if (game.status === 'WAITING') {
+          console.log(`⏳ Waiting for more players: ${game.currentPlayers}/${this.MIN_PLAYERS_TO_START} players joined`);
         }
 
         return this.getGameWithDetails(game._id);
@@ -724,7 +731,7 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
     session.endSession();
   }
 }
-  static async startGame(gameId) {
+ static async startGame(gameId) {
     const session = await mongoose.startSession();
     session.startTransaction();
 
@@ -737,6 +744,11 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
 
       if (game.status !== 'WAITING') {
         throw new Error('Game already started');
+      }
+
+      // NEW: Check minimum players requirement
+      if (game.currentPlayers < this.MIN_PLAYERS_TO_START) {
+        throw new Error(`Need at least ${this.MIN_PLAYERS_TO_START} players to start the game. Current: ${game.currentPlayers}`);
       }
 
       game.status = 'ACTIVE';
@@ -758,6 +770,8 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
       session.endSession();
     }
   }
+
+
 
   static formatGameForFrontend(game) {
     if (!game) return null;
@@ -781,12 +795,18 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
       gameObj.spectators = spectators.length;
       gameObj.totalParticipants = gameObj.players.length;
       
+      // NEW: Add minimum players info
+      gameObj.minPlayersRequired = this.MIN_PLAYERS_TO_START;
+      gameObj.canStart = gameObj.status === 'WAITING' && gameObj.activePlayers >= this.MIN_PLAYERS_TO_START;
+      gameObj.playersNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - gameObj.activePlayers);
+      
       gameObj.acceptsLateJoiners = gameObj.status === 'ACTIVE' && gameObj.currentPlayers < gameObj.maxPlayers;
       gameObj.numbersCalledCount = gameObj.numbersCalled?.length || 0;
     }
 
     return gameObj;
   }
+
 
   static startAutoGameService() {
     if (!this.activeIntervals) {
@@ -1213,6 +1233,10 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
       }
     };
   }
+
+  //region defar
+
+  //endregion
 }
 
 // Add cleanup on process termination
