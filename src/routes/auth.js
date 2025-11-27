@@ -212,6 +212,43 @@ router.get('/stats/:userId', async (req, res) => {
     });
   }
 });
+router.get('/profile/:telegramId', async (req, res) => {
+  try {
+    const { telegramId } = req.params;
+    
+    console.log(`🔍 Fetching profile for Telegram ID: ${telegramId}`);
+    
+    const user = await UserService.findByTelegramId(telegramId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        gamesPlayed: user.gamesPlayed || 0,
+        gamesWon: user.gamesWon || 0,
+        totalScore: user.totalScore || 0,
+        createdAt: user.createdAt
+      }
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
 // Health check for auth service
 router.get('/health', (req, res) => {
