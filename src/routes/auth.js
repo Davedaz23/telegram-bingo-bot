@@ -9,7 +9,6 @@ function validateTelegramInitData(initData) {
   try {
     const urlParams = new URLSearchParams(initData);
     
-    // Extract required parameters
     const hash = urlParams.get('hash');
     const authDate = urlParams.get('auth_date');
     const userJson = urlParams.get('user');
@@ -18,7 +17,6 @@ function validateTelegramInitData(initData) {
       return { isValid: false, error: 'Missing required parameters' };
     }
     
-    // Check if auth_date is not too old (e.g., within 1 day)
     const authDateTimestamp = parseInt(authDate) * 1000;
     const now = Date.now();
     const oneDayAgo = now - (24 * 60 * 60 * 1000);
@@ -27,7 +25,6 @@ function validateTelegramInitData(initData) {
       return { isValid: false, error: 'Authentication data expired' };
     }
     
-    // Parse user data
     const userData = JSON.parse(userJson);
     
     return { 
@@ -52,9 +49,7 @@ function generateDataCheckString(initData) {
     }
   }
   
-  // Sort parameters alphabetically
   params.sort();
-  
   return params.join('\n');
 }
 
@@ -69,255 +64,6 @@ function validateTelegramHash(initData, botToken) {
   
   return calculatedHash === receivedHash;
 }
-
-// Telegram WebApp authentication
-router.post('/telegram', async (req, res) => {
-  try {
-    const { initData } = req.body;
-    
-    let userData;
-    
-    // Development mode - allow test users
-    if (initData === 'development' || !initData) {
-      userData = {
-        id: Math.floor(Math.random() * 1000000),
-        first_name: 'Test User',
-        username: 'test_user_' + Math.floor(Math.random() * 1000),
-        language_code: 'en',
-        is_bot: false
-      };
-      console.log('🔧 Development mode - using test user:', userData.username);
-    } 
-    // Production mode - validate Telegram WebApp data
-    else {
-      // Step 1: Basic validation
-      const validation = validateTelegramInitData(initData);
-      if (!validation.isValid) {
-        return res.status(401).json({
-          success: false,
-          error: `Invalid initData: ${validation.error}`
-        });
-      }
-      
-      // Step 2: Cryptographic validation
-      if (!process.env.BOT_TOKEN) {
-        console.warn('⚠️ BOT_TOKEN not set, skipping hash validation');
-      } else {
-        const isValidHash = validateTelegramHash(initData, process.env.BOT_TOKEN);
-        if (!isValidHash) {
-          return res.status(401).json({
-            success: false,
-            error: 'Invalid Telegram hash'
-          });
-        }
-      }
-      
-      userData = validation.userData;
-      console.log('🔐 Production auth for:', userData.username || userData.first_name);
-    }
-    
-    // Find or create user in database
-    const user = await UserService.findOrCreateUser(userData);
-    
-    // Generate JWT token with user ID from database
-    const token = JWTUtils.generateUserToken({
-      userId: user._id.toString(),
-      telegramId: user.telegramId,
-      username: user.username
-    });
-
-    res.json({
-      success: true,
-      token,
-      user: {
-        id: user._id.toString(),
-        telegramId: user.telegramId,
-        username: user.username,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        gamesPlayed: user.gamesPlayed,
-        gamesWon: user.gamesWon,
-        totalScore: user.totalScore
-      },
-    });
-    
-  } catch (error) {
-    console.error('Auth error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Authentication failed: ' + error.message
-    });
-  }
-});
-
-// Get user profile
-router.get('/profile/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    const user = await UserService.findByTelegramId(userId);
-    
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        error: 'User not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      user: {
-        id: user._id.toString(),
-        telegramId: user.telegramId,
-        username: user.username,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        gamesPlayed: user.gamesPlayed,
-        gamesWon: user.gamesWon,
-        totalScore: user.totalScore,
-        createdAt: user.createdAt
-      }
-    });
-  } catch (error) {
-    console.error('Get profile error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Get user stats
-router.get('/stats/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    const stats = await UserService.getUserStats(userId);
-    
-    res.json({
-      success: true,
-      stats: {
-        gamesPlayed: stats?.gamesPlayed || 0,
-        gamesWon: stats?.gamesWon || 0,
-        totalScore: stats?.totalScore || 0,
-        winRate: stats?.gamesPlayed > 0 ? 
-          ((stats.gamesWon / stats.gamesPlayed) * 100).toFixed(1) : 0
-      }
-    });
-  } catch (error) {
-    console.error('Get stats error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-router.get('/profile/:telegramId', async (req, res) => {
-  try {
-    const { telegramId } = req.params;
-    
-    console.log(`🔍 Fetching profile for Telegram ID: ${telegramId}`);
-    
-    const user = await UserService.findByTelegramId(telegramId);
-    
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        error: 'User not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      user: {
-        id: user._id.toString(),
-        telegramId: user.telegramId,
-        username: user.username,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        gamesPlayed: user.gamesPlayed || 0,
-        gamesWon: user.gamesWon || 0,
-        totalScore: user.totalScore || 0,
-        createdAt: user.createdAt
-      }
-    });
-  } catch (error) {
-    console.error('Get profile error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Health check for auth service
-router.get('/health', (req, res) => {
-  res.json({
-    success: true,
-    service: 'Authentication Service',
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    features: {
-      telegramAuth: true,
-      jwtTokens: true,
-      userManagement: true
-    }
-  });
-});
-router.post('/verify', async (req, res) => {
-  try {
-    const { initData } = req.body;
-    
-    if (!initData) {
-      return res.status(400).json({
-        success: false,
-        error: 'No init data provided'
-      });
-    }
-
-    // In a production environment, you should verify the initData signature
-    // For now, we'll parse the initData to get user information
-    const userData = parseInitData(initData);
-    
-    if (!userData || !userData.id) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid init data'
-      });
-    }
-
-    // Get or create user in MongoDB
-    const user = await UserMappingService.getOrCreateUser(userData);
-    
-    if (!user) {
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to create user'
-      });
-    }
-
-    console.log(`✅ User verified: ${user.telegramId} -> ${user._id}`);
-
-    res.json({
-      success: true,
-      user: {
-        _id: user._id,
-        telegramId: user.telegramId,
-        username: user.username,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        isActive: user.isActive
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Auth verification error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Authentication failed'
-    });
-  }
-});
 
 // Helper function to parse Telegram initData
 function parseInitData(initData) {
@@ -335,5 +81,414 @@ function parseInitData(initData) {
     return null;
   }
 }
+
+// Middleware to ensure user exists
+async function ensureUserExists(req, res, next) {
+  try {
+    const telegramId = req.params.userId || req.params.telegramId || req.query.userId;
+    
+    if (!telegramId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Telegram ID is required'
+      });
+    }
+
+    console.log(`🔍 Ensuring user exists: ${telegramId}`);
+    
+    const user = await UserService.createUserIfNotExists(telegramId);
+    
+    if (!user) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to create user'
+      });
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    console.error('❌ Error in ensureUserExists:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+}
+
+// Play endpoint - creates user if doesn't exist
+router.post('/play', async (req, res) => {
+  try {
+    const { telegramId, initData } = req.body;
+
+    let userData = {};
+    let user;
+
+    if (initData && initData !== 'development') {
+      const validation = validateTelegramInitData(initData);
+      if (validation.isValid) {
+        userData = validation.userData;
+        user = await UserService.findOrCreateUser(userData);
+      } else {
+        user = await UserService.createUserIfNotExists(telegramId);
+      }
+    } else {
+      if (initData === 'development') {
+        userData = {
+          id: telegramId,
+          first_name: 'Test User',
+          username: 'test_user_' + Math.floor(Math.random() * 1000),
+          language_code: 'en',
+          is_bot: false
+        };
+        user = await UserService.findOrCreateUser(userData);
+      } else {
+        user = await UserService.createUserIfNotExists(telegramId);
+      }
+    }
+
+    const token = JWTUtils.generateUserToken({
+      userId: user._id.toString(),
+      telegramId: user.telegramId,
+      username: user.username
+    });
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id.toString(),
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        gamesPlayed: user.gamesPlayed || 0,
+        gamesWon: user.gamesWon || 0,
+        totalScore: user.totalScore || 0,
+        walletBalance: user.walletBalance || 100
+      },
+      message: 'User ready to play'
+    });
+
+  } catch (error) {
+    console.error('❌ Play endpoint error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to start game: ' + error.message
+    });
+  }
+});
+
+// Telegram WebApp authentication
+router.post('/telegram', async (req, res) => {
+  try {
+    const { initData } = req.body;
+    
+    let userData;
+    
+    if (initData === 'development' || !initData) {
+      userData = {
+        id: Math.floor(Math.random() * 1000000),
+        first_name: 'Test User',
+        username: 'test_user_' + Math.floor(Math.random() * 1000),
+        language_code: 'en',
+        is_bot: false
+      };
+      console.log('🔧 Development mode - using test user:', userData.username);
+    } else {
+      const validation = validateTelegramInitData(initData);
+      if (!validation.isValid) {
+        return res.status(401).json({
+          success: false,
+          error: `Invalid initData: ${validation.error}`
+        });
+      }
+      
+      if (!process.env.BOT_TOKEN) {
+        console.warn('⚠️ BOT_TOKEN not set, skipping hash validation');
+      } else {
+        const isValidHash = validateTelegramHash(initData, process.env.BOT_TOKEN);
+        if (!isValidHash) {
+          return res.status(401).json({
+            success: false,
+            error: 'Invalid Telegram hash'
+          });
+        }
+      }
+      
+      userData = validation.userData;
+      console.log('🔐 Production auth for:', userData.username || userData.first_name);
+    }
+    
+    const user = await UserService.findOrCreateUser(userData);
+    
+    const token = JWTUtils.generateUserToken({
+      userId: user._id.toString(),
+      telegramId: user.telegramId,
+      username: user.username
+    });
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id.toString(),
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        gamesPlayed: user.gamesPlayed || 0,
+        gamesWon: user.gamesWon || 0,
+        totalScore: user.totalScore || 0,
+        walletBalance: user.walletBalance || 100
+      }
+    });
+    
+  } catch (error) {
+    console.error('Auth error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Authentication failed: ' + error.message
+    });
+  }
+});
+
+// Get user profile with auto-creation
+router.get('/profile/:userId', ensureUserExists, async (req, res) => {
+  try {
+    const user = req.user;
+
+    res.json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        gamesPlayed: user.gamesPlayed || 0,
+        gamesWon: user.gamesWon || 0,
+        totalScore: user.totalScore || 0,
+        walletBalance: user.walletBalance || 100,
+        createdAt: user.createdAt
+      }
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get user profile by telegramId with auto-creation
+router.get('/profile/telegram/:telegramId', ensureUserExists, async (req, res) => {
+  try {
+    const user = req.user;
+
+    res.json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        gamesPlayed: user.gamesPlayed || 0,
+        gamesWon: user.gamesWon || 0,
+        totalScore: user.totalScore || 0,
+        walletBalance: user.walletBalance || 100,
+        createdAt: user.createdAt
+      }
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get user stats with auto-creation
+router.get('/stats/:userId', ensureUserExists, async (req, res) => {
+  try {
+    const user = req.user;
+    
+    const winRate = user.gamesPlayed > 0 ? 
+      ((user.gamesWon / user.gamesPlayed) * 100).toFixed(1) : 0;
+
+    res.json({
+      success: true,
+      stats: {
+        gamesPlayed: user.gamesPlayed || 0,
+        gamesWon: user.gamesWon || 0,
+        totalScore: user.totalScore || 0,
+        winRate: parseFloat(winRate),
+        walletBalance: user.walletBalance || 100
+      }
+    });
+  } catch (error) {
+    console.error('Get stats error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Quick auth endpoint for frontend
+router.post('/quick-auth', async (req, res) => {
+  try {
+    const { telegramId } = req.body;
+
+    if (!telegramId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Telegram ID is required'
+      });
+    }
+
+    console.log(`⚡ Quick auth for: ${telegramId}`);
+    
+    const user = await UserService.createUserIfNotExists(telegramId);
+
+    const token = JWTUtils.generateUserToken({
+      userId: user._id.toString(),
+      telegramId: user.telegramId,
+      username: user.username
+    });
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id.toString(),
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        walletBalance: user.walletBalance || 100
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Quick auth error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Quick authentication failed: ' + error.message
+    });
+  }
+});
+
+// Verify endpoint
+router.post('/verify', async (req, res) => {
+  try {
+    const { initData } = req.body;
+    
+    if (!initData) {
+      return res.status(400).json({
+        success: false,
+        error: 'No init data provided'
+      });
+    }
+
+    const userData = parseInitData(initData);
+    
+    if (!userData || !userData.id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid init data'
+      });
+    }
+
+    const user = await UserService.findOrCreateUser(userData);
+    
+    if (!user) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to create user'
+      });
+    }
+
+    console.log(`✅ User verified: ${user.telegramId} -> ${user._id}`);
+
+    const token = JWTUtils.generateUserToken({
+      userId: user._id.toString(),
+      telegramId: user.telegramId,
+      username: user.username
+    });
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id.toString(),
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        gamesPlayed: user.gamesPlayed || 0,
+        gamesWon: user.gamesWon || 0,
+        totalScore: user.totalScore || 0,
+        walletBalance: user.walletBalance || 100,
+        isActive: user.isActive
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Auth verification error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Authentication failed'
+    });
+  }
+});
+
+// Health check for auth service
+router.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    service: 'Authentication Service',
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    features: {
+      telegramAuth: true,
+      jwtTokens: true,
+      userManagement: true,
+      autoUserCreation: true,
+      quickAuth: true
+    }
+  });
+});
+
+// Get user by Telegram ID (legacy support)
+router.get('/user/:telegramId', ensureUserExists, async (req, res) => {
+  try {
+    const user = req.user;
+
+    res.json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        gamesPlayed: user.gamesPlayed || 0,
+        gamesWon: user.gamesWon || 0,
+        totalScore: user.totalScore || 0,
+        walletBalance: user.walletBalance || 100,
+        createdAt: user.createdAt
+      }
+    });
+  } catch (error) {
+    console.error('Get user error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
 module.exports = router;
