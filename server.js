@@ -1,4 +1,4 @@
-// src/app.js - UPDATED VERSION
+// src/app.js
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -10,7 +10,11 @@ const gameRoutes = require('./src/routes/games');
 const walletRoutes = require('./src/routes/wallet');
 
 const BotController = require('./src/controllers/botController');
+
+// Import GameService - make sure the path is correct
 const GameService = require('./src/services/gameService');
+
+// Add this route (after your other routes)
 
 const app = express();
 
@@ -19,44 +23,26 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected successfully'))
   .catch(err => console.error('MongoDB connection error:', err));
 
-// ✅ IMPROVED: Bot initialization with conflict handling
+// ✅ ADD THIS: Initialize and launch the bot
 let botController;
-const initializeBot = () => {
-  try {
-    if (process.env.BOT_TOKEN) {
-      // Check if we're in Render.com or similar environment
-      const isRender = process.env.RENDER || process.env.NODE_ENV === 'production';
-      
-      if (isRender) {
-        console.log('🌐 Production environment detected - using webhook mode');
-        // In production, we'll set up webhooks instead of polling
-        botController = new BotController(process.env.BOT_TOKEN);
-        
-        // Don't launch immediately in production - set up webhook endpoint first
-        app.use('/api/bot', require('./src/routes/bot')(botController));
-        
-      } else {
-        console.log('💻 Development environment - using polling mode');
-        botController = new BotController(process.env.BOT_TOKEN);
-        botController.launch();
-      }
-      
-      console.log('🤖 Telegram Bot initialized successfully');
-    } else {
-      console.warn('⚠️ BOT_TOKEN not found - Telegram bot disabled');
-    }
-  } catch (error) {
-    console.error('❌ Failed to initialize Telegram bot:', error.message);
-    // Don't crash the server if bot fails
+try {
+  if (process.env.BOT_TOKEN) {
+    botController = new BotController(process.env.BOT_TOKEN);
+    botController.launch();
+    console.log('🤖 Telegram Bot initialized successfully');
+  } else {
+    console.warn('⚠️ BOT_TOKEN not found - Telegram bot disabled');
   }
-};
+} catch (error) {
+  console.error('❌ Failed to initialize Telegram bot:', error);
+}
 
-// CORS configuration
+// CORS configuration - UPDATED with your live frontend URL
 app.use(cors({
   origin: [
-    'https://bingominiapp.vercel.app',
-    'http://localhost:3001',
-    'http://localhost:3000'
+    'https://bingominiapp.vercel.app', // Your live frontend
+    'http://localhost:3001', // Development
+    'http://localhost:3000'  // Development
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
@@ -71,10 +57,10 @@ app.use(express.static(path.join(__dirname, '../public')));
 app.use('/api/auth', authRoutes);
 app.use('/api/games', gameRoutes);
 app.use('/api/wallet', walletRoutes);
-
-// Initialize game service
+// ✅ MODIFIED: Initialize auto-game service AFTER server starts
 const initializeGameService = () => {
   try {
+    // Check if GameService and the method exist
     if (GameService && typeof GameService.startAutoGameService === 'function') {
       GameService.startAutoGameService();
       console.log('🎮 Auto-game service initialized successfully');
@@ -83,20 +69,29 @@ const initializeGameService = () => {
     }
   } catch (error) {
     console.error('❌ Failed to initialize auto-game service:', error);
+    console.error('Error details:', error.message);
+    console.error('Error stack:', error.stack);
   }
 };
 
 // Health check
 app.get('/health', async (req, res) => {
   try {
+    // Simple MongoDB health check
     await mongoose.connection.db.admin().ping();
     
     res.json({ 
       status: 'OK',
       timestamp: new Date().toISOString(),
       database: 'MongoDB Connected',
-      bot: botController ? (botController.isRunning ? 'Running' : 'Stopped') : 'Disabled',
-      uptime: process.uptime()
+      uptime: process.uptime(),
+      cors: {
+        allowedOrigins: [
+          'https://bingominiapp.vercel.app',
+          'http://localhost:3001',
+          'http://localhost:3000'
+        ]
+      }
     });
   } catch (error) {
     res.status(503).json({
@@ -114,7 +109,7 @@ app.get('/', (req, res) => {
     message: 'Bingo API Server',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
-    bot: botController ? 'Enabled' : 'Disabled',
+    frontend: 'https://bingominiapp.vercel.app',
     endpoints: {
       auth: '/api/auth/telegram',
       games: '/api/games',
@@ -127,14 +122,21 @@ app.get('/', (req, res) => {
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
-    error: 'Route not found'
+    error: 'Route not found',
+    availableEndpoints: {
+      root: '/',
+      health: '/health',
+      auth: '/api/auth/telegram',
+      games: '/api/games/*'
+    }
   });
 });
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Error:', err.message);
+  console.error('Error Stack:', err.stack);
   
+  // MongoDB duplicate key error
   if (err.code === 11000) {
     return res.status(409).json({
       success: false,
@@ -142,6 +144,7 @@ app.use((err, req, res, next) => {
     });
   }
   
+  // MongoDB validation error
   if (err.name === 'ValidationError') {
     const errors = Object.values(err.errors).map(e => e.message);
     return res.status(400).json({
@@ -159,32 +162,44 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 
-// Start server
+// Start server and THEN initialize game service
 const server = app.listen(PORT, () => {
-  console.log(`🚀 Server is running on port ${PORT}`);
-  console.log(`🌐 CORS enabled for:`);
+  console.log(`Server is running on port ${PORT}`);
+  console.log(`CORS enabled for:`);
   console.log(`- https://bingominiapp.vercel.app (Production)`);
   console.log(`- http://localhost:3001 (Development)`);
   console.log(`- http://localhost:3000 (Development)`);
   
-  // Initialize services after server is running
+  // Initialize game service after server is running
   setTimeout(() => {
-    console.log('🔄 Initializing services...');
-    initializeBot();
+    console.log('🔄 Initializing game service...');
     initializeGameService();
-  }, 2000);
+  }, 1000);
 });
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('🛑 Server shutting down gracefully...');
   
-  // Stop bot
-  if (botController) {
-    botController.stop();
+  // Clean up game service intervals
+  if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
+    GameService.cleanupAllIntervals();
   }
   
-  // Clean up game service
+  // Close MongoDB connection
+  await mongoose.connection.close();
+  console.log('✅ MongoDB connection closed');
+  
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGTERM', async () => {
+  console.log('🛑 Server terminating gracefully...');
+  
+  // Clean up game service intervals
   if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
     GameService.cleanupAllIntervals();
   }
