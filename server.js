@@ -10,6 +10,8 @@ const gameRoutes = require('./src/routes/games');
 const walletRoutes = require('./src/routes/wallet');
 
 const BotController = require('./src/controllers/botController');
+const cardSelectionRoutes = require('./src/routes/CardSelection');
+
 
 // Import GameService - make sure the path is correct
 const GameService = require('./src/services/gameService');
@@ -57,6 +59,8 @@ app.use(express.static(path.join(__dirname, '../public')));
 app.use('/api/auth', authRoutes);
 app.use('/api/games', gameRoutes);
 app.use('/api/wallet', walletRoutes);
+app.use('/cards', cardSelectionRoutes);
+
 // ✅ MODIFIED: Initialize auto-game service AFTER server starts
 const initializeGameService = () => {
   try {

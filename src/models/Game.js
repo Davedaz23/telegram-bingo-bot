@@ -48,8 +48,36 @@ const gameSchema = new mongoose.Schema({
   timestamps: true,
   toJSON: { virtuals: true },
   toObject: { virtuals: true }
-});
+},
+{
+    selectedCards: {
+    type: Map,
+    of: mongoose.Schema.Types.ObjectId, // Maps card numbers to user IDs
+    default: new Map()
+  },
+  cardSelectionEndTime: {
+    type: Date,
+    default: () => new Date(Date.now() + 30 * 1000) // 30 seconds from creation
+  }
+}, {
+  timestamps: true,
+  toJSON: { 
+    virtuals: true,
+    transform: function(doc, ret) {
+      // Convert Map to Object for JSON serialization
+      if (ret.selectedCards instanceof Map) {
+        ret.selectedCards = Object.fromEntries(ret.selectedCards);
+      }
+      return ret;
+    }
+  }
+  }
 
+);
+
+gameSchema.virtual('isCardSelectionActive').get(function() {
+  return new Date() < this.cardSelectionEndTime && this.status === 'WAITING';
+});
 // Virtual for players
 gameSchema.virtual('players', {
   ref: 'GamePlayer',
