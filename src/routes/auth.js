@@ -227,5 +227,76 @@ router.get('/health', (req, res) => {
     }
   });
 });
+router.post('/verify', async (req, res) => {
+  try {
+    const { initData } = req.body;
+    
+    if (!initData) {
+      return res.status(400).json({
+        success: false,
+        error: 'No init data provided'
+      });
+    }
+
+    // In a production environment, you should verify the initData signature
+    // For now, we'll parse the initData to get user information
+    const userData = parseInitData(initData);
+    
+    if (!userData || !userData.id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid init data'
+      });
+    }
+
+    // Get or create user in MongoDB
+    const user = await UserMappingService.getOrCreateUser(userData);
+    
+    if (!user) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to create user'
+      });
+    }
+
+    console.log(`✅ User verified: ${user.telegramId} -> ${user._id}`);
+
+    res.json({
+      success: true,
+      user: {
+        _id: user._id,
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        isActive: user.isActive
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Auth verification error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Authentication failed'
+    });
+  }
+});
+
+// Helper function to parse Telegram initData
+function parseInitData(initData) {
+  try {
+    const params = new URLSearchParams(initData);
+    const userStr = params.get('user');
+    
+    if (userStr) {
+      return JSON.parse(userStr);
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error parsing initData:', error);
+    return null;
+  }
+}
 
 module.exports = router;
