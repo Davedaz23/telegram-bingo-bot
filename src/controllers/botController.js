@@ -1,4 +1,4 @@
-// botController.js - UPDATED WITH WALLET FEATURES
+// botController.js - UPDATED WITH COMMANDS MENU
 const { Telegraf, Markup } = require('telegraf');
 const UserService = require('../services/userService');
 const WalletService = require('../services/walletService');
@@ -50,7 +50,149 @@ class BotController {
       }
     });
 
-    // Show deposit options
+    // Help command - shows all available commands
+    this.bot.help(async (ctx) => {
+      const helpMessage = `
+🤖 *Bingo Bot Commands*
+
+*Main Commands:*
+/start - Start the bot and see main menu
+/help - Show this help message  
+/deposit - Start deposit process
+/wallet - Check your wallet balance
+/stats - View your game statistics
+
+*Quick Actions via Buttons:*
+🎮 Play Bingo - Open the web app to play
+💰 Deposit Money - Add funds to your wallet
+📊 My Stats - View your game history
+💼 My Wallet - Check balance & transactions
+
+*Deposit Methods:*
+🏦 Banks: CBE, Awash, Dashen
+📱 Mobile Money: CBE Birr, Telebirr
+
+*Need Help?*
+Just type any command or use the buttons below!
+      `;
+
+      await ctx.replyWithMarkdown(helpMessage,
+        Markup.inlineKeyboard([
+          [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+          [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
+          [Markup.button.callback('💼 My Wallet', 'show_wallet')],
+          [Markup.button.callback('📊 My Stats', 'show_stats')]
+        ])
+      );
+    });
+
+    // Deposit command - direct access to deposit
+    this.bot.command('deposit', async (ctx) => {
+      const depositMessage = `
+💳 *Deposit Money to Your Wallet*
+
+*Supported Methods:*
+🏦 *Banks:* CBE, Awash, Dashen
+📱 *Mobile Money:* CBE Birr, Telebirr
+
+*How to Deposit:*
+1. Select payment method below
+2. Send money to the provided account
+3. Forward/paste the confirmation SMS
+4. Admin will verify and approve
+
+*Minimum Deposit:* $1 (≈ 50 ETB)
+      `;
+      
+      await ctx.replyWithMarkdown(depositMessage, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🏦 CBE Bank', 'deposit_cbe')],
+          [Markup.button.callback('🏦 Awash Bank', 'deposit_awash')],
+          [Markup.button.callback('🏦 Dashen Bank', 'deposit_dashen')],
+          [Markup.button.callback('📱 CBE Birr', 'deposit_cbebirr')],
+          [Markup.button.callback('📱 Telebirr', 'deposit_telebirr')],
+          [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
+        ])
+      });
+    });
+
+    // Wallet command - direct access to wallet
+    this.bot.command('wallet', async (ctx) => {
+      try {
+        const balance = await WalletService.getBalanceByTelegramId(ctx.from.id);
+        const transactions = await WalletService.getUserTransactions(ctx.from.id);
+        
+        let message = `💼 *Your Wallet*\n\n*Current Balance:* $${balance}\n\n`;
+        message += `📊 *Recent Transactions:*\n`;
+        
+        if (transactions.length > 0) {
+          transactions.slice(0, 5).forEach(tx => {
+            const emoji = tx.type === 'DEPOSIT' ? '📥' : 
+                         tx.type === 'WINNING' ? '🏆' : '🎮';
+            const sign = tx.amount > 0 ? '+' : '';
+            const status = tx.status === 'PENDING' ? '⏳' : 
+                          tx.status === 'COMPLETED' ? '✅' : '❌';
+            message += `${emoji} ${sign}$${tx.amount} - ${tx.description} ${status}\n`;
+          });
+        } else {
+          message += `No transactions yet.\n`;
+        }
+        
+        message += `\n*Quick Actions:*`;
+
+        await ctx.replyWithMarkdown(message, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
+            [Markup.button.callback('📊 Full History', 'show_full_history')],
+            [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
+          ])
+        });
+      } catch (error) {
+        console.error('Error in wallet command:', error);
+        await ctx.reply('❌ Error loading wallet information. Please try again.');
+      }
+    });
+
+    // Stats command
+    this.bot.command('stats', async (ctx) => {
+      try {
+        // This would call your UserService to get user stats
+        const userStats = await UserService.getUserStats(ctx.from.id);
+        
+        const statsMessage = `
+📊 *Your Bingo Stats*
+
+*Games Played:* ${userStats.gamesPlayed || 0}
+*Games Won:* ${userStats.gamesWon || 0}
+*Win Rate:* ${userStats.winRate || 0}%
+*Total Winnings:* $${userStats.totalWinnings || 0}
+
+*Recent Activity:*
+${userStats.recentGames || 'No games played yet'}
+
+Keep playing to improve your stats! 🎯
+        `;
+
+        await ctx.replyWithMarkdown(statsMessage,
+          Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 Play More Games', 'https://bingominiapp.vercel.app')],
+            [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
+          ])
+        );
+      } catch (error) {
+        console.error('Error in stats command:', error);
+        await ctx.replyWithMarkdown(
+          `📊 *Your Bingo Stats*\n\n*Games Played:* 0\n*Games Won:* 0\n*Win Rate:* 0%\n\nStart playing to see your stats! 🎯`,
+          Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+          ])
+        );
+      }
+    });
+
+    // Show deposit options (existing callback)
     this.bot.action('show_deposit', async (ctx) => {
       const depositMessage = `
 💳 *Deposit Money to Your Wallet*
@@ -81,7 +223,7 @@ class BotController {
       });
     });
 
-    // Deposit method selection
+    // Deposit method selection (existing callback)
     this.bot.action(/deposit_(.+)/, async (ctx) => {
       const methodMap = {
         'cbe': 'CBE Bank',
@@ -150,20 +292,44 @@ ${method.instructions}
       }
     });
 
-    // Waiting for SMS input
-    this.bot.action('waiting_sms', async (ctx) => {
-      await ctx.editMessageText(
-        `📱 *SMS Confirmation*\n\nPlease forward the confirmation SMS from your bank/mobile money or copy-paste the text below:\n\n*Example SMS format:*\n"You have received 100.00 ETB from CBE Birr. Your new balance is 150.00 ETB."`,
-        {
+    // Back to start action
+    this.bot.action('back_to_start', async (ctx) => {
+      try {
+        const user = await UserService.findOrCreateUser(ctx.from);
+        const balance = await WalletService.getBalanceByTelegramId(user.telegramId);
+        
+        const welcomeMessage = `
+🎯 *Welcome to Bingo Bot, ${user.firstName || user.username}!*
+
+*Your Wallet Balance:* $${balance}
+
+*Quick Actions:*
+        `;
+
+        await ctx.editMessageText(welcomeMessage, {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('🚫 Cancel', 'show_deposit')]
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+            [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
+            [Markup.button.callback('📊 My Stats & History', 'show_stats')],
+            [Markup.button.callback('💼 My Wallet', 'show_wallet')]
           ])
-        }
-      );
+        });
+      } catch (error) {
+        console.error('Error in back_to_start:', error);
+        await ctx.editMessageText(
+          `🎯 *Welcome to Bingo Bot!*\n\nClick below to play:`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+            ])
+          }
+        );
+      }
     });
 
-    // Handle SMS text input
+    // Handle unknown commands
     this.bot.on('text', async (ctx) => {
       // Check if user is in deposit flow
       if (ctx.session && ctx.session.pendingDepositMethod) {
@@ -204,17 +370,71 @@ ${method.instructions}
         return;
       }
 
-      // Existing text handler for other messages
-      if (!ctx.message.text.startsWith('/')) {
+      // Handle unknown commands
+      if (ctx.message.text.startsWith('/')) {
         await ctx.replyWithMarkdown(
-          'Want to play some Bingo? 🎯',
+          `❓ *Unknown Command*\n\nI don't recognize that command. Here are the available commands:\n\n` +
+          `*/start* - Main menu\n` +
+          `*/help* - Show all commands\n` +
+          `*/deposit* - Add money to wallet\n` +
+          `*/wallet* - Check your balance\n` +
+          `*/stats* - View your statistics\n\n` +
+          `Or use the buttons below:`,
           Markup.inlineKeyboard([
-            [Markup.button.webApp('🎮 YES, PLAY BINGO!', 'https://bingominiapp.vercel.app')]
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+            [Markup.button.callback('📋 Show All Commands', 'show_help')]
+          ])
+        );
+      } else {
+        // Regular text messages
+        await ctx.replyWithMarkdown(
+          'Want to play some Bingo? 🎯 Use /help to see all available commands!',
+          Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 YES, PLAY BINGO!', 'https://bingominiapp.vercel.app')],
+            [Markup.button.callback('📋 Commands Help', 'show_help')]
           ])
         );
       }
     });
 
+    // Show help via callback
+    this.bot.action('show_help', async (ctx) => {
+      const helpMessage = `
+🤖 *Bingo Bot Commands*
+
+*Main Commands:*
+/start - Start the bot and see main menu
+/help - Show this help message  
+/deposit - Start deposit process
+/wallet - Check your wallet balance
+/stats - View your game statistics
+
+*Quick Actions via Buttons:*
+🎮 Play Bingo - Open the web app to play
+💰 Deposit Money - Add funds to your wallet
+📊 My Stats - View your game history
+💼 My Wallet - Check balance & transactions
+
+*Deposit Methods:*
+🏦 Banks: CBE, Awash, Dashen
+📱 Mobile Money: CBE Birr, Telebirr
+
+*Need Help?*
+Just type any command or use the buttons below!
+      `;
+
+      await ctx.editMessageText(helpMessage, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+          [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
+          [Markup.button.callback('💼 My Wallet', 'show_wallet')],
+          [Markup.button.callback('📊 My Stats', 'show_stats')]
+        ])
+      });
+    });
+
+    // ... [Keep your existing show_wallet, admin commands, etc. unchanged]
     // Show wallet balance and history
     this.bot.action('show_wallet', async (ctx) => {
       try {
@@ -253,7 +473,7 @@ ${method.instructions}
       }
     });
 
-    // Admin commands
+    // Admin commands (keep existing)
     this.bot.command('admin', async (ctx) => {
       if (ctx.from.id.toString() !== this.adminId.toString()) {
         await ctx.reply('❌ Access denied');
@@ -278,7 +498,7 @@ ${method.instructions}
       await ctx.replyWithMarkdown(message);
     });
 
-    // Approve deposit command
+    // Approve deposit command (keep existing)
     this.bot.command(/approve_(.+)/, async (ctx) => {
       if (ctx.from.id.toString() !== this.adminId.toString()) {
         await ctx.reply('❌ Access denied');
@@ -311,8 +531,46 @@ ${method.instructions}
       }
     });
 
-    // Existing handlers (keep your existing show_stats, show_help, back_to_start, etc.)
-    // ... [Your existing handlers remain the same]
+    // Add show_stats callback if not exists
+    this.bot.action('show_stats', async (ctx) => {
+      try {
+        const userStats = await UserService.getUserStats(ctx.from.id);
+        
+        const statsMessage = `
+📊 *Your Bingo Stats*
+
+*Games Played:* ${userStats.gamesPlayed || 0}
+*Games Won:* ${userStats.gamesWon || 0}
+*Win Rate:* ${userStats.winRate || 0}%
+*Total Winnings:* $${userStats.totalWinnings || 0}
+
+*Recent Activity:*
+${userStats.recentGames || 'No games played yet'}
+
+Keep playing to improve your stats! 🎯
+        `;
+
+        await ctx.editMessageText(statsMessage, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 Play More Games', 'https://bingominiapp.vercel.app')],
+            [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
+          ])
+        });
+      } catch (error) {
+        console.error('Error in show_stats:', error);
+        await ctx.editMessageText(
+          `📊 *Your Bingo Stats*\n\n*Games Played:* 0\n*Games Won:* 0\n*Win Rate:* 0%\n\nStart playing to see your stats! 🎯`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+              [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
+            ])
+          }
+        );
+      }
+    });
 
   }
 
@@ -337,7 +595,7 @@ ${method.instructions}
     WalletService.initializePaymentMethods().catch(console.error);
     
     this.bot.launch();
-    console.log('🤖 Bingo Bot with Wallet System is running!');
+    console.log('🤖 Bingo Bot with Commands Menu is running!');
     
     process.once('SIGINT', () => this.bot.stop('SIGINT'));
     process.once('SIGTERM', () => this.bot.stop('SIGTERM'));
