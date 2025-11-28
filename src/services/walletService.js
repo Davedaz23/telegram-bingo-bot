@@ -691,39 +691,48 @@ static async approveReceivedSMS(smsDepositId, adminUserId) {
     }
   }
 
-  static async getWalletByTelegramId(telegramId) {
-    try {
-      console.log('🔍 Getting wallet by Telegram ID:', telegramId);
-      const user = await User.findOne({ telegramId: telegramId.toString() });
-      
-      if (!user) {
-        throw new Error(`User not found for Telegram ID: ${telegramId}`);
-      }
-      
-      console.log('✅ User found, getting wallet for MongoDB ID:', user._id);
-      return await this.getWallet(user._id);
-    } catch (error) {
-      console.error('❌ Error getting wallet by Telegram ID:', error);
-      throw error;
+ static async getWalletByTelegramId(telegramId) {
+  try {
+    console.log('🔍 Getting wallet by Telegram ID:', telegramId);
+    
+    // Make sure we're using the exact string format
+    const user = await User.findOne({ telegramId: telegramId.toString() });
+    
+    if (!user) {
+      console.error('❌ User not found for Telegram ID:', telegramId);
+      throw new Error(`User not found for Telegram ID: ${telegramId}`);
     }
+    
+    console.log('✅ User found:', user._id, 'Telegram ID:', user.telegramId);
+    
+    // Use the user's MongoDB ID to find the wallet
+    const wallet = await Wallet.findOne({ userId: user._id });
+    
+    if (!wallet) {
+      console.log('💰 No wallet found, creating new one...');
+      return await this.initializeWallet(user._id);
+    }
+    
+    console.log('✅ Wallet found:', wallet._id, 'Balance:', wallet.balance);
+    return wallet;
+    
+  } catch (error) {
+    console.error('❌ Error getting wallet by Telegram ID:', error);
+    throw error;
   }
+}
 
-  static async getBalanceByTelegramId(telegramId) {
-    try {
-      console.log('💰 Getting balance by Telegram ID:', telegramId);
-      const user = await User.findOne({ telegramId: telegramId.toString() });
-      
-      if (!user) {
-        throw new Error(`User not found for Telegram ID: ${telegramId}`);
-      }
-      
-      console.log('✅ User found, getting balance for MongoDB ID:', user._id);
-      return await this.getBalance(user._id);
-    } catch (error) {
-      console.error('❌ Error getting balance by Telegram ID:', error);
-      throw error;
-    }
+ static async getBalanceByTelegramId(telegramId) {
+  try {
+    console.log('💰 Getting balance by Telegram ID:', telegramId);
+    const wallet = await this.getWalletByTelegramId(telegramId);
+    console.log('✅ Balance retrieved:', wallet.balance);
+    return wallet.balance;
+  } catch (error) {
+    console.error('❌ Error getting balance by Telegram ID:', error);
+    throw error;
   }
+}
 
   // SIMPLIFIED: Process SMS deposit with automatic handling
   static async processSMSDeposit(userId, paymentMethodName, smsText, autoApprove = true) {
