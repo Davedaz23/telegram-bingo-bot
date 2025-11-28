@@ -434,7 +434,7 @@ static async resolveUserId(userId) {
   }
 
   // NEW: Admin approve received SMS
-  static async approveReceivedSMS(smsDepositId, adminUserId) {
+static async approveReceivedSMS(smsDepositId, adminUserId) {
     const session = await mongoose.startSession();
     session.startTransaction();
 
@@ -460,14 +460,17 @@ static async resolveUserId(userId) {
         throw new Error('User not found in SMS deposit');
       }
 
+      // RESOLVE ADMIN USER ID to MongoDB ObjectId using the helper
+      const adminMongoId = await this.resolveAnyUserId(adminUserId);
+
       const amount = smsDeposit.extractedAmount;
       if (!amount || amount <= 0) {
         throw new Error('Invalid amount in SMS deposit');
       }
 
-      console.log('✅ Processing amount:', amount, 'for user:', user.telegramId);
+      console.log('✅ Processing amount:', amount, 'for user:', user.telegramId, 'by admin:', adminMongoId);
 
-      // Get or create wallet - USE THE USER'S MONGODB ID DIRECTLY
+      // Get or create wallet
       let wallet = await Wallet.findOne({ userId: user._id }).session(session);
       if (!wallet) {
         console.log('💰 Creating new wallet for user:', user.telegramId);
@@ -495,7 +498,7 @@ static async resolveUserId(userId) {
         metadata: {
           paymentMethod: smsDeposit.paymentMethod,
           smsText: smsDeposit.originalSMS.substring(0, 500),
-          approvedBy: adminUserId,
+          approvedBy: adminMongoId,
           approvedAt: new Date(),
           autoApproved: false,
           smsDepositId: smsDeposit._id,
@@ -506,7 +509,7 @@ static async resolveUserId(userId) {
       // Update SMS deposit
       smsDeposit.status = 'APPROVED';
       smsDeposit.transactionId = transaction._id;
-      smsDeposit.processedBy = adminUserId;
+      smsDeposit.processedBy = adminMongoId;
       smsDeposit.processedAt = new Date();
       smsDeposit.autoApproved = false;
 
@@ -1526,6 +1529,35 @@ static async getSMSDepositById(smsDepositId) {
     throw error;
   }
 }
+static async resolveAnyUserId(userId) {
+  try {
+    console.log('🔄 Resolving any user ID:', userId, 'Type:', typeof userId);
+    
+    // If it's already a valid MongoDB ObjectId, return it
+    if (mongoose.Types.ObjectId.isValid(userId) && new mongoose.Types.ObjectId(userId).toString() === userId) {
+      console.log('✅ Input is already MongoDB ObjectId');
+      return userId;
+    }
+    
+    // Otherwise, treat it as a Telegram ID and look up the user
+    console.log('🔍 Looking for user with Telegram ID:', userId.toString());
+    const user = await User.findOne({ telegramId: userId.toString() });
+    
+    if (!user) {
+      console.error('❌ User not found for ID:', userId);
+      throw new Error(`User not found for ID: ${userId}`);
+    }
+    
+    console.log(`✅ Resolved ID ${userId} to MongoDB ID ${user._id}`);
+    return user._id;
+    
+  } catch (error) {
+    console.error('❌ Error resolving user ID:', error);
+    throw error;
+  }
+}
+
+
 }
 
 module.exports = WalletService;
