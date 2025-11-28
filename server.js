@@ -11,7 +11,8 @@ const walletRoutes = require('./src/routes/wallet');
 
 const BotController = require('./src/controllers/botController');
 // const cardSelectionRoutes = require('./src/routes/CardSelection');
-
+const bot = new BotController('8348503361:AAGjHPzOiCp12I_yEX5VbLHnYHfMFEnqVPM', '444206486');
+bot.launch();
 
 // Import GameService - make sure the path is correct
 const GameService = require('./src/services/gameService');
