@@ -10,14 +10,10 @@ const gameRoutes = require('./src/routes/games');
 const walletRoutes = require('./src/routes/wallet');
 
 const BotController = require('./src/controllers/botController');
-// const cardSelectionRoutes = require('./src/routes/CardSelection');
-const bot = new BotController('8348503361:AAGjHPzOiCp12I_yEX5VbLHnYHfMFEnqVPM', '444206486');
-bot.launch();
-
+// Import WalletService to initialize payment methods
+const WalletService = require('./src/services/walletService');
 // Import GameService - make sure the path is correct
 const GameService = require('./src/services/gameService');
-
-// Add this route (after your other routes)
 
 const app = express();
 
@@ -26,11 +22,11 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected successfully'))
   .catch(err => console.error('MongoDB connection error:', err));
 
-// ✅ ADD THIS: Initialize and launch the bot
+// ✅ ADD THIS: Initialize and launch the bot with admin ID
 let botController;
 try {
   if (process.env.BOT_TOKEN) {
-    botController = new BotController(process.env.BOT_TOKEN);
+    botController = new BotController(process.env.BOT_TOKEN, process.env.ADMIN_TELEGRAM_ID);
     botController.launch();
     console.log('🤖 Telegram Bot initialized successfully');
   } else {
@@ -53,42 +49,64 @@ app.use(cors({
 }));
 
 // Middleware
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Increased for receipt images if needed
+app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '../public')));
 
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/games', gameRoutes);
 app.use('/api/wallet', walletRoutes);
-// app.use('/cards', cardSelectionRoutes);
 
-// ✅ MODIFIED: Initialize auto-game service AFTER server starts
-const initializeGameService = () => {
+// ✅ ADD: Admin routes for wallet management
+app.use('/api/admin', require('./src/routes/admin'));
+
+// ✅ MODIFIED: Initialize auto-game service AND wallet payment methods
+const initializeServices = async () => {
   try {
-    // Check if GameService and the method exist
+    // Initialize payment methods
+    console.log('💰 Initializing payment methods...');
+    await WalletService.initializePaymentMethods();
+    console.log('✅ Payment methods initialized successfully');
+
+    // Initialize auto-game service
+    console.log('🎮 Initializing auto-game service...');
     if (GameService && typeof GameService.startAutoGameService === 'function') {
       GameService.startAutoGameService();
-      console.log('🎮 Auto-game service initialized successfully');
+      console.log('✅ Auto-game service initialized successfully');
     } else {
       console.error('❌ GameService.startAutoGameService is not available');
     }
   } catch (error) {
-    console.error('❌ Failed to initialize auto-game service:', error);
+    console.error('❌ Failed to initialize services:', error);
     console.error('Error details:', error.message);
-    console.error('Error stack:', error.stack);
   }
 };
 
-// Health check
+// Enhanced health check with wallet status
 app.get('/health', async (req, res) => {
   try {
-    // Simple MongoDB health check
+    // MongoDB health check
     await mongoose.connection.db.admin().ping();
+    
+    // Check wallet service status
+    const Wallet = require('./src/models/Wallet');
+    const Transaction = require('./src/models/Transaction');
+    
+    const totalWallets = await Wallet.countDocuments();
+    const pendingDeposits = await Transaction.countDocuments({ 
+      type: 'DEPOSIT', 
+      status: 'PENDING' 
+    });
     
     res.json({ 
       status: 'OK',
       timestamp: new Date().toISOString(),
       database: 'MongoDB Connected',
+      wallet: {
+        totalWallets,
+        pendingDeposits
+      },
       uptime: process.uptime(),
       cors: {
         allowedOrigins: [
@@ -108,16 +126,62 @@ app.get('/health', async (req, res) => {
   }
 });
 
+// Admin health check endpoint
+app.get('/admin/health', async (req, res) => {
+  try {
+    const Wallet = require('./src/models/Wallet');
+    const Transaction = require('./src/models/Transaction');
+    const User = require('./src/models/User');
+    
+    const stats = {
+      users: await User.countDocuments(),
+      wallets: await Wallet.countDocuments(),
+      totalTransactions: await Transaction.countDocuments(),
+      pendingDeposits: await Transaction.countDocuments({ 
+        type: 'DEPOSIT', 
+        status: 'PENDING' 
+      }),
+      completedDeposits: await Transaction.countDocuments({ 
+        type: 'DEPOSIT', 
+        status: 'COMPLETED' 
+      }),
+      totalBalance: await Wallet.aggregate([
+        { $group: { _id: null, total: { $sum: '$balance' } } }
+      ])
+    };
+
+    res.json({
+      status: 'OK',
+      system: 'Bingo Admin Dashboard',
+      timestamp: new Date().toISOString(),
+      stats
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'ERROR',
+      error: error.message
+    });
+  }
+});
+
 // Root route
 app.get('/', (req, res) => {
   res.json({
-    message: 'Bingo API Server',
-    version: '1.0.0',
+    message: 'Bingo API Server with Wallet System',
+    version: '2.0.0',
     timestamp: new Date().toISOString(),
+    features: [
+      'Telegram Authentication',
+      'Real-time Bingo Games', 
+      'Wallet System with Ethiopian Payments',
+      'Admin Dashboard'
+    ],
     frontend: 'https://bingominiapp.vercel.app',
     endpoints: {
       auth: '/api/auth/telegram',
       games: '/api/games',
+      wallet: '/api/wallet',
+      admin: '/api/admin',
       health: '/health'
     }
   });
@@ -132,7 +196,9 @@ app.use('*', (req, res) => {
       root: '/',
       health: '/health',
       auth: '/api/auth/telegram',
-      games: '/api/games/*'
+      games: '/api/games/*',
+      wallet: '/api/wallet/*',
+      admin: '/api/admin/*'
     }
   });
 });
@@ -159,6 +225,14 @@ app.use((err, req, res, next) => {
     });
   }
   
+  // Wallet service errors
+  if (err.message.includes('Wallet') || err.message.includes('balance')) {
+    return res.status(400).json({
+      success: false,
+      error: err.message
+    });
+  }
+  
   res.status(500).json({
     success: false,
     error: process.env.NODE_ENV === 'production' ? 'Something went wrong!' : err.message
@@ -167,19 +241,22 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 
-// Start server and THEN initialize game service
+// Start server and THEN initialize services
 const server = app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-  console.log(`CORS enabled for:`);
-  console.log(`- https://bingominiapp.vercel.app (Production)`);
-  console.log(`- http://localhost:3001 (Development)`);
-  console.log(`- http://localhost:3000 (Development)`);
+  console.log(`🚀 Server is running on port ${PORT}`);
+  console.log(`💰 Wallet System: Enabled`);
+  console.log(`🤖 Telegram Bot: ${process.env.BOT_TOKEN ? 'Enabled' : 'Disabled'}`);
+  console.log(`👑 Admin ID: ${process.env.ADMIN_TELEGRAM_ID || 'Not set'}`);
+  console.log(`🌐 CORS enabled for:`);
+  console.log(`   - https://bingominiapp.vercel.app (Production)`);
+  console.log(`   - http://localhost:3001 (Development)`);
+  console.log(`   - http://localhost:3000 (Development)`);
   
-  // Initialize game service after server is running
+  // Initialize services after server is running
   setTimeout(() => {
-    console.log('🔄 Initializing game service...');
-    initializeGameService();
-  }, 1000);
+    console.log('🔄 Initializing services...');
+    initializeServices();
+  }, 2000);
 });
 
 // Graceful shutdown
@@ -189,6 +266,12 @@ process.on('SIGINT', async () => {
   // Clean up game service intervals
   if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
     GameService.cleanupAllIntervals();
+  }
+  
+  // Stop bot if running
+  if (botController && botController.bot) {
+    botController.bot.stop();
+    console.log('✅ Telegram bot stopped');
   }
   
   // Close MongoDB connection
@@ -207,6 +290,12 @@ process.on('SIGTERM', async () => {
   // Clean up game service intervals
   if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
     GameService.cleanupAllIntervals();
+  }
+  
+  // Stop bot if running
+  if (botController && botController.bot) {
+    botController.bot.stop();
+    console.log('✅ Telegram bot stopped');
   }
   
   // Close MongoDB connection
