@@ -986,16 +986,19 @@ Keep playing to improve your stats! 🎯
     // ========== TEXT HANDLER (MUST BE LAST) ==========
 
     this.bot.on('text', async (ctx) => {
+      console.log('📝 Text received:', ctx.message.text.substring(0, 100));
+      
       // Handle SMS deposits
       if (ctx.session && ctx.session.pendingDepositMethod) {
         const smsText = ctx.message.text;
         const paymentMethod = ctx.session.pendingDepositMethod;
 
+        console.log('📱 Processing SMS deposit for method:', paymentMethod);
+
         try {
           await UserService.findOrCreateUser(ctx.from);
           
-          // Process SMS with auto-approval for small amounts
-          const maxAutoApprove = 50; // Auto-approve deposits <= $50
+          // Process SMS with auto-approval for small amounts (<= $50)
           const result = await WalletService.processSMSDeposit(
             ctx.from.id, 
             paymentMethod, 
@@ -1028,7 +1031,7 @@ Keep playing to improve your stats! 🎯
         } catch (error) {
           console.error('❌ SMS deposit error:', error);
           await ctx.replyWithMarkdown(
-            `❌ *Deposit Failed*\n\nError: ${error.message}\n\nPlease check:\n• SMS is from ${paymentMethod}\n• Amount is clearly mentioned\n• Transaction details are included`,
+            `❌ *Deposit Failed*\n\nError: ${error.message}\n\nPlease check:\n• SMS is from ${paymentMethod}\n• Amount is clearly mentioned\n• Transaction details are included\n\n*Example SMS format:*\n"You have sent 100.00 ETB to Bingo Game. Transaction ID: XYZ123"`,
             Markup.inlineKeyboard([
               [Markup.button.callback('🔄 Try Again', 'show_deposit')],
               [Markup.button.callback('📞 Contact Support', 'contact_support')]

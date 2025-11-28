@@ -1,11 +1,10 @@
-// services/walletService.js - FIXED VERSION
+// services/walletService.js - COMPLETE FIXED VERSION
 const mongoose = require('mongoose');
 const Wallet = require('../models/Wallet');
 const Transaction = require('../models/Transaction');
 const User = require('../models/User');
 const PaymentMethod = require('../models/PaymentMethod');
 const SMSDeposit = require('../models/SMSDeposit');
-
 
 class WalletService {
   
@@ -133,8 +132,6 @@ class WalletService {
     }
   }
 
-  // ... [Keep all other methods the same, but make sure they use resolveUserId]
-
   static async createDepositRequest(userId, amount, receiptImage, reference, description = 'Bank deposit') {
     const session = await mongoose.startSession();
     session.startTransaction();
@@ -171,6 +168,53 @@ class WalletService {
     } catch (error) {
       await session.abortTransaction();
       console.error('❌ Error creating deposit request:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
+  static async approveDeposit(transactionId, adminUserId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      const transaction = await Transaction.findById(transactionId).session(session);
+      
+      if (!transaction) {
+        throw new Error('Transaction not found');
+      }
+
+      if (transaction.status !== 'PENDING') {
+        throw new Error(`Transaction already ${transaction.status}`);
+      }
+
+      const wallet = await Wallet.findOne({ userId: transaction.userId }).session(session);
+      
+      if (!wallet) {
+        throw new Error('Wallet not found');
+      }
+
+      const balanceBefore = wallet.balance;
+      wallet.balance += transaction.amount;
+      const balanceAfter = wallet.balance;
+
+      transaction.balanceBefore = balanceBefore;
+      transaction.balanceAfter = balanceAfter;
+      transaction.status = 'COMPLETED';
+      transaction.metadata.approvedBy = adminUserId;
+      transaction.metadata.approvedAt = new Date();
+
+      await wallet.save({ session });
+      await transaction.save({ session });
+      await session.commitTransaction();
+
+      console.log(`✅ Deposit approved: $${transaction.amount} for user ${transaction.userId}`);
+
+      return { wallet, transaction };
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Error approving deposit:', error);
       throw error;
     } finally {
       session.endSession();
@@ -332,7 +376,6 @@ class WalletService {
     }
   }
 
-  // ... [Keep all other methods like initializePaymentMethods, extractAmountFromSMS, etc.]
   static async initializePaymentMethods() {
     const paymentMethods = [
       {
@@ -387,6 +430,7 @@ class WalletService {
     console.log('✅ Payment methods initialized');
   }
 
+  // ENHANCED: Extract amount from SMS with better patterns for Ethiopian SMS
   static extractAmountFromSMS(smsText, paymentMethod) {
     try {
       console.log('🔍 Extracting amount from SMS:', smsText.substring(0, 100));
@@ -399,7 +443,9 @@ class WalletService {
         /amount[:\s]*(\d+\.?\d*)/i,
         /sent\s*(\d+\.?\d*)/i,
         /received\s*(\d+\.?\d*)/i,
-        /transfer\s*(\d+\.?\d*)/i
+        /transfer\s*(\d+\.?\d*)/i,
+        /you have sent\s*(\d+\.?\d*)/i,
+        /deposit\s*(\d+\.?\d*)/i
       ];
 
       let amount = null;
@@ -409,16 +455,38 @@ class WalletService {
         if (match && match[1]) {
           amount = parseFloat(match[1]);
           console.log('✅ Amount extracted with pattern:', pattern, amount);
-          break;
+          if (amount > 0) break;
         }
       }
 
-      // Special handling for CBE Birr format
-      if (!amount && paymentMethod === 'CBE Birr') {
-        const cbeMatch = smsText.match(/sent\s*(\d+\.?\d*)\.\d*\s*Br/i);
-        if (cbeMatch) {
-          amount = parseFloat(cbeMatch[1]);
-          console.log('✅ CBE Birr amount extracted:', amount);
+      // Special handling for specific Ethiopian bank formats
+      if (!amount || amount <= 0) {
+        // Try to find amount with currency symbol patterns
+        const currencyPatterns = [
+          /(\d+\.?\d*)\s*(?:ETB|Birr|Br)/i,
+          /(?:ETB|Birr|Br)\s*(\d+\.?\d*)/i
+        ];
+        
+        for (const pattern of currencyPatterns) {
+          const match = smsText.match(pattern);
+          if (match && match[1]) {
+            amount = parseFloat(match[1]);
+            console.log('✅ Amount extracted with currency pattern:', amount);
+            if (amount > 0) break;
+          }
+        }
+      }
+
+      // Final fallback - look for any number that could be an amount
+      if (!amount || amount <= 0) {
+        const numbers = smsText.match(/\d+\.?\d*/g);
+        if (numbers) {
+          // Filter reasonable amounts (between 1 and 100,000)
+          const possibleAmounts = numbers.map(n => parseFloat(n)).filter(n => n >= 1 && n <= 100000);
+          if (possibleAmounts.length > 0) {
+            amount = possibleAmounts[0];
+            console.log('✅ Amount extracted as first reasonable number:', amount);
+          }
         }
       }
 
@@ -429,19 +497,19 @@ class WalletService {
     }
   }
 
-  // Validate SMS format
- static validateSMSFormat(smsText, paymentMethod) {
+  // ENHANCED: Validate SMS format for Ethiopian banks
+  static validateSMSFormat(smsText, paymentMethod) {
     const method = paymentMethod.toLowerCase();
     const sms = smsText.toLowerCase();
     
     console.log('🔍 Validating SMS for method:', method);
     
     const validators = {
-      'cbe bank': () => (sms.includes('cbe') && (sms.includes('etb') || sms.includes('birr') || sms.includes('br'))) || sms.includes('commercial bank'),
-      'awash bank': () => sms.includes('awash') && (sms.includes('etb') || sms.includes('birr') || sms.includes('br')),
-      'dashen bank': () => sms.includes('dashen') && (sms.includes('etb') || sms.includes('birr') || sms.includes('br')),
-      'cbe birr': () => (sms.includes('cbe') || sms.includes('cbebirr') || sms.includes('commercial bank')) && (sms.includes('birr') || sms.includes('br') || sms.includes('etb')),
-      'telebirr': () => sms.includes('telebirr') && (sms.includes('birr') || sms.includes('br') || sms.includes('etb'))
+      'cbe bank': () => (sms.includes('cbe') || sms.includes('commercial bank')) && (sms.includes('etb') || sms.includes('birr') || sms.includes('br') || sms.includes('sent') || sms.includes('received')),
+      'awash bank': () => sms.includes('awash') && (sms.includes('etb') || sms.includes('birr') || sms.includes('br') || sms.includes('sent') || sms.includes('received')),
+      'dashen bank': () => sms.includes('dashen') && (sms.includes('etb') || sms.includes('birr') || sms.includes('br') || sms.includes('sent') || sms.includes('received')),
+      'cbe birr': () => (sms.includes('cbe') || sms.includes('cbebirr') || sms.includes('commercial bank')) && (sms.includes('birr') || sms.includes('br') || sms.includes('etb') || sms.includes('sent') || sms.includes('received')),
+      'telebirr': () => sms.includes('telebirr') && (sms.includes('birr') || sms.includes('br') || sms.includes('etb') || sms.includes('sent') || sms.includes('received'))
     };
 
     const validator = validators[method];
@@ -450,12 +518,15 @@ class WalletService {
     console.log('✅ SMS validation result:', isValid);
     return isValid;
   }
-   // NEW: Process SMS deposit with auto-approval option
+
+  // NEW: Process SMS deposit with auto-approval option - FIXED VERSION
   static async processSMSDeposit(userId, paymentMethodName, smsText, autoApprove = false) {
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
+      console.log('🚀 Starting SMS deposit processing...');
+      
       // Resolve user ID
       const mongoUserId = await this.resolveUserId(userId);
       const user = await User.findById(mongoUserId);
@@ -464,26 +535,33 @@ class WalletService {
         throw new Error('User not found');
       }
 
+      console.log('✅ User found:', user.telegramId);
+
       // Get payment method
       const paymentMethod = await PaymentMethod.findOne({ 
-        name: paymentMethodName, 
-        isActive: true 
+        name: paymentMethodName
       });
       
       if (!paymentMethod) {
-        throw new Error('Invalid payment method');
+        throw new Error('Invalid payment method: ' + paymentMethodName);
       }
+
+      console.log('✅ Payment method found:', paymentMethodName);
 
       // Validate SMS format
       if (!this.validateSMSFormat(smsText, paymentMethodName)) {
-        throw new Error('Invalid SMS format for selected payment method');
+        throw new Error('Invalid SMS format for selected payment method. Please make sure the SMS is from ' + paymentMethodName);
       }
+
+      console.log('✅ SMS format validated');
 
       // Extract amount
       const amount = this.extractAmountFromSMS(smsText, paymentMethodName);
       if (!amount || amount <= 0) {
-        throw new Error('Could not extract valid amount from SMS');
+        throw new Error('Could not extract valid amount from SMS. Please make sure the amount is clearly mentioned in the SMS.');
       }
+
+      console.log('✅ Amount extracted:', amount);
 
       // Create SMS deposit record
       const smsDeposit = new SMSDeposit({
@@ -496,15 +574,18 @@ class WalletService {
         metadata: {
           smsLength: smsText.length,
           hasTransactionId: smsText.includes('Txn ID') || smsText.includes('Transaction'),
-          hasBalance: smsText.includes('balance') || smsText.includes('Balance')
+          hasBalance: smsText.includes('balance') || smsText.includes('Balance'),
+          processedAt: new Date()
         }
       });
 
       let transaction = null;
       let wallet = null;
 
-      // Auto-approve if enabled
-      if (autoApprove) {
+      // Auto-approve if enabled and amount is small
+      if (autoApprove && amount <= 50) {
+        console.log('🤖 Auto-approving deposit...');
+        
         wallet = await this.getWallet(mongoUserId);
         const balanceBefore = wallet.balance;
         wallet.balance += amount;
@@ -533,21 +614,54 @@ class WalletService {
         smsDeposit.status = 'AUTO_APPROVED';
         smsDeposit.transactionId = transaction._id;
         smsDeposit.autoApproved = true;
+        smsDeposit.processedAt = new Date();
 
         await transaction.save({ session });
         await wallet.save({ session });
         
         console.log(`✅ Auto-approved SMS deposit: $${amount} for user ${user.telegramId}`);
+      } else {
+        console.log('⏳ Creating pending SMS deposit...');
+        
+        // For larger amounts or when auto-approve is disabled, create pending transaction
+        wallet = await this.getWallet(mongoUserId);
+        const balanceBefore = wallet.balance;
+
+        transaction = new Transaction({
+          userId: mongoUserId,
+          type: 'DEPOSIT',
+          amount,
+          balanceBefore,
+          balanceAfter: balanceBefore, // Will be updated when approved
+          status: 'PENDING',
+          description: `SMS deposit via ${paymentMethodName}`,
+          reference: `SMS-PENDING-${Date.now()}`,
+          metadata: {
+            paymentMethod: paymentMethodName,
+            smsText: smsText.substring(0, 500),
+            approvedBy: null,
+            approvedAt: null,
+            autoApproved: false,
+            smsDepositId: smsDeposit._id
+          }
+        });
+
+        smsDeposit.transactionId = transaction._id;
+
+        await transaction.save({ session });
       }
 
+      // Save SMS deposit
       await smsDeposit.save({ session });
       await session.commitTransaction();
+
+      console.log('✅ SMS deposit processed successfully');
 
       return {
         smsDeposit,
         transaction,
         wallet,
-        autoApproved: autoApprove
+        autoApproved: autoApprove && amount <= 50
       };
 
     } catch (error) {
