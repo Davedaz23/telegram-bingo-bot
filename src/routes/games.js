@@ -1,13 +1,105 @@
 const express = require('express');
 const router = express.Router();
 const GameService = require('../services/gameService');
+const CardSelectionService = require('../services/cardSelectionService'); // Add this import
 
-// Create new game - REMOVED since we only have auto-created games
-// router.post('/', async (req, res) => {
-//   // This endpoint is no longer needed as games are auto-created
-// });
+// card card related
+// Select a card number
+router.post('/:gameId/select-card', async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    const { userId, cardNumber } = req.body;
+    
+    if (!userId || !cardNumber) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId and cardNumber are required'
+      });
+    }
 
-// Join game by code
+    const result = await CardSelectionService.selectCard(gameId, userId, cardNumber);
+    
+    res.json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    console.error('Card selection error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get available cards for a game
+router.get('/:gameId/available-cards', async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    
+    const result = await CardSelectionService.getAvailableCards(gameId);
+    
+    res.json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    console.error('Get available cards error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Release selected card
+router.post('/:gameId/release-card', async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    const { userId } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required'
+      });
+    }
+
+    const result = await CardSelectionService.releaseCard(gameId, userId);
+    
+    res.json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    console.error('Card release error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Check card selection status
+router.get('/:gameId/card-selection-status', async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    
+    const result = await CardSelectionService.checkCardSelectionStatus(gameId);
+    
+    res.json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    console.error('Card status error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+//card
 router.post('/:code/join', async (req, res) => {
   try {
     const { code } = req.params;
