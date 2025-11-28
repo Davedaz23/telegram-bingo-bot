@@ -367,14 +367,53 @@ this.bot.command(/^approvesms_(.+)/, async (ctx) => {
   const smsId = ctx.match[1];
 
   try {
-    const result = await WalletService.approveReceivedSMS(smsId, ctx.from.id);
+    // First, get SMS deposit details to show confirmation
+    const smsDeposit = await WalletService.getSMSDepositById(smsId);
+    
+    if (!smsDeposit) {
+      await ctx.reply('❌ SMS deposit not found');
+      return;
+    }
 
+    const userName = smsDeposit.userId?.firstName || smsDeposit.userId?.username || 'Unknown User';
+    const amount = smsDeposit.extractedAmount;
+
+    // Show confirmation
     await ctx.replyWithMarkdown(
-      `✅ *SMS Deposit Approved!*\n\n*User:* ${result.smsDeposit.userId.firstName}\n*Amount:* $${result.transaction.amount}\n*New Balance:* $${result.wallet.balance}`
+      `⚠️ *Confirm Approval*\n\n*User:* ${userName}\n*Amount:* $${amount}\n*Method:* ${smsDeposit.paymentMethod}\n\nAre you sure you want to approve this deposit?`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Yes, Approve', `confirm_approve_${smsId}`)],
+        [Markup.button.callback('❌ Cancel', `cancel_approve_${smsId}`)]
+      ])
     );
 
+  } catch (error) {
+    await ctx.reply(`❌ Error: ${error.message}`);
+  }
+});
+
+// Add confirmation handler
+this.bot.action(/confirm_approve_(.+)/, async (ctx) => {
+  if (ctx.from.id.toString() !== this.adminId) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
+
+  const smsId = ctx.match[1];
+  
+  try {
+    await ctx.answerCbQuery('🔄 Approving deposit...');
+    
+    const result = await WalletService.approveReceivedSMS(smsId, ctx.from.id);
+
+    await ctx.editMessageText(
+      `✅ *SMS Deposit Approved!*\n\n*User:* ${result.user.firstName || result.user.username}\n*Amount:* $${result.transaction.amount}\n*New Balance:* $${result.wallet.balance}`,
+      { parse_mode: 'Markdown' }
+    );
+
+    // Notify user
     await this.bot.telegram.sendMessage(
-      result.smsDeposit.userId.telegramId,
+      result.user.telegramId,
       `🎉 *Deposit Approved!*\n\nYour deposit of $${result.transaction.amount} has been approved!\n*New Balance:* $${result.wallet.balance}\n\nReady to play some Bingo? 🎯`,
       {
         parse_mode: 'Markdown',
@@ -385,7 +424,58 @@ this.bot.command(/^approvesms_(.+)/, async (ctx) => {
     );
 
   } catch (error) {
-    await ctx.reply(`❌ Error approving SMS deposit: ${error.message}`);
+    await ctx.answerCbQuery(`❌ Error: ${error.message}`);
+    await ctx.editMessageText(`❌ Failed to approve: ${error.message}`);
+  }
+});
+
+// Add cancel handler
+this.bot.action(/cancel_approve_(.+)/, async (ctx) => {
+  await ctx.answerCbQuery('Approval cancelled');
+  await ctx.deleteMessage();
+});
+
+// NEW: Batch approve command
+this.bot.command('batchapprove', async (ctx) => {
+  if (ctx.from.id.toString() !== this.adminId) {
+    await ctx.reply('❌ Access denied');
+    return;
+  }
+
+  try {
+    // Get all received SMS deposits
+    const receivedSMS = await WalletService.getReceivedSMSDeposits();
+    
+    if (receivedSMS.length === 0) {
+      await ctx.reply('✅ No received SMS deposits to approve.');
+      return;
+    }
+
+    const smsIds = receivedSMS.map(sms => sms._id);
+    const result = await WalletService.batchApproveSMSDeposits(smsIds, ctx.from.id);
+
+    let message = `🔄 *Batch Approval Results*\n\n`;
+    message += `✅ Successful: ${result.successful.length}\n`;
+    message += `❌ Failed: ${result.failed.length}\n\n`;
+
+    if (result.successful.length > 0) {
+      message += `*Approved Deposits:*\n`;
+      result.successful.forEach((success, index) => {
+        message += `${index + 1}. $${success.amount} - User ${success.user}\n`;
+      });
+    }
+
+    if (result.failed.length > 0) {
+      message += `\n*Failed:*\n`;
+      result.failed.forEach((fail, index) => {
+        message += `${index + 1}. ${fail.smsDepositId} - ${fail.error}\n`;
+      });
+    }
+
+    await ctx.replyWithMarkdown(message);
+
+  } catch (error) {
+    await ctx.reply(`❌ Batch approval error: ${error.message}`);
   }
 });
     // SMS List command

@@ -33,51 +33,122 @@ static async resolveUserId(userId) {
       throw error;
     }
   }
+ static async approveReceivedSMS(smsDepositId, adminUserId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-   static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
     try {
-      console.log('💾 Storing SMS message from user:', userId);
+      console.log('🔄 Approving received SMS deposit:', smsDepositId);
       
-      const mongoUserId = await this.resolveUserId(userId);
-      const user = await User.findById(mongoUserId);
+      // Get SMS deposit with user populated
+      const smsDeposit = await SMSDeposit.findById(smsDepositId)
+        .populate('userId')
+        .session(session);
       
-      if (!user) {
-        throw new Error('User not found');
+      if (!smsDeposit) {
+        throw new Error('SMS deposit not found');
       }
 
-      const amount = this.extractAmountFromSMS(smsText);
-      const detectedMethod = this.detectPaymentMethodFromSMS(smsText);
-      const finalMethod = paymentMethod === 'UNKNOWN' ? detectedMethod : paymentMethod;
+      if (smsDeposit.status !== 'RECEIVED' && smsDeposit.status !== 'PENDING') {
+        throw new Error(`SMS deposit already ${smsDeposit.status}`);
+      }
 
-      const smsDeposit = new SMSDeposit({
-        userId: mongoUserId,
-        telegramId: user.telegramId,
-        originalSMS: smsText,
-        paymentMethod: finalMethod,
-        extractedAmount: amount || 0,
-        status: 'RECEIVED',
+      // Check if user exists and get proper user ID
+      let user = smsDeposit.userId;
+      if (!user) {
+        // Fallback: try to find user by telegramId stored in SMS deposit
+        user = await User.findOne({ telegramId: smsDeposit.telegramId }).session(session);
+        if (!user) {
+          throw new Error(`User not found for Telegram ID: ${smsDeposit.telegramId}`);
+        }
+        // Update SMS deposit with correct user ID
+        smsDeposit.userId = user._id;
+      }
+
+      const amount = smsDeposit.extractedAmount;
+      if (!amount || amount <= 0) {
+        throw new Error('Invalid amount in SMS deposit');
+      }
+
+      console.log('✅ Processing amount:', amount, 'for user:', user.telegramId);
+
+      // Get or create wallet
+      let wallet = await Wallet.findOne({ userId: user._id }).session(session);
+      if (!wallet) {
+        console.log('💰 Creating new wallet for user:', user.telegramId);
+        wallet = new Wallet({
+          userId: user._id,
+          balance: 0,
+          currency: 'USD'
+        });
+      }
+
+      const balanceBefore = wallet.balance;
+      wallet.balance += amount;
+      const balanceAfter = wallet.balance;
+
+      // Create transaction
+      const transaction = new Transaction({
+        userId: user._id,
+        type: 'DEPOSIT',
+        amount,
+        balanceBefore,
+        balanceAfter,
+        status: 'COMPLETED',
+        description: `Approved deposit via ${smsDeposit.paymentMethod}`,
+        reference: `SMS-APPROVED-${Date.now()}`,
         metadata: {
-          smsLength: smsText.length,
-          hasTransactionId: smsText.includes('Txn ID') || smsText.includes('Transaction'),
-          hasBalance: smsText.includes('balance') || smsText.includes('Balance'),
-          amountDetected: !!amount,
-          detectedAmount: amount,
-          storedAt: new Date(),
-          autoProcessAttempted: false
-        },
-        smsType: 'BANK_SMS'
+          paymentMethod: smsDeposit.paymentMethod,
+          smsText: smsDeposit.originalSMS.substring(0, 500),
+          approvedBy: adminUserId,
+          approvedAt: new Date(),
+          autoApproved: false,
+          smsDepositId: smsDeposit._id,
+          confidence: this.getSMSConfidence(smsDeposit.originalSMS)
+        }
       });
 
-      await smsDeposit.save();
-      console.log('✅ SMS stored successfully:', smsDeposit._id);
+      // Update SMS deposit
+      smsDeposit.status = 'APPROVED';
+      smsDeposit.transactionId = transaction._id;
+      smsDeposit.processedBy = adminUserId;
+      smsDeposit.processedAt = new Date();
+      smsDeposit.autoApproved = false;
 
-      return smsDeposit;
+      await transaction.save({ session });
+      await wallet.save({ session });
+      await smsDeposit.save({ session });
+      await session.commitTransaction();
+
+      console.log(`✅ Approved SMS deposit: $${amount} for user ${user.telegramId}`);
+
+      return {
+        smsDeposit,
+        transaction,
+        wallet,
+        user,
+        autoApproved: false
+      };
+
     } catch (error) {
-      console.error('❌ Error storing SMS:', error);
+      await session.abortTransaction();
+      console.error('❌ Error approving received SMS deposit:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+ // NEW: Get specific SMS deposit by ID with proper population
+  static async getSMSDepositById(smsDepositId) {
+    try {
+      return await SMSDeposit.findById(smsDepositId)
+        .populate('userId', 'firstName username telegramId')
+        .populate('processedBy', 'firstName username');
+    } catch (error) {
+      console.error('❌ Error getting SMS deposit by ID:', error);
       throw error;
     }
   }
-
   // NEW: Auto-process received SMS immediately
   static async autoProcessReceivedSMS() {
     try {
@@ -354,7 +425,7 @@ static async resolveUserId(userId) {
       session.endSession();
     }
   }
-   static async getAllSMSDeposits(page = 1, limit = 20, status = null) {
+  static async getAllSMSDeposits(page = 1, limit = 20, status = null) {
     try {
       const skip = (page - 1) * limit;
       const query = status ? { status } : {};
@@ -365,12 +436,26 @@ static async resolveUserId(userId) {
           .populate('processedBy', 'firstName username')
           .sort({ createdAt: -1 })
           .skip(skip)
-          .limit(limit),
+          .limit(limit)
+          .lean(), // Use lean for better performance
         SMSDeposit.countDocuments(query)
       ]);
 
+      // Ensure all deposits have proper user information
+      const enhancedDeposits = deposits.map(deposit => {
+        if (!deposit.userId) {
+          // If user population failed, create a minimal user object
+          deposit.userId = {
+            firstName: 'Unknown User',
+            username: 'unknown',
+            telegramId: deposit.telegramId || 'unknown'
+          };
+        }
+        return deposit;
+      });
+
       return {
-        deposits,
+        deposits: enhancedDeposits,
         pagination: {
           page,
           limit,
@@ -383,7 +468,49 @@ static async resolveUserId(userId) {
       throw error;
     }
   }
+// NEW: Batch approve multiple SMS deposits
+  static async batchApproveSMSDeposits(smsDepositIds, adminUserId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
+    try {
+      console.log('🔄 Batch approving SMS deposits:', smsDepositIds);
+
+      const results = {
+        successful: [],
+        failed: []
+      };
+
+      for (const smsDepositId of smsDepositIds) {
+        try {
+          const result = await this.approveReceivedSMS(smsDepositId, adminUserId);
+          results.successful.push({
+            smsDepositId,
+            amount: result.transaction.amount,
+            user: result.user.telegramId
+          });
+        } catch (error) {
+          results.failed.push({
+            smsDepositId,
+            error: error.message
+          });
+        }
+      }
+
+      await session.commitTransaction();
+
+      console.log(`✅ Batch approval completed: ${results.successful.length} successful, ${results.failed.length} failed`);
+
+      return results;
+
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Error in batch approval:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
   // NEW: Get received SMS for admin
   static async getReceivedSMSDeposits(limit = 50) {
     try {
@@ -417,29 +544,71 @@ static async resolveUserId(userId) {
   }
 
   // NEW: Auto-process all received SMS
-  static async autoProcessReceivedSMS() {
+   static async autoProcessReceivedSMS() {
     try {
-      const unprocessedSMS = await this.getUnprocessedSMS();
+      const receivedSMS = await SMSDeposit.find({ status: 'RECEIVED' })
+        .populate('userId')
+        .sort({ createdAt: 1 })
+        .limit(50);
+
       let processedCount = 0;
       let approvedCount = 0;
+      let failedCount = 0;
 
-      for (const sms of unprocessedSMS) {
+      console.log(`🔄 Found ${receivedSMS.length} received SMS to process`);
+
+      for (const sms of receivedSMS) {
         try {
-          const result = await this.processStoredSMS(sms._id, true);
+          // Mark as processing
+          sms.status = 'PROCESSING';
+          await sms.save();
+
+          let user = sms.userId;
+          
+          // If user population failed, try to find user by telegramId
+          if (!user && sms.telegramId) {
+            user = await User.findOne({ telegramId: sms.telegramId });
+            if (user) {
+              sms.userId = user._id;
+              await sms.save();
+            }
+          }
+
+          if (!user) {
+            throw new Error(`User not found for SMS deposit ${sms._id}`);
+          }
+
+          const result = await this.processSMSDeposit(
+            user.telegramId || user._id,
+            sms.paymentMethod,
+            sms.originalSMS,
+            true // Auto-approve
+          );
+
           processedCount++;
           if (result.autoApproved) {
             approvedCount++;
           }
+
           console.log(`✅ Processed SMS ${sms._id}: ${result.autoApproved ? 'Auto-approved' : 'Needs review'}`);
         } catch (error) {
           console.error(`❌ Failed to process SMS ${sms._id}:`, error.message);
+          failedCount++;
+          
+          // Reset status to RECEIVED if processing failed
+          await SMSDeposit.findByIdAndUpdate(sms._id, { 
+            status: 'RECEIVED',
+            'metadata.processError': error.message,
+            'metadata.lastProcessAttempt': new Date()
+          });
         }
       }
 
       return { 
-        total: unprocessedSMS.length, 
+        total: receivedSMS.length, 
         processed: processedCount, 
-        approved: approvedCount 
+        approved: approvedCount,
+        failed: failedCount
       };
     } catch (error) {
       console.error('❌ Error in auto-process SMS:', error);
@@ -692,7 +861,49 @@ static async resolveUserId(userId) {
       session.endSession();
     }
   }
+ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
+    try {
+      console.log('💾 Storing SMS message from user:', userId);
+      
+      const mongoUserId = await this.resolveUserId(userId);
+      const user = await User.findById(mongoUserId);
+      
+      if (!user) {
+        throw new Error('User not found');
+      }
 
+      const amount = this.extractAmountFromSMS(smsText);
+      const detectedMethod = this.detectPaymentMethodFromSMS(smsText);
+      const finalMethod = paymentMethod === 'UNKNOWN' ? detectedMethod : paymentMethod;
+
+      const smsDeposit = new SMSDeposit({
+        userId: mongoUserId,
+        telegramId: user.telegramId,
+        originalSMS: smsText,
+        paymentMethod: finalMethod,
+        extractedAmount: amount || 0,
+        status: 'RECEIVED',
+        metadata: {
+          smsLength: smsText.length,
+          hasTransactionId: smsText.includes('Txn ID') || smsText.includes('Transaction'),
+          hasBalance: smsText.includes('balance') || smsText.includes('Balance'),
+          amountDetected: !!amount,
+          detectedAmount: amount,
+          storedAt: new Date(),
+          autoProcessAttempted: false
+        },
+        smsType: 'BANK_SMS'
+      });
+
+      await smsDeposit.save();
+      console.log('✅ SMS stored successfully:', smsDeposit._id);
+
+      return smsDeposit;
+    } catch (error) {
+      console.error('❌ Error storing SMS:', error);
+      throw error;
+    }
+  }
   // NEW: Determine if SMS should be auto-approved
   static shouldAutoApproveSMS(smsText, amount) {
     const sms = smsText.toLowerCase();
