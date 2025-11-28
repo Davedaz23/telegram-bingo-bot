@@ -1,4 +1,4 @@
-// models/Game.js
+// models/Game.js - UPDATED VERSION
 const mongoose = require('mongoose');
 
 const gameSchema = new mongoose.Schema({
@@ -7,7 +7,6 @@ const gameSchema = new mongoose.Schema({
     required: true,
     unique: true
   },
-  // REMOVED: hostId field since we don't have hosts anymore
   status: {
     type: String,
     enum: ['WAITING', 'ACTIVE', 'FINISHED', 'CANCELLED'],
@@ -33,7 +32,6 @@ const gameSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  // ADDED: Field to identify auto-created system games
   isAutoCreated: {
     type: Boolean,
     default: false
@@ -43,21 +41,18 @@ const gameSchema = new mongoose.Schema({
   },
   endedAt: {
     type: Date
-  }
-}, {
-  timestamps: true,
-  toJSON: { virtuals: true },
-  toObject: { virtuals: true }
-},
-{
-    selectedCards: {
+  },
+  // ADD THESE FIELDS FOR CARD SELECTION
+  selectedCards: {
     type: Map,
-    of: mongoose.Schema.Types.ObjectId, // Maps card numbers to user IDs
+    of: mongoose.Schema.Types.ObjectId,
     default: new Map()
   },
   cardSelectionEndTime: {
     type: Date,
-    default: () => new Date(Date.now() + 30 * 1000) // 30 seconds from creation
+    default: function() {
+      return new Date(Date.now() + 30 * 1000); // 30 seconds from creation
+    }
   }
 }, {
   timestamps: true,
@@ -67,17 +62,22 @@ const gameSchema = new mongoose.Schema({
       // Convert Map to Object for JSON serialization
       if (ret.selectedCards instanceof Map) {
         ret.selectedCards = Object.fromEntries(ret.selectedCards);
+      } else if (ret.selectedCards && typeof ret.selectedCards === 'object') {
+        // Already an object, no transformation needed
+      } else {
+        ret.selectedCards = {};
       }
       return ret;
     }
-  }
-  }
+  },
+  toObject: { virtuals: true }
+});
 
-);
-
+// Add virtual for card selection status
 gameSchema.virtual('isCardSelectionActive').get(function() {
   return new Date() < this.cardSelectionEndTime && this.status === 'WAITING';
 });
+
 // Virtual for players
 gameSchema.virtual('players', {
   ref: 'GamePlayer',
