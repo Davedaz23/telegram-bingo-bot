@@ -53,16 +53,10 @@ static async resolveUserId(userId) {
         throw new Error(`SMS deposit already ${smsDeposit.status}`);
       }
 
-      // Check if user exists and get proper user ID
-      let user = smsDeposit.userId;
+      // Check if user exists - userId should already be a populated user object
+      const user = smsDeposit.userId;
       if (!user) {
-        // Fallback: try to find user by telegramId stored in SMS deposit
-        user = await User.findOne({ telegramId: smsDeposit.telegramId }).session(session);
-        if (!user) {
-          throw new Error(`User not found for Telegram ID: ${smsDeposit.telegramId}`);
-        }
-        // Update SMS deposit with correct user ID
-        smsDeposit.userId = user._id;
+        throw new Error('User not found in SMS deposit');
       }
 
       const amount = smsDeposit.extractedAmount;
@@ -138,6 +132,7 @@ static async resolveUserId(userId) {
       session.endSession();
     }
   }
+
  // NEW: Get specific SMS deposit by ID with proper population
   static async getSMSDepositById(smsDepositId) {
     try {
@@ -1475,6 +1470,41 @@ static async resolveUserId(userId) {
       throw error;
     }
   }
+
+  //helpers
+  // Add this method to WalletService
+static async checkUserExists(userId) {
+  try {
+    const user = await User.findById(userId);
+    return !!user;
+  } catch (error) {
+    console.error('Error checking user existence:', error);
+    return false;
+  }
+}
+
+// And update the getSMSDepositById method to handle missing users
+static async getSMSDepositById(smsDepositId) {
+  try {
+    const smsDeposit = await SMSDeposit.findById(smsDepositId)
+      .populate('userId', 'firstName username telegramId')
+      .populate('processedBy', 'firstName username');
+    
+    // If user population failed but we have telegramId, create a minimal user object
+    if (!smsDeposit.userId && smsDeposit.telegramId) {
+      smsDeposit.userId = {
+        firstName: 'Unknown User',
+        username: 'unknown',
+        telegramId: smsDeposit.telegramId
+      };
+    }
+    
+    return smsDeposit;
+  } catch (error) {
+    console.error('❌ Error getting SMS deposit by ID:', error);
+    throw error;
+  }
+}
 }
 
 module.exports = WalletService;
