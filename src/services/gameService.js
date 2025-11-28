@@ -1234,6 +1234,89 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
     };
   }
 
+
+//game started
+static async createAutoGame() {
+  try {
+    const gameCode = GameUtils.generateGameCode();
+    
+    const game = new Game({
+      code: gameCode,
+      maxPlayers: 10,
+      isPrivate: false,
+      numbersCalled: [],
+      status: 'WAITING',
+      currentPlayers: 0,
+      isAutoCreated: true,
+      selectedCards: new Map(),
+      cardSelectionEndTime: new Date(Date.now() + 30 * 1000) // 30 seconds
+    });
+
+    await game.save();
+    console.log(`🎯 Auto-created game: ${gameCode} with card selection period`);
+    
+    return this.getGameWithDetails(game._id);
+  } catch (error) {
+    console.error('❌ Error creating auto game:', error);
+    throw error;
+  }
+}
+static async autoRestartGame(gameId) {
+  try {
+    console.log(`🔄 Auto-restarting game ${gameId}...`);
+    
+    const game = await Game.findById(gameId);
+    if (!game || game.status !== 'FINISHED') {
+      console.log('❌ Game not found or not finished, cannot restart');
+      return;
+    }
+
+    // Clear all tracking including card selections
+    this.winnerDeclared.delete(gameId.toString());
+    this.processingGames.delete(gameId.toString());
+
+    game.status = 'WAITING';
+    game.numbersCalled = [];
+    game.winnerId = null;
+    game.startedAt = null;
+    game.endedAt = null;
+    game.selectedCards = new Map();
+    game.cardSelectionEndTime = new Date(Date.now() + 30 * 1000); // Reset to 30 seconds
+    
+    await game.save();
+    
+    await BingoCard.deleteMany({ gameId });
+    
+    const players = await GamePlayer.find({ gameId });
+    for (const player of players) {
+      const bingoCardNumbers = GameUtils.generateBingoCard();
+      await BingoCard.create({
+        userId: player.userId,
+        gameId: gameId,
+        numbers: bingoCardNumbers,
+        markedPositions: [12],
+        isLateJoiner: false,
+        joinedAt: new Date(),
+        numbersCalledAtJoin: []
+      });
+    }
+    
+    console.log(`✅ Game ${game.code} restarted with ${players.length} players and 30s card selection`);
+    
+    if (players.length >= this.MIN_PLAYERS_TO_START) {
+      setTimeout(() => {
+        this.startGame(gameId);
+      }, 30000); // Wait for card selection period
+    } else {
+      console.log(`⏳ Waiting for more players to join before starting: ${players.length}/${this.MIN_PLAYERS_TO_START}`);
+    }
+    
+  } catch (error) {
+    console.error('❌ Auto-restart error:', error);
+  }
+}
+//game
+
   //region defar
 // services/gameService.js - Add to existing class
 static async createAutoGame() {
