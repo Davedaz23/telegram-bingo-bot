@@ -532,93 +532,91 @@ class GameService {
     }
   }
 
- static async joinGame(gameCode, userId) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+static async joinGame(gameCode, userId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-    try {
-      const mainGame = await this.getMainGame();
-      
-      if (!mainGame) {
-        throw new Error('No game available');
-      }
-
-      const game = await Game.findById(mainGame._id).session(session);
-
-      const existingPlayer = await GamePlayer.findOne({ 
-        userId, 
-        gameId: game._id 
-      }).session(session);
-      
-      if (existingPlayer) {
-        await session.commitTransaction();
-        return this.getGameWithDetails(game._id);
-      }
-
-      if (game.status === 'WAITING' || game.status === 'ACTIVE') {
-        if (game.currentPlayers >= game.maxPlayers) {
-          await session.abortTransaction();
-          throw new Error('Game is full');
-        }
-
-        const isLateJoiner = game.status === 'ACTIVE';
-        const numbersCalledAtJoin = game.numbersCalled || [];
-
-        await GamePlayer.create([{
-          userId,
-          gameId: game._id,
-          isReady: true,
-          playerType: 'PLAYER',
-          joinedAt: new Date()
-        }], { session });
-
-        const bingoCardNumbers = GameUtils.generateBingoCard();
-        await BingoCard.create([{
-          userId,
-          gameId: game._id,
-          numbers: bingoCardNumbers,
-          markedPositions: [12],
-          isLateJoiner: isLateJoiner,
-          joinedAt: new Date(),
-          numbersCalledAtJoin: numbersCalledAtJoin
-        }], { session });
-
-        game.currentPlayers += 1;
-        game.updatedAt = new Date();
-        await game.save();
-
-        await session.commitTransaction();
-
-        console.log(`✅ User ${userId} joined as ${isLateJoiner ? 'LATE PLAYER' : 'PLAYER'}. Total players: ${game.currentPlayers}`);
-
-        // MODIFIED: Only start game if we have at least 2 players
-        if (game.status === 'WAITING' && game.currentPlayers >= this.MIN_PLAYERS_TO_START) {
-          console.log(`🚀 Auto-starting game ${game.code} with ${game.currentPlayers} player(s)`);
-          await this.startGame(game._id);
-        } else if (game.status === 'WAITING') {
-          console.log(`⏳ Waiting for more players: ${game.currentPlayers}/${this.MIN_PLAYERS_TO_START} players joined`);
-        }
-
-        return this.getGameWithDetails(game._id);
-      } 
-      else if (game.status === 'FINISHED') {
-        await session.abortTransaction();
-        throw new Error('Game has already finished. A new game will start soon.');
-      }
-
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Join game error:', error);
-      
-      if (error.code === 11000) {
-        throw new Error('You have already joined this game');
-      }
-      
-      throw error;
-    } finally {
-      session.endSession();
+  try {
+    const mainGame = await this.getMainGame();
+    
+    if (!mainGame) {
+      throw new Error('No game available');
     }
+
+    const game = await Game.findById(mainGame._id).session(session);
+
+    const existingPlayer = await GamePlayer.findOne({ 
+      userId, 
+      gameId: game._id 
+    }).session(session);
+    
+    if (existingPlayer) {
+      await session.commitTransaction();
+      return this.getGameWithDetails(game._id);
+    }
+
+    if (game.status === 'WAITING' || game.status === 'ACTIVE') {
+      if (game.currentPlayers >= game.maxPlayers) {
+        await session.abortTransaction();
+        throw new Error('Game is full');
+      }
+
+      const isLateJoiner = game.status === 'ACTIVE';
+      const numbersCalledAtJoin = game.numbersCalled || [];
+
+      await GamePlayer.create([{
+        userId,
+        gameId: game._id,
+        isReady: true,
+        playerType: 'PLAYER',
+        joinedAt: new Date()
+      }], { session });
+
+      const bingoCardNumbers = GameUtils.generateBingoCard();
+      await BingoCard.create([{
+        userId,
+        gameId: game._id,
+        numbers: bingoCardNumbers,
+        markedPositions: [12],
+        isLateJoiner: isLateJoiner,
+        joinedAt: new Date(),
+        numbersCalledAtJoin: numbersCalledAtJoin
+      }], { session });
+
+      game.currentPlayers += 1;
+      game.updatedAt = new Date();
+      await game.save();
+
+      await session.commitTransaction();
+
+      console.log(`✅ User ${userId} joined as ${isLateJoiner ? 'LATE PLAYER' : 'PLAYER'}. Total players: ${game.currentPlayers}`);
+
+      // 🛑 REMOVED: Auto-start game logic
+      // The game will now only start when explicitly called via startGame API
+      if (game.status === 'WAITING') {
+        console.log(`⏳ Player joined. Game ${game.code} waiting for manual start. Current: ${game.currentPlayers}/${game.maxPlayers} players`);
+      }
+
+      return this.getGameWithDetails(game._id);
+    } 
+    else if (game.status === 'FINISHED') {
+      await session.abortTransaction();
+      throw new Error('Game has already finished. A new game will start soon.');
+    }
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Join game error:', error);
+    
+    if (error.code === 11000) {
+      throw new Error('You have already joined this game');
+    }
+    
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
 static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -1167,92 +1165,81 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
   //region defar
 // services/gameService.js - Add to existing class
 static async createAutoGame() {
-    try {
-      const gameCode = GameUtils.generateGameCode();
-      
-      const game = new Game({
-        code: gameCode,
-        maxPlayers: 10,
-        isPrivate: false,
-        numbersCalled: [],
-        status: 'WAITING',
-        currentPlayers: 0,
-        isAutoCreated: true,
-        selectedCards: new Map(),
-        cardSelectionEndTime: new Date(Date.now() + 30 * 1000) // 30 seconds
+  try {
+    const gameCode = GameUtils.generateGameCode();
+    
+    const game = new Game({
+      code: gameCode,
+      maxPlayers: 10,
+      isPrivate: false,
+      numbersCalled: [],
+      status: 'WAITING',
+      currentPlayers: 0,
+      isAutoCreated: true,
+      selectedCards: new Map(),
+      cardSelectionEndTime: new Date(Date.now() + 30 * 1000) // 30 seconds
+    });
+
+    await game.save();
+    console.log(`🎯 Auto-created game: ${gameCode} - Waiting for manual start`);
+    
+    return this.getGameWithDetails(game._id);
+  } catch (error) {
+    console.error('❌ Error creating auto game:', error);
+    throw error;
+  }
+}
+
+static async autoRestartGame(gameId) {
+  try {
+    console.log(`🔄 Auto-restarting game ${gameId}...`);
+    
+    const game = await Game.findById(gameId);
+    if (!game || game.status !== 'FINISHED') {
+      console.log('❌ Game not found or not finished, cannot restart');
+      return;
+    }
+
+    // Clear all tracking including card selections
+    this.winnerDeclared.delete(gameId.toString());
+    this.processingGames.delete(gameId.toString());
+
+    game.status = 'WAITING';
+    game.numbersCalled = [];
+    game.winnerId = null;
+    game.startedAt = null;
+    game.endedAt = null;
+    game.selectedCards = new Map();
+    game.cardSelectionEndTime = new Date(Date.now() + 30 * 1000); // Reset to 30 seconds
+    
+    await game.save();
+    
+    await BingoCard.deleteMany({ gameId });
+    
+    const players = await GamePlayer.find({ gameId });
+    for (const player of players) {
+      const bingoCardNumbers = GameUtils.generateBingoCard();
+      await BingoCard.create({
+        userId: player.userId,
+        gameId: gameId,
+        numbers: bingoCardNumbers,
+        markedPositions: [12],
+        isLateJoiner: false,
+        joinedAt: new Date(),
+        numbersCalledAtJoin: []
       });
-
-      await game.save();
-      console.log(`🎯 Auto-created game: ${gameCode} with card selection period`);
-      
-      return this.getGameWithDetails(game._id);
-    } catch (error) {
-      console.error('❌ Error creating auto game:', error);
-      throw error;
     }
+    
+    console.log(`✅ Game ${game.code} restarted with ${players.length} players and 30s card selection`);
+    
+    // 🛑 REMOVED: Auto-start after card selection period
+    // The game will now remain in WAITING state until manually started
+    console.log(`⏳ Game ${game.code} is now waiting for manual start command`);
+    
+  } catch (error) {
+    console.error('❌ Auto-restart error:', error);
   }
-
-  static async autoRestartGame(gameId) {
-    try {
-      console.log(`🔄 Auto-restarting game ${gameId}...`);
-      
-      const game = await Game.findById(gameId);
-      if (!game || game.status !== 'FINISHED') {
-        console.log('❌ Game not found or not finished, cannot restart');
-        return;
-      }
-
-      // Clear all tracking including card selections
-      this.winnerDeclared.delete(gameId.toString());
-      this.processingGames.delete(gameId.toString());
-
-      game.status = 'WAITING';
-      game.numbersCalled = [];
-      game.winnerId = null;
-      game.startedAt = null;
-      game.endedAt = null;
-      game.selectedCards = new Map();
-      game.cardSelectionEndTime = new Date(Date.now() + 30 * 1000); // Reset to 30 seconds
-      
-      await game.save();
-      
-      await BingoCard.deleteMany({ gameId });
-      
-      const players = await GamePlayer.find({ gameId });
-      for (const player of players) {
-        const bingoCardNumbers = GameUtils.generateBingoCard();
-        await BingoCard.create({
-          userId: player.userId,
-          gameId: gameId,
-          numbers: bingoCardNumbers,
-          markedPositions: [12],
-          isLateJoiner: false,
-          joinedAt: new Date(),
-          numbersCalledAtJoin: []
-        });
-      }
-      
-      console.log(`✅ Game ${game.code} restarted with ${players.length} players and 30s card selection`);
-      
-      // Wait for card selection period before starting
-      setTimeout(async () => {
-        try {
-          const updatedGame = await Game.findById(gameId);
-          if (updatedGame && updatedGame.status === 'WAITING' && updatedGame.currentPlayers >= this.MIN_PLAYERS_TO_START) {
-            console.log(`🚀 Auto-starting game ${updatedGame.code} after card selection period`);
-            await this.startGame(gameId);
-          } else {
-            console.log(`⏳ Not enough players to start: ${updatedGame?.currentPlayers || 0}/${this.MIN_PLAYERS_TO_START}`);
-          }
-        } catch (error) {
-          console.error('❌ Error in auto-start after card selection:', error);
-        }
-      }, 30000);
-      
-    } catch (error) {
-      console.error('❌ Auto-restart error:', error);
-    }
-  }
+}
   //endregion
 }
 
