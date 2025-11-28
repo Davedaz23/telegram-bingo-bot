@@ -16,10 +16,10 @@ class BotController {
     this.bot.start(async (ctx) => {
       try {
         console.log('🚀 Start command received from:', ctx.from.id, ctx.from.first_name);
-        
+
         const user = await UserService.findOrCreateUser(ctx.from);
         console.log('✅ User processed:', user.telegramId, user._id);
-        
+
         let balance = 0;
         try {
           balance = await WalletService.getBalanceByTelegramId(user.telegramId);
@@ -35,7 +35,7 @@ class BotController {
             balance = user.walletBalance || 0;
           }
         }
-        
+
         const welcomeMessage = `
 🎯 *Welcome to Bingo Bot, ${user.firstName || user.username}!*
 
@@ -50,7 +50,7 @@ class BotController {
 *Quick Actions:*
         `;
 
-        await ctx.replyWithMarkdown(welcomeMessage, 
+        await ctx.replyWithMarkdown(welcomeMessage,
           Markup.inlineKeyboard([
             [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
             [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
@@ -58,9 +58,9 @@ class BotController {
             [Markup.button.callback('💼 My Wallet', 'show_wallet')]
           ])
         );
-        
+
         console.log('✅ Start command completed successfully');
-        
+
       } catch (error) {
         console.error('❌ Error in start command:', error);
         await ctx.replyWithMarkdown(
@@ -109,7 +109,7 @@ class BotController {
     this.bot.command('deposit', async (ctx) => {
       try {
         await UserService.findOrCreateUser(ctx.from);
-        
+
         const depositMessage = `
 💳 *Deposit Money to Your Wallet*
 
@@ -125,7 +125,7 @@ class BotController {
 
 *Minimum Deposit:* $1 (≈ 50 ETB)
         `;
-        
+
         await ctx.replyWithMarkdown(depositMessage, {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
@@ -147,10 +147,10 @@ class BotController {
     this.bot.command('wallet', async (ctx) => {
       try {
         const user = await UserService.findOrCreateUser(ctx.from);
-        
+
         let balance = 0;
         let transactions = [];
-        
+
         try {
           balance = await WalletService.getBalanceByTelegramId(user.telegramId);
           transactions = await WalletService.getUserTransactions(user.telegramId);
@@ -158,23 +158,23 @@ class BotController {
           await WalletService.initializeWallet(user.telegramId);
           balance = 0;
         }
-        
+
         let message = `💼 *Your Wallet*\n\n*Current Balance:* $${balance}\n\n`;
         message += `📊 *Recent Transactions:*\n`;
-        
+
         if (transactions.length > 0) {
           transactions.slice(0, 5).forEach(tx => {
-            const emoji = tx.type === 'DEPOSIT' ? '📥' : 
-                         tx.type === 'WINNING' ? '🏆' : '🎮';
+            const emoji = tx.type === 'DEPOSIT' ? '📥' :
+              tx.type === 'WINNING' ? '🏆' : '🎮';
             const sign = tx.amount > 0 ? '+' : '';
-            const status = tx.status === 'PENDING' ? '⏳' : 
-                          tx.status === 'COMPLETED' ? '✅' : '❌';
+            const status = tx.status === 'PENDING' ? '⏳' :
+              tx.status === 'COMPLETED' ? '✅' : '❌';
             message += `${emoji} ${sign}$${Math.abs(tx.amount)} - ${tx.description} ${status}\n`;
           });
         } else {
           message += `No transactions yet.\n`;
         }
-        
+
         message += `\n*Quick Actions:*`;
 
         await ctx.replyWithMarkdown(message, {
@@ -196,7 +196,7 @@ class BotController {
       try {
         await UserService.findOrCreateUser(ctx.from);
         const userStats = await UserService.getUserStats(ctx.from.id);
-        
+
         const statsMessage = `
 📊 *Your Bingo Stats*
 
@@ -229,10 +229,10 @@ Keep playing to improve your stats! 🎯
     });
 
     // ========== ADMIN COMMANDS ==========
-    
+
     this.bot.command('admin', async (ctx) => {
       console.log('🔐 Admin command received from:', ctx.from.id, 'Expected admin:', this.adminId);
-      
+
       if (ctx.from.id.toString() !== this.adminId) {
         console.log('❌ Access denied for user:', ctx.from.id);
         await ctx.reply('❌ Access denied');
@@ -241,7 +241,7 @@ Keep playing to improve your stats! 🎯
 
       try {
         console.log('✅ Admin access granted, loading admin panel...');
-        
+
         const [pendingDeposits, pendingSMS, recentSMS] = await Promise.all([
           WalletService.getPendingDeposits().catch(err => { console.error('Error getting pending deposits:', err); return []; }),
           WalletService.getPendingSMSDeposits(5).catch(err => { console.error('Error getting pending SMS:', err); return []; }),
@@ -274,7 +274,7 @@ Keep playing to improve your stats! 🎯
 
         await ctx.replyWithMarkdown(message);
         console.log('✅ Admin panel loaded successfully');
-        
+
       } catch (error) {
         console.error('❌ Admin command error:', error);
         await ctx.reply('❌ Error loading admin panel: ' + error.message);
@@ -293,24 +293,24 @@ Keep playing to improve your stats! 🎯
         const result = await WalletService.getSMSDeposits(page, 10);
 
         let message = `📱 *SMS Deposit History - Page ${page}*\n\n`;
-        
+
         if (result.deposits.length === 0) {
           message += `No SMS deposits found.\n`;
         } else {
           result.deposits.forEach((sms, index) => {
-            const statusEmoji = sms.status === 'APPROVED' ? '✅' : 
-                              sms.status === 'REJECTED' ? '❌' : 
-                              sms.status === 'AUTO_APPROVED' ? '🤖' : '⏳';
+            const statusEmoji = sms.status === 'APPROVED' ? '✅' :
+              sms.status === 'REJECTED' ? '❌' :
+                sms.status === 'AUTO_APPROVED' ? '🤖' : '⏳';
             const userName = sms.userId?.firstName || sms.userId?.username || 'Unknown User';
-            
+
             message += `${statusEmoji} $${sms.extractedAmount} - ${userName}\n`;
             message += `   Method: ${sms.paymentMethod} | Status: ${sms.status}\n`;
             message += `   Time: ${new Date(sms.createdAt).toLocaleDateString()}\n`;
-            
+
             if (sms.status === 'PENDING') {
               message += `   [Approve: /approvesms_${sms._id}] [Reject: /rejectsms_${sms._id}]\n`;
             }
-            
+
             message += `   [View: /viewsms_${sms._id}]\n\n`;
           });
         }
@@ -344,7 +344,7 @@ Keep playing to improve your stats! 🎯
       }
 
       const smsId = ctx.match[1];
-      
+
       try {
         const smsDeposit = await SMSDeposit.findById(smsId)
           .populate('userId', 'firstName username telegramId')
@@ -357,7 +357,7 @@ Keep playing to improve your stats! 🎯
 
         const userName = smsDeposit.userId?.firstName || smsDeposit.userId?.username || 'Unknown User';
         const telegramId = smsDeposit.userId?.telegramId || 'Unknown';
-        
+
         const message = `
 📱 *SMS Deposit Details*
 
@@ -401,7 +401,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 
       try {
         const result = await WalletService.processAutoApproveDeposits(100);
-        
+
         await ctx.replyWithMarkdown(
           `🤖 *Auto-Approval Results*\n\n*Processed:* ${result.processed} deposits\n*Approved:* ${result.approved} deposits\n\nAll deposits up to $100 have been auto-approved.`
         );
@@ -420,16 +420,16 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 
       try {
         const pendingDeposits = await WalletService.getPendingDeposits();
-        
+
         let message = `⏳ *Pending Deposits - ${pendingDeposits.length} total*\n\n`;
-        
+
         if (pendingDeposits.length === 0) {
           message += `No pending deposits. All clear! ✅`;
         } else {
           pendingDeposits.forEach((deposit, index) => {
             const userName = deposit.userId?.firstName || deposit.userId?.username || 'Unknown User';
             const paymentMethod = deposit.metadata?.paymentMethod || 'Unknown';
-            
+
             message += `${index + 1}. $${deposit.amount} - ${userName}\n`;
             message += `   Method: ${paymentMethod}\n`;
             message += `   [Approve: /approve_${deposit._id}]\n\n`;
@@ -451,10 +451,10 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
       }
 
       const transactionId = ctx.match[1];
-      
+
       try {
         const result = await WalletService.approveDeposit(transactionId, ctx.from.id);
-        
+
         await ctx.replyWithMarkdown(
           `✅ *Deposit Approved!*\n\n*User:* ${result.transaction.userId.firstName}\n*Amount:* $${result.transaction.amount}\n*New Balance:* $${result.wallet.balance}`
         );
@@ -483,10 +483,10 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
       }
 
       const smsId = ctx.match[1];
-      
+
       try {
         const result = await WalletService.approveSMSDeposit(smsId, ctx.from.id);
-        
+
         await ctx.replyWithMarkdown(
           `✅ *SMS Deposit Approved!*\n\n*User:* ${result.smsDeposit.userId.firstName}\n*Amount:* $${result.transaction.amount}\n*New Balance:* $${result.wallet.balance}`
         );
@@ -515,10 +515,10 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
       }
 
       const smsId = ctx.match[1];
-      
+
       try {
         const result = await WalletService.rejectSMSDeposit(smsId, ctx.from.id);
-        
+
         await ctx.replyWithMarkdown(
           `❌ *SMS Deposit Rejected!*\n\n*User:* ${result.userId.firstName}\n*Amount:* $${result.extractedAmount}`
         );
@@ -557,7 +557,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 
 *Minimum Deposit:* $1 (≈ 50 ETB)
       `;
-      
+
       await ctx.editMessageText(depositMessage, {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
@@ -574,7 +574,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
     this.bot.action(/deposit_(.+)/, async (ctx) => {
       const methodMap = {
         'cbe': 'CBE Bank',
-        'awash': 'Awash Bank', 
+        'awash': 'Awash Bank',
         'dashen': 'Dashen Bank',
         'cbebirr': 'CBE Birr',
         'telebirr': 'Telebirr'
@@ -586,14 +586,14 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
       if (methodName) {
         ctx.session = ctx.session || {};
         ctx.session.pendingDepositMethod = methodName;
-        
+
         const methods = {
           'CBE Bank': {
             account: '1000200030004000',
             instructions: 'Send money to CBE account 1000200030004000 via CBE Birr app or bank transfer'
           },
           'Awash Bank': {
-            account: '2000300040005000', 
+            account: '2000300040005000',
             instructions: 'Send money to Awash Bank account 2000300040005000'
           },
           'Dashen Bank': {
@@ -648,7 +648,7 @@ ${method.instructions}
         } catch (error) {
           balance = user.walletBalance || 0;
         }
-        
+
         const welcomeMessage = `
 🎯 *Welcome to Bingo Bot, ${user.firstName || user.username}!*
 
@@ -685,7 +685,7 @@ ${method.instructions}
         const user = await UserService.findOrCreateUser(ctx.from);
         let balance = 0;
         let transactions = [];
-        
+
         try {
           balance = await WalletService.getBalanceByTelegramId(user.telegramId);
           transactions = await WalletService.getUserTransactions(user.telegramId);
@@ -693,23 +693,23 @@ ${method.instructions}
           await WalletService.initializeWallet(user.telegramId);
           balance = 0;
         }
-        
+
         let message = `💼 *Your Wallet*\n\n*Current Balance:* $${balance}\n\n`;
         message += `📊 *Recent Transactions:*\n`;
-        
+
         if (transactions.length > 0) {
           transactions.slice(0, 5).forEach(tx => {
-            const emoji = tx.type === 'DEPOSIT' ? '📥' : 
-                         tx.type === 'WINNING' ? '🏆' : '🎮';
+            const emoji = tx.type === 'DEPOSIT' ? '📥' :
+              tx.type === 'WINNING' ? '🏆' : '🎮';
             const sign = tx.amount > 0 ? '+' : '';
-            const status = tx.status === 'PENDING' ? '⏳' : 
-                          tx.status === 'COMPLETED' ? '✅' : '❌';
+            const status = tx.status === 'PENDING' ? '⏳' :
+              tx.status === 'COMPLETED' ? '✅' : '❌';
             message += `${emoji} ${sign}$${Math.abs(tx.amount)} - ${tx.description} ${status}\n`;
           });
         } else {
           message += `No transactions yet.\n`;
         }
-        
+
         message += `\n*Quick Actions:*`;
 
         await ctx.editMessageText(message, {
@@ -730,7 +730,7 @@ ${method.instructions}
       try {
         await UserService.findOrCreateUser(ctx.from);
         const userStats = await UserService.getUserStats(ctx.from.id);
-        
+
         const statsMessage = `
 📊 *Your Bingo Stats*
 
@@ -810,10 +810,10 @@ Keep playing to improve your stats! 🎯
       }
 
       const smsId = ctx.match[1];
-      
+
       try {
         const result = await WalletService.approveSMSDeposit(smsId, ctx.from.id);
-        
+
         await ctx.editMessageText(
           `✅ *SMS Deposit Approved!*\n\n*User:* ${result.smsDeposit.userId.firstName}\n*Amount:* $${result.transaction.amount}\n*New Balance:* $${result.wallet.balance}`,
           { parse_mode: 'Markdown' }
@@ -842,10 +842,10 @@ Keep playing to improve your stats! 🎯
       }
 
       const smsId = ctx.match[1];
-      
+
       try {
         const result = await WalletService.rejectSMSDeposit(smsId, ctx.from.id, 'Manual rejection via button');
-        
+
         await ctx.editMessageText(
           `❌ *SMS Deposit Rejected!*\n\n*User:* ${result.userId.firstName}\n*Amount:* $${result.extractedAmount}`,
           { parse_mode: 'Markdown' }
@@ -874,29 +874,29 @@ Keep playing to improve your stats! 🎯
       }
 
       const page = parseInt(ctx.match[1]);
-      
+
       try {
         const result = await WalletService.getSMSDeposits(page, 10);
 
         let message = `📱 *SMS Deposit History - Page ${page}*\n\n`;
-        
+
         if (result.deposits.length === 0) {
           message += `No SMS deposits found.\n`;
         } else {
           result.deposits.forEach((sms, index) => {
-            const statusEmoji = sms.status === 'APPROVED' ? '✅' : 
-                              sms.status === 'REJECTED' ? '❌' : 
-                              sms.status === 'AUTO_APPROVED' ? '🤖' : '⏳';
+            const statusEmoji = sms.status === 'APPROVED' ? '✅' :
+              sms.status === 'REJECTED' ? '❌' :
+                sms.status === 'AUTO_APPROVED' ? '🤖' : '⏳';
             const userName = sms.userId?.firstName || sms.userId?.username || 'Unknown User';
-            
+
             message += `${statusEmoji} $${sms.extractedAmount} - ${userName}\n`;
             message += `   Method: ${sms.paymentMethod} | Status: ${sms.status}\n`;
             message += `   Time: ${new Date(sms.createdAt).toLocaleDateString()}\n`;
-            
+
             if (sms.status === 'PENDING') {
               message += `   [Approve: /approvesms_${sms._id}] [Reject: /rejectsms_${sms._id}]\n`;
             }
-            
+
             message += `   [View: /viewsms_${sms._id}]\n\n`;
           });
         }
@@ -931,24 +931,24 @@ Keep playing to improve your stats! 🎯
         const result = await WalletService.getSMSDeposits(1, 10);
 
         let message = `📱 *SMS Deposit History - Page 1*\n\n`;
-        
+
         if (result.deposits.length === 0) {
           message += `No SMS deposits found.\n`;
         } else {
           result.deposits.forEach((sms, index) => {
-            const statusEmoji = sms.status === 'APPROVED' ? '✅' : 
-                              sms.status === 'REJECTED' ? '❌' : 
-                              sms.status === 'AUTO_APPROVED' ? '🤖' : '⏳';
+            const statusEmoji = sms.status === 'APPROVED' ? '✅' :
+              sms.status === 'REJECTED' ? '❌' :
+                sms.status === 'AUTO_APPROVED' ? '🤖' : '⏳';
             const userName = sms.userId?.firstName || sms.userId?.username || 'Unknown User';
-            
+
             message += `${statusEmoji} $${sms.extractedAmount} - ${userName}\n`;
             message += `   Method: ${sms.paymentMethod} | Status: ${sms.status}\n`;
             message += `   Time: ${new Date(sms.createdAt).toLocaleDateString()}\n`;
-            
+
             if (sms.status === 'PENDING') {
               message += `   [Approve: /approvesms_${sms._id}] [Reject: /rejectsms_${sms._id}]\n`;
             }
-            
+
             message += `   [View: /viewsms_${sms._id}]\n\n`;
           });
         }
@@ -972,96 +972,195 @@ Keep playing to improve your stats! 🎯
 
     // ========== TEXT HANDLER (MUST BE LAST) ==========
 
-    this.bot.on('text', async (ctx) => {
-      console.log('📝 Text received:', ctx.message.text.substring(0, 100));
-      
-      // Handle SMS deposits
-      if (ctx.session && ctx.session.pendingDepositMethod) {
-        const smsText = ctx.message.text;
-        const paymentMethod = ctx.session.pendingDepositMethod;
+  this.bot.on('text', async (ctx) => {
+  console.log('📝 Text received:', ctx.message.text.substring(0, 100));
 
-        console.log('📱 Processing SMS deposit for method:', paymentMethod);
+  // Handle SMS deposits with payment method selected
+  if (ctx.session && ctx.session.pendingDepositMethod) {
+    const smsText = ctx.message.text;
+    const paymentMethod = ctx.session.pendingDepositMethod;
 
-        try {
-          await UserService.findOrCreateUser(ctx.from);
-          
-          // Process SMS with auto-approval for clear amounts
-          const result = await WalletService.processSMSDeposit(
-            ctx.from.id, 
-            paymentMethod, 
-            smsText,
-            true // Enable auto-approval
-          );
+    console.log('📱 Processing SMS deposit for method:', paymentMethod);
 
-          delete ctx.session.pendingDepositMethod;
+    try {
+      await UserService.findOrCreateUser(ctx.from);
 
-          if (result.autoApproved) {
-            await ctx.replyWithMarkdown(
-              `✅ *Deposit Auto-Approved!*\n\n*Amount:* $${result.transaction.amount}\n*Method:* ${paymentMethod}\n*New Balance:* $${result.wallet.balance}\n\nYour deposit was automatically processed and added to your wallet! 🎉`,
-              Markup.inlineKeyboard([
-                [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
-                [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
-              ])
-            );
-          } else {
-            await ctx.replyWithMarkdown(
-              `⏳ *Deposit Under Review*\n\n*Amount:* $${result.smsDeposit.extractedAmount}\n*Method:* ${paymentMethod}\n*Status:* Pending Manual Approval\n\nYour deposit has been recorded and is being reviewed by our team. You will be notified once approved.`,
-              Markup.inlineKeyboard([
-                [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
-                [Markup.button.callback('🎮 Play Bingo', 'back_to_start')]
-              ])
-            );
+      // Process SMS with auto-approval for clear amounts
+      const result = await WalletService.processSMSDeposit(
+        ctx.from.id,
+        paymentMethod,
+        smsText,
+        true // Enable auto-approval
+      );
 
-            await this.notifyAdminAboutDeposit(result.smsDeposit, ctx.from);
-          }
+      delete ctx.session.pendingDepositMethod;
 
-        } catch (error) {
-          console.error('❌ SMS deposit error:', error);
-          await ctx.replyWithMarkdown(
-            `❌ *Deposit Failed*\n\nError: ${error.message}\n\nPlease check:\n• SMS is from ${paymentMethod}\n• Amount is clearly mentioned\n• Transaction details are included\n\n*Example SMS format:*\n"You have sent 100.00 ETB to Bingo Game. Transaction ID: XYZ123"`,
-            Markup.inlineKeyboard([
-              [Markup.button.callback('🔄 Try Again', 'show_deposit')],
-              [Markup.button.callback('📞 Contact Support', 'contact_support')]
-            ])
-          );
-        }
-        return;
-      }
-
-      // Handle admin commands that might have been missed
-      const text = ctx.message.text;
-      if (text.startsWith('/admin') || 
-          text.startsWith('/smslist') || 
-          text.startsWith('/viewsms_') || 
-          text.startsWith('/approvesms_') || 
-          text.startsWith('/rejectsms_') || 
-          text.startsWith('/autoapprove') || 
-          text.startsWith('/pending') || 
-          text.startsWith('/approve_')) {
-        return;
-      }
-
-      // Handle unknown commands
-      if (ctx.message.text.startsWith('/')) {
+      if (result.autoApproved) {
         await ctx.replyWithMarkdown(
-          `❓ *Unknown Command*\n\nAvailable commands:\n/start, /help, /deposit, /wallet, /stats`,
+          `✅ *Deposit Auto-Approved!*\n\n*Amount:* $${result.transaction.amount}\n*Method:* ${paymentMethod}\n*New Balance:* $${result.wallet.balance}\n\nYour deposit was automatically processed and added to your wallet! 🎉`,
           Markup.inlineKeyboard([
-            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
-            [Markup.button.callback('📋 Show All Commands', 'show_help')]
+            [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
           ])
         );
       } else {
         await ctx.replyWithMarkdown(
-          'Want to play some Bingo? 🎯 Use /help to see all commands!',
+          `⏳ *Deposit Under Review*\n\n*Amount:* $${result.smsDeposit.extractedAmount}\n*Method:* ${paymentMethod}\n*Status:* Pending Manual Approval\n\nYour deposit has been recorded and is being reviewed by our team. You will be notified once approved.`,
           Markup.inlineKeyboard([
-            [Markup.button.webApp('🎮 YES, PLAY BINGO!', 'https://bingominiapp.vercel.app')],
-            [Markup.button.callback('📋 Commands Help', 'show_help')]
+            [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
+            [Markup.button.callback('🎮 Play Bingo', 'back_to_start')]
           ])
         );
+
+        await this.notifyAdminAboutDeposit(result.smsDeposit, ctx.from);
       }
-    });
+
+    } catch (error) {
+      console.error('❌ SMS deposit error:', error);
+      await ctx.replyWithMarkdown(
+        `❌ *Deposit Failed*\n\nError: ${error.message}\n\nPlease check:\n• SMS is from ${paymentMethod}\n• Amount is clearly mentioned\n• Transaction details are included\n\n*Example SMS format:*\n"You have sent 100.00 ETB to Bingo Game. Transaction ID: XYZ123"`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('🔄 Try Again', 'show_deposit')],
+          [Markup.button.callback('📞 Contact Support', 'contact_support')]
+        ])
+      );
+    }
+    return;
   }
 
+  // NEW: Store ANY SMS-like message immediately (even without payment method selection)
+  const text = ctx.message.text;
+  if (this.looksLikeBankSMS(text)) {
+    console.log('🏦 Detected bank SMS, storing immediately...');
+    
+    try {
+      await UserService.findOrCreateUser(ctx.from);
+      
+      // Store the SMS immediately using the new storeSMSMessage method
+      const storedSMS = await WalletService.storeSMSMessage(ctx.from.id, text);
+      
+      console.log('✅ SMS stored successfully:', storedSMS._id);
+      
+      await ctx.replyWithMarkdown(
+        `📱 *SMS Received!*\n\nI've received your bank transaction SMS and stored it for processing.\n\n*Detected Amount:* $${storedSMS.extractedAmount || 'Not detected'}\n*Detected Method:* ${storedSMS.paymentMethod}\n\nWe will process this shortly and notify you of the status.`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('💰 Make Another Deposit', 'show_deposit')],
+          [Markup.button.callback('💼 Check Wallet', 'show_wallet')]
+        ])
+      );
+      
+      // Try to auto-process immediately in background
+      try {
+        console.log('🔄 Attempting to auto-process stored SMS...');
+        const result = await WalletService.processStoredSMS(storedSMS._id, true);
+        
+        if (result.autoApproved) {
+          await ctx.replyWithMarkdown(
+            `✅ *Deposit Auto-Approved!*\n\nYour deposit of $${result.transaction.amount} has been automatically approved!\n*New Balance:* $${result.wallet.balance}\n\nReady to play some Bingo? 🎯`,
+            Markup.inlineKeyboard([
+              [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
+              [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+            ])
+          );
+        } else {
+          await ctx.replyWithMarkdown(
+            `⏳ *Processing Required*\n\nYour SMS has been received but needs manual review. Our team will process it shortly.`,
+            Markup.inlineKeyboard([
+              [Markup.button.callback('💼 Check Status', 'show_wallet')],
+              [Markup.button.callback('💰 New Deposit', 'show_deposit')]
+            ])
+          );
+        }
+      } catch (processError) {
+        console.log('⚠️ Could not auto-process SMS immediately:', processError.message);
+        // Don't show error to user - SMS is stored and will be processed later
+      }
+      
+    } catch (error) {
+      console.error('❌ Error storing SMS:', error);
+      await ctx.reply(
+        `❌ Failed to store your SMS. Please try again or use the deposit menu.`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('💰 Use Deposit Menu', 'show_deposit')],
+          [Markup.button.callback('📞 Contact Support', 'contact_support')]
+        ])
+      );
+    }
+    return;
+  }
+
+  // Handle admin commands that might have been missed
+  if (text.startsWith('/admin') ||
+    text.startsWith('/smslist') ||
+    text.startsWith('/viewsms_') ||
+    text.startsWith('/approvesms_') ||
+    text.startsWith('/rejectsms_') ||
+    text.startsWith('/autoapprove') ||
+    text.startsWith('/pending') ||
+    text.startsWith('/approve_') ||
+    text.startsWith('/processsms')) {
+    return;
+  }
+
+  // Handle unknown commands
+  if (ctx.message.text.startsWith('/')) {
+    await ctx.replyWithMarkdown(
+      `❓ *Unknown Command*\n\nAvailable commands:\n/start, /help, /deposit, /wallet, /stats`,
+      Markup.inlineKeyboard([
+        [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+        [Markup.button.callback('📋 Show All Commands', 'show_help')]
+      ])
+    );
+  } else {
+    await ctx.replyWithMarkdown(
+      'Want to play some Bingo? 🎯 Use /help to see all commands!',
+      Markup.inlineKeyboard([
+        [Markup.button.webApp('🎮 YES, PLAY BINGO!', 'https://bingominiapp.vercel.app')],
+        [Markup.button.callback('📋 Commands Help', 'show_help')]
+      ])
+    );
+  }
+});
+  }
+looksLikeBankSMS(text) {
+  const sms = text.toLowerCase();
+  
+  // Bank SMS patterns for Ethiopian banks
+  const bankPatterns = [
+    // Transaction patterns
+    /sent.*etb|birr|br/i,
+    /received.*etb|birr|br/i, 
+    /transfer.*etb|birr|br/i,
+    /transaction.*etb|birr|br/i,
+    /deposit.*etb|birr|br/i,
+    
+    // Bank names
+    /cbe.*bank/i,
+    /awash.*bank/i,
+    /dashen.*bank/i,
+    /cbe.*birr/i,
+    /telebirr/i,
+    
+    // Common SMS formats
+    /dear.*customer/i,
+    /txn.*id/i,
+    /transaction.*id/i,
+    /balance.*etb|birr|br/i,
+    /amount.*etb|birr|br/i
+  ];
+
+  // Check if text matches any bank pattern
+  const isBankSMS = bankPatterns.some(pattern => pattern.test(sms));
+  
+  // Additional checks for common SMS characteristics
+  const hasAmount = /\d+\.?\d*\s*(ETB|Birr|Br)/i.test(text);
+  const hasTransactionWords = text.includes('Txn') || text.includes('Transaction') || text.includes('sent') || text.includes('received');
+  const reasonableLength = text.length > 20 && text.length < 500;
+
+  console.log(`🔍 SMS Detection: BankPattern=${isBankSMS}, HasAmount=${hasAmount}, HasTransaction=${hasTransactionWords}, LengthOK=${reasonableLength}`);
+
+  return isBankSMS || (hasAmount && hasTransactionWords && reasonableLength);
+}
   async notifyAdminAboutDeposit(smsDeposit, user) {
     try {
       const message = `📥 *New SMS Deposit Needs Review*\n\n` +
@@ -1082,11 +1181,11 @@ Keep playing to improve your stats! 🎯
 
   launch() {
     WalletService.initializePaymentMethods().catch(console.error);
-    
+
     this.bot.launch();
     console.log('🤖 Bingo Bot is running and ready!');
     console.log('👑 Admin ID:', this.adminId);
-    
+
     process.once('SIGINT', () => this.bot.stop('SIGINT'));
     process.once('SIGTERM', () => this.bot.stop('SIGTERM'));
   }
