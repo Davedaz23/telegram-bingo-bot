@@ -972,7 +972,7 @@ Keep playing to improve your stats! 🎯
 
     // ========== TEXT HANDLER (MUST BE LAST) ==========
 
-  this.bot.on('text', async (ctx) => {
+ this.bot.on('text', async (ctx) => {
   console.log('📝 Text received:', ctx.message.text.substring(0, 100));
 
   // Handle SMS deposits with payment method selected
@@ -985,19 +985,26 @@ Keep playing to improve your stats! 🎯
     try {
       await UserService.findOrCreateUser(ctx.from);
 
-      // Process SMS with auto-approval for clear amounts
+      // Store SMS first
+      const storedSMS = await WalletService.storeSMSMessage(
+        ctx.from.id, 
+        smsText, 
+        paymentMethod
+      );
+
+      // Then process it immediately
       const result = await WalletService.processSMSDeposit(
         ctx.from.id,
         paymentMethod,
         smsText,
-        true // Enable auto-approval
+        true
       );
 
       delete ctx.session.pendingDepositMethod;
 
       if (result.autoApproved) {
         await ctx.replyWithMarkdown(
-          `✅ *Deposit Auto-Approved!*\n\n*Amount:* $${result.transaction.amount}\n*Method:* ${paymentMethod}\n*New Balance:* $${result.wallet.balance}\n\nYour deposit was automatically processed and added to your wallet! 🎉`,
+          `✅ *Deposit Auto-Approved!*\n\n*Amount:* $${result.transaction.amount}\n*Method:* ${paymentMethod}\n*New Balance:* $${result.wallet.balance}\n\nYour deposit was automatically processed! 🎉`,
           Markup.inlineKeyboard([
             [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
             [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
@@ -1005,20 +1012,18 @@ Keep playing to improve your stats! 🎯
         );
       } else {
         await ctx.replyWithMarkdown(
-          `⏳ *Deposit Under Review*\n\n*Amount:* $${result.smsDeposit.extractedAmount}\n*Method:* ${paymentMethod}\n*Status:* Pending Manual Approval\n\nYour deposit has been recorded and is being reviewed by our team. You will be notified once approved.`,
+          `⏳ *Deposit Under Review*\n\n*Amount:* $${result.transaction.amount}\n*Method:* ${paymentMethod}\n*Status:* Pending Manual Approval\n\nYour deposit has been recorded and is being reviewed.`,
           Markup.inlineKeyboard([
             [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
             [Markup.button.callback('🎮 Play Bingo', 'back_to_start')]
           ])
         );
-
-        await this.notifyAdminAboutDeposit(result.smsDeposit, ctx.from);
       }
 
     } catch (error) {
       console.error('❌ SMS deposit error:', error);
       await ctx.replyWithMarkdown(
-        `❌ *Deposit Failed*\n\nError: ${error.message}\n\nPlease check:\n• SMS is from ${paymentMethod}\n• Amount is clearly mentioned\n• Transaction details are included\n\n*Example SMS format:*\n"You have sent 100.00 ETB to Bingo Game. Transaction ID: XYZ123"`,
+        `❌ *Deposit Failed*\n\nError: ${error.message}`,
         Markup.inlineKeyboard([
           [Markup.button.callback('🔄 Try Again', 'show_deposit')],
           [Markup.button.callback('📞 Contact Support', 'contact_support')]
@@ -1028,7 +1033,7 @@ Keep playing to improve your stats! 🎯
     return;
   }
 
-  // NEW: Store ANY SMS-like message immediately (even without payment method selection)
+  // Handle automatic SMS detection and storage
   const text = ctx.message.text;
   if (this.looksLikeBankSMS(text)) {
     console.log('🏦 Detected bank SMS, storing immediately...');
@@ -1036,35 +1041,26 @@ Keep playing to improve your stats! 🎯
     try {
       await UserService.findOrCreateUser(ctx.from);
       
-      // Store the SMS immediately using the new storeSMSMessage method
+      // Store the SMS immediately
       const storedSMS = await WalletService.storeSMSMessage(ctx.from.id, text);
       
       console.log('✅ SMS stored successfully:', storedSMS._id);
       
-      await ctx.replyWithMarkdown(
-        `📱 *SMS Received!*\n\nI've received your bank transaction SMS and stored it for processing.\n\n*Detected Amount:* $${storedSMS.extractedAmount || 'Not detected'}\n*Detected Method:* ${storedSMS.paymentMethod}\n\nWe will process this shortly and notify you of the status.`,
-        Markup.inlineKeyboard([
-          [Markup.button.callback('💰 Make Another Deposit', 'show_deposit')],
-          [Markup.button.callback('💼 Check Wallet', 'show_wallet')]
-        ])
-      );
-      
-      // Try to auto-process immediately in background
+      // Try to auto-process immediately
       try {
-        console.log('🔄 Attempting to auto-process stored SMS...');
-        const result = await WalletService.processStoredSMS(storedSMS._id, true);
+        const result = await WalletService.autoProcessReceivedSMS();
         
-        if (result.autoApproved) {
+        if (result.processed > 0) {
           await ctx.replyWithMarkdown(
-            `✅ *Deposit Auto-Approved!*\n\nYour deposit of $${result.transaction.amount} has been automatically approved!\n*New Balance:* $${result.wallet.balance}\n\nReady to play some Bingo? 🎯`,
+            `📱 *SMS Processed!*\n\nYour bank SMS has been processed automatically.\n\n*Amount:* $${storedSMS.extractedAmount}\n*Method:* ${storedSMS.paymentMethod}\n\nCheck your wallet for the updated balance.`,
             Markup.inlineKeyboard([
               [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
-              [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+              [Markup.button.webApp('🎮 Play Bingo', 'https://bingominiapp.vercel.app')]
             ])
           );
         } else {
           await ctx.replyWithMarkdown(
-            `⏳ *Processing Required*\n\nYour SMS has been received but needs manual review. Our team will process it shortly.`,
+            `📱 *SMS Received!*\n\nYour bank SMS has been received and will be processed shortly.\n\n*Amount:* $${storedSMS.extractedAmount}\n*Method:* ${storedSMS.paymentMethod}\n\nWe will notify you once processed.`,
             Markup.inlineKeyboard([
               [Markup.button.callback('💼 Check Status', 'show_wallet')],
               [Markup.button.callback('💰 New Deposit', 'show_deposit')]
@@ -1072,33 +1068,39 @@ Keep playing to improve your stats! 🎯
           );
         }
       } catch (processError) {
-        console.log('⚠️ Could not auto-process SMS immediately:', processError.message);
-        // Don't show error to user - SMS is stored and will be processed later
+        console.log('⚠️ Auto-processing in progress:', processError.message);
+        await ctx.replyWithMarkdown(
+          `📱 *SMS Received!*\n\nYour bank SMS has been stored successfully.\n\n*Amount:* $${storedSMS.extractedAmount}\n*Method:* ${storedSMS.paymentMethod}\n\nProcessing will complete shortly.`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
+            [Markup.button.callback('💰 New Deposit', 'show_deposit')]
+          ])
+        );
       }
       
     } catch (error) {
       console.error('❌ Error storing SMS:', error);
       await ctx.reply(
-        `❌ Failed to store your SMS. Please try again or use the deposit menu.`,
+        `❌ Failed to store your SMS. Please try the deposit menu.`,
         Markup.inlineKeyboard([
-          [Markup.button.callback('💰 Use Deposit Menu', 'show_deposit')],
-          [Markup.button.callback('📞 Contact Support', 'contact_support')]
+          [Markup.button.callback('💰 Use Deposit Menu', 'show_deposit')]
         ])
       );
     }
     return;
   }
 
-  // Handle admin commands that might have been missed
+  // Handle admin commands
   if (text.startsWith('/admin') ||
-    text.startsWith('/smslist') ||
-    text.startsWith('/viewsms_') ||
-    text.startsWith('/approvesms_') ||
-    text.startsWith('/rejectsms_') ||
-    text.startsWith('/autoapprove') ||
-    text.startsWith('/pending') ||
-    text.startsWith('/approve_') ||
-    text.startsWith('/processsms')) {
+      text.startsWith('/smslist') ||
+      text.startsWith('/viewsms_') ||
+      text.startsWith('/approvesms_') ||
+      text.startsWith('/rejectsms_') ||
+      text.startsWith('/autoapprove') ||
+      text.startsWith('/pending') ||
+      text.startsWith('/approve_') ||
+      text.startsWith('/processsms') ||
+      text.startsWith('/received')) {
     return;
   }
 

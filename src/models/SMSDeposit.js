@@ -17,16 +17,17 @@ const smsDepositSchema = new mongoose.Schema({
   },
   paymentMethod: {
     type: String,
+    required: true,
     enum: ['CBE Bank', 'Awash Bank', 'Dashen Bank', 'CBE Birr', 'Telebirr', 'UNKNOWN'],
     default: 'UNKNOWN'
   },
   extractedAmount: {
     type: Number,
-    default: 0
+    required: true
   },
   status: {
     type: String,
-    enum: ['PENDING', 'APPROVED', 'REJECTED', 'AUTO_APPROVED', 'RECEIVED'],
+    enum: ['RECEIVED', 'PENDING', 'APPROVED', 'REJECTED', 'AUTO_APPROVED', 'PROCESSING'],
     default: 'RECEIVED'
   },
   transactionId: {

@@ -8,7 +8,7 @@ const SMSDeposit = require('../models/SMSDeposit');
 
 class WalletService {
   
-  static async resolveUserId(userId) {
+static async resolveUserId(userId) {
     try {
       console.log('🔄 Resolving user ID:', userId, 'Type:', typeof userId);
       
@@ -33,11 +33,11 @@ class WalletService {
       throw error;
     }
   }
- static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
+
+   static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
     try {
       console.log('💾 Storing SMS message from user:', userId);
       
-      // Resolve user ID
       const mongoUserId = await this.resolveUserId(userId);
       const user = await User.findById(mongoUserId);
       
@@ -45,14 +45,10 @@ class WalletService {
         throw new Error('User not found');
       }
 
-      // Extract amount if possible
       const amount = this.extractAmountFromSMS(smsText);
-      
-      // Detect payment method from SMS content
       const detectedMethod = this.detectPaymentMethodFromSMS(smsText);
       const finalMethod = paymentMethod === 'UNKNOWN' ? detectedMethod : paymentMethod;
 
-      // Create SMS deposit record
       const smsDeposit = new SMSDeposit({
         userId: mongoUserId,
         telegramId: user.telegramId,
@@ -82,6 +78,60 @@ class WalletService {
     }
   }
 
+  // NEW: Auto-process received SMS immediately
+  static async autoProcessReceivedSMS() {
+    try {
+      const receivedSMS = await SMSDeposit.find({ status: 'RECEIVED' })
+        .populate('userId', 'firstName username telegramId')
+        .sort({ createdAt: 1 })
+        .limit(50);
+
+      let processedCount = 0;
+      let approvedCount = 0;
+
+      console.log(`🔄 Found ${receivedSMS.length} received SMS to process`);
+
+      for (const sms of receivedSMS) {
+        try {
+          // Mark as processing
+          sms.status = 'PROCESSING';
+          await sms.save();
+
+          const result = await this.processSMSDeposit(
+            sms.userId.telegramId,
+            sms.paymentMethod,
+            sms.originalSMS,
+            true // Auto-approve
+          );
+
+          processedCount++;
+          if (result.autoApproved) {
+            approvedCount++;
+          }
+
+          console.log(`✅ Processed SMS ${sms._id}: ${result.autoApproved ? 'Auto-approved' : 'Needs review'}`);
+        } catch (error) {
+          console.error(`❌ Failed to process SMS ${sms._id}:`, error.message);
+          // Reset status to RECEIVED if processing failed
+          await SMSDeposit.findByIdAndUpdate(sms._id, { 
+            status: 'RECEIVED',
+            'metadata.processError': error.message 
+          });
+        }
+      }
+
+      return { 
+        total: receivedSMS.length, 
+        processed: processedCount, 
+        approved: approvedCount 
+      };
+    } catch (error) {
+      console.error('❌ Error in auto-process SMS:', error);
+      throw error;
+    }
+  }
+
+
   // NEW: Detect payment method from SMS content
   static detectPaymentMethodFromSMS(smsText) {
     const sms = smsText.toLowerCase();
@@ -96,132 +146,111 @@ class WalletService {
   }
 
   // NEW: Process stored SMS for deposit
-  static async processStoredSMS(smsDepositId, autoApprove = true) {
+  static async processSMSDeposit(userId, paymentMethodName, smsText, autoApprove = true) {
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
-      console.log('🔄 Processing stored SMS:', smsDepositId);
+      console.log('🚀 Starting SMS deposit processing...');
       
-      const smsDeposit = await SMSDeposit.findById(smsDepositId).session(session);
+      const mongoUserId = await this.resolveUserId(userId);
+      const user = await User.findById(mongoUserId);
       
-      if (!smsDeposit) {
-        throw new Error('SMS deposit not found');
-      }
-
-      if (smsDeposit.status !== 'RECEIVED') {
-        throw new Error(`SMS already processed: ${smsDeposit.status}`);
-      }
-
-      const user = await User.findById(smsDeposit.userId).session(session);
       if (!user) {
         throw new Error('User not found');
       }
 
-      // Extract amount if not already done
-      let amount = smsDeposit.extractedAmount;
-      if (!amount || amount <= 0) {
-        amount = this.extractAmountFromSMS(smsDeposit.originalSMS);
-        if (!amount || amount <= 0) {
-          throw new Error('Could not extract valid amount from SMS');
-        }
-        smsDeposit.extractedAmount = amount;
+      console.log('✅ User found:', user.telegramId);
+
+      const paymentMethod = await PaymentMethod.findOne({ 
+        name: paymentMethodName
+      });
+      
+      if (!paymentMethod && paymentMethodName !== 'UNKNOWN') {
+        throw new Error('Invalid payment method: ' + paymentMethodName);
       }
 
-      console.log('✅ Amount for processing:', amount);
+      console.log('✅ Payment method:', paymentMethodName);
+
+      const amount = this.extractAmountFromSMS(smsText);
+      if (!amount || amount <= 0) {
+        throw new Error('Could not extract valid amount from SMS.');
+      }
+
+      console.log('✅ Amount extracted:', amount);
 
       let transaction = null;
       let wallet = null;
 
       // AUTO-APPROVE LOGIC
-      const shouldAutoApprove = autoApprove && this.shouldAutoApproveSMS(smsDeposit.originalSMS, amount);
+      const shouldAutoApprove = autoApprove && this.shouldAutoApproveSMS(smsText, amount);
       
       if (shouldAutoApprove) {
-        console.log('🤖 Auto-approving stored SMS deposit...');
+        console.log('🤖 Auto-approving deposit...');
         
-        wallet = await this.getWallet(smsDeposit.userId);
+        wallet = await this.getWallet(mongoUserId);
         const balanceBefore = wallet.balance;
         wallet.balance += amount;
         const balanceAfter = wallet.balance;
 
-        // Create completed transaction
         transaction = new Transaction({
-          userId: smsDeposit.userId,
+          userId: mongoUserId,
           type: 'DEPOSIT',
           amount,
           balanceBefore,
           balanceAfter,
           status: 'COMPLETED',
-          description: `Auto-approved deposit via ${smsDeposit.paymentMethod}`,
+          description: `Auto-approved deposit via ${paymentMethodName}`,
           reference: `SMS-AUTO-${Date.now()}`,
           metadata: {
-            paymentMethod: smsDeposit.paymentMethod,
-            smsText: smsDeposit.originalSMS.substring(0, 500),
+            paymentMethod: paymentMethodName,
+            smsText: smsText.substring(0, 500),
             approvedBy: 'SYSTEM',
             approvedAt: new Date(),
             autoApproved: true,
-            smsDepositId: smsDeposit._id,
-            confidence: this.getSMSConfidence(smsDeposit.originalSMS)
+            confidence: this.getSMSConfidence(smsText)
           }
         });
-
-        smsDeposit.status = 'AUTO_APPROVED';
-        smsDeposit.transactionId = transaction._id;
-        smsDeposit.autoApproved = true;
-        smsDeposit.processedAt = new Date();
-        smsDeposit.metadata.autoProcessAttempted = true;
-        smsDeposit.metadata.processedAt = new Date();
 
         await transaction.save({ session });
         await wallet.save({ session });
         
-        console.log(`✅ Auto-approved stored SMS deposit: $${amount} for user ${user.telegramId}`);
+        console.log(`✅ Auto-approved SMS deposit: $${amount} for user ${user.telegramId}`);
       } else {
-        console.log('⏳ Setting stored SMS for manual review...');
+        console.log('⏳ Creating pending transaction...');
         
-        // For unclear amounts, set to pending for manual review
-        wallet = await this.getWallet(smsDeposit.userId);
+        wallet = await this.getWallet(mongoUserId);
         const balanceBefore = wallet.balance;
 
         transaction = new Transaction({
-          userId: smsDeposit.userId,
+          userId: mongoUserId,
           type: 'DEPOSIT',
           amount,
           balanceBefore,
           balanceAfter: balanceBefore,
           status: 'PENDING',
-          description: `SMS deposit via ${smsDeposit.paymentMethod} - Needs Review`,
+          description: `SMS deposit via ${paymentMethodName} - Needs Review`,
           reference: `SMS-PENDING-${Date.now()}`,
           metadata: {
-            paymentMethod: smsDeposit.paymentMethod,
-            smsText: smsDeposit.originalSMS.substring(0, 500),
+            paymentMethod: paymentMethodName,
+            smsText: smsText.substring(0, 500),
             approvedBy: null,
             approvedAt: null,
             autoApproved: false,
-            smsDepositId: smsDeposit._id,
-            confidence: this.getSMSConfidence(smsDeposit.originalSMS),
+            confidence: this.getSMSConfidence(smsText),
             needsManualReview: true,
-            reviewReason: this.getReviewReason(smsDeposit.originalSMS, amount)
+            reviewReason: this.getReviewReason(smsText, amount)
           }
         });
-
-        smsDeposit.status = 'PENDING';
-        smsDeposit.transactionId = transaction._id;
-        smsDeposit.metadata.autoProcessAttempted = true;
-        smsDeposit.metadata.needsManualReview = true;
-        smsDeposit.metadata.reviewReason = this.getReviewReason(smsDeposit.originalSMS, amount);
 
         await transaction.save({ session });
       }
 
-      // Update SMS deposit
-      await smsDeposit.save({ session });
       await session.commitTransaction();
 
-      console.log('✅ Stored SMS processed successfully');
+      console.log('✅ SMS deposit processed successfully');
 
       return {
-        smsDeposit,
         transaction,
         wallet,
         autoApproved: shouldAutoApprove
@@ -229,25 +258,150 @@ class WalletService {
 
     } catch (error) {
       await session.abortTransaction();
-      console.error('❌ Error processing stored SMS:', error);
-      
-      // Update SMS deposit with error info
-      try {
-        const smsDeposit = await SMSDeposit.findById(smsDepositId);
-        if (smsDeposit) {
-          smsDeposit.metadata.processError = error.message;
-          smsDeposit.metadata.autoProcessAttempted = true;
-          await smsDeposit.save();
-        }
-      } catch (updateError) {
-        console.error('❌ Error updating SMS deposit with error:', updateError);
-      }
-      
+      console.error('❌ Error processing SMS deposit:', error);
       throw error;
     } finally {
       session.endSession();
     }
   }
+
+  // NEW: Process existing SMS deposit record
+  static async processExistingSMSDeposit(smsDepositId, adminUserId = null) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      console.log('🔄 Processing existing SMS deposit:', smsDepositId);
+      
+      const smsDeposit = await SMSDeposit.findById(smsDepositId).session(session);
+      
+      if (!smsDeposit) {
+        throw new Error('SMS deposit not found');
+      }
+
+      if (smsDeposit.status === 'APPROVED' || smsDeposit.status === 'AUTO_APPROVED') {
+        throw new Error('SMS deposit already processed');
+      }
+
+      const user = await User.findById(smsDeposit.userId).session(session);
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      const amount = smsDeposit.extractedAmount;
+      if (!amount || amount <= 0) {
+        throw new Error('Invalid amount in SMS deposit');
+      }
+
+      console.log('✅ Processing amount:', amount);
+
+      const wallet = await this.getWallet(smsDeposit.userId);
+      const balanceBefore = wallet.balance;
+      wallet.balance += amount;
+      const balanceAfter = wallet.balance;
+
+      const isAutoApproved = !adminUserId && this.shouldAutoApproveSMS(smsDeposit.originalSMS, amount);
+      
+      const transaction = new Transaction({
+        userId: smsDeposit.userId,
+        type: 'DEPOSIT',
+        amount,
+        balanceBefore,
+        balanceAfter,
+        status: isAutoApproved ? 'COMPLETED' : 'PENDING',
+        description: `${isAutoApproved ? 'Auto-approved' : 'Approved'} deposit via ${smsDeposit.paymentMethod}`,
+        reference: `SMS-${isAutoApproved ? 'AUTO' : 'APPROVED'}-${Date.now()}`,
+        metadata: {
+          paymentMethod: smsDeposit.paymentMethod,
+          smsText: smsDeposit.originalSMS.substring(0, 500),
+          approvedBy: isAutoApproved ? 'SYSTEM' : adminUserId,
+          approvedAt: new Date(),
+          autoApproved: isAutoApproved,
+          smsDepositId: smsDeposit._id,
+          confidence: this.getSMSConfidence(smsDeposit.originalSMS)
+        }
+      });
+
+      // Update SMS deposit
+      smsDeposit.status = isAutoApproved ? 'AUTO_APPROVED' : 'APPROVED';
+      smsDeposit.transactionId = transaction._id;
+      smsDeposit.autoApproved = isAutoApproved;
+      smsDeposit.processedAt = new Date();
+      
+      if (adminUserId) {
+        smsDeposit.processedBy = adminUserId;
+      }
+
+      await transaction.save({ session });
+      await wallet.save({ session });
+      await smsDeposit.save({ session });
+      await session.commitTransaction();
+
+      console.log(`✅ Processed SMS deposit: $${amount} for user ${user.telegramId}`);
+
+      return {
+        smsDeposit,
+        transaction,
+        wallet,
+        autoApproved: isAutoApproved
+      };
+
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Error processing existing SMS deposit:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+   static async getAllSMSDeposits(page = 1, limit = 20, status = null) {
+    try {
+      const skip = (page - 1) * limit;
+      const query = status ? { status } : {};
+      
+      const [deposits, total] = await Promise.all([
+        SMSDeposit.find(query)
+          .populate('userId', 'firstName username telegramId')
+          .populate('processedBy', 'firstName username')
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit),
+        SMSDeposit.countDocuments(query)
+      ]);
+
+      return {
+        deposits,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      console.error('❌ Error getting SMS deposits:', error);
+      throw error;
+    }
+  }
+
+  // NEW: Get received SMS for admin
+  static async getReceivedSMSDeposits(limit = 50) {
+    try {
+      return await SMSDeposit.find({ status: 'RECEIVED' })
+        .populate('userId', 'firstName username telegramId')
+        .sort({ createdAt: 1 })
+        .limit(limit);
+    } catch (error) {
+      console.error('❌ Error getting received SMS deposits:', error);
+      throw error;
+    }
+  }
+
+  // NEW: Admin approve received SMS
+  static async approveReceivedSMS(smsDepositId, adminUserId) {
+    return await this.processExistingSMSDeposit(smsDepositId, adminUserId);
+  }
+
 
   // NEW: Get unprocessed SMS messages
   static async getUnprocessedSMS(limit = 50) {
