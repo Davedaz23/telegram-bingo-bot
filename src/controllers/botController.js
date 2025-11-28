@@ -1,4 +1,4 @@
-// botController.js - COMPLETE WORKING VERSION WITH ADMIN
+// botController.js - COMPLETE WORKING VERSION WITH SIMPLIFIED SMS PROCESSING
 const { Telegraf, Markup } = require('telegraf');
 const UserService = require('../services/userService');
 const WalletService = require('../services/walletService');
@@ -7,7 +7,7 @@ const SMSDeposit = require('../models/SMSDeposit');
 class BotController {
   constructor(botToken, adminId) {
     this.bot = new Telegraf(botToken);
-    this.adminId = adminId.toString(); // Ensure string comparison
+    this.adminId = adminId.toString();
     this.setupHandlers();
   }
 
@@ -17,11 +17,9 @@ class BotController {
       try {
         console.log('🚀 Start command received from:', ctx.from.id, ctx.from.first_name);
         
-        // Create or find user
         const user = await UserService.findOrCreateUser(ctx.from);
         console.log('✅ User processed:', user.telegramId, user._id);
         
-        // Initialize wallet if needed
         let balance = 0;
         try {
           balance = await WalletService.getBalanceByTelegramId(user.telegramId);
@@ -65,8 +63,6 @@ class BotController {
         
       } catch (error) {
         console.error('❌ Error in start command:', error);
-        
-        // Fallback message if everything fails
         await ctx.replyWithMarkdown(
           `🎯 *Welcome to Bingo Bot!*\n\nWe're setting up your account...\n\nClick below to play:`,
           Markup.inlineKeyboard([
@@ -112,7 +108,6 @@ class BotController {
     // Deposit command
     this.bot.command('deposit', async (ctx) => {
       try {
-        // Ensure user exists
         await UserService.findOrCreateUser(ctx.from);
         
         const depositMessage = `
@@ -126,7 +121,7 @@ class BotController {
 1. Select payment method below
 2. Send money to the provided account
 3. Forward/paste the confirmation SMS
-4. Admin will verify and approve
+4. We'll automatically process it
 
 *Minimum Deposit:* $1 (≈ 50 ETB)
         `;
@@ -151,7 +146,6 @@ class BotController {
     // Wallet command
     this.bot.command('wallet', async (ctx) => {
       try {
-        // Ensure user exists
         const user = await UserService.findOrCreateUser(ctx.from);
         
         let balance = 0;
@@ -161,7 +155,6 @@ class BotController {
           balance = await WalletService.getBalanceByTelegramId(user.telegramId);
           transactions = await WalletService.getUserTransactions(user.telegramId);
         } catch (error) {
-          console.log('⚠️ Wallet not initialized, creating now...');
           await WalletService.initializeWallet(user.telegramId);
           balance = 0;
         }
@@ -201,9 +194,7 @@ class BotController {
     // Stats command
     this.bot.command('stats', async (ctx) => {
       try {
-        // Ensure user exists
         await UserService.findOrCreateUser(ctx.from);
-        
         const userStats = await UserService.getUserStats(ctx.from.id);
         
         const statsMessage = `
@@ -239,7 +230,6 @@ Keep playing to improve your stats! 🎯
 
     // ========== ADMIN COMMANDS ==========
     
-    // Main admin command - MUST BE DEFINED BEFORE TEXT HANDLER
     this.bot.command('admin', async (ctx) => {
       console.log('🔐 Admin command received from:', ctx.from.id, 'Expected admin:', this.adminId);
       
@@ -327,7 +317,6 @@ Keep playing to improve your stats! 🎯
 
         message += `\nPage ${page} of ${result.pagination.pages}`;
 
-        // Pagination buttons
         const keyboard = [];
         if (page > 1) {
           keyboard.push(Markup.button.callback('⬅️ Previous', `sms_page_${page - 1}`));
@@ -411,7 +400,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
       }
 
       try {
-        const result = await WalletService.processAutoApproveDeposits(100); // Auto-approve up to $100
+        const result = await WalletService.processAutoApproveDeposits(100);
         
         await ctx.replyWithMarkdown(
           `🤖 *Auto-Approval Results*\n\n*Processed:* ${result.processed} deposits\n*Approved:* ${result.approved} deposits\n\nAll deposits up to $100 have been auto-approved.`
@@ -564,7 +553,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 1. Select payment method below
 2. Send money to the provided account
 3. Forward/paste the confirmation SMS
-4. Admin will verify and approve
+4. We'll automatically process it
 
 *Minimum Deposit:* $1 (≈ 50 ETB)
       `;
@@ -635,7 +624,7 @@ ${method.instructions}
 *After sending money:*
 1. You will receive an SMS confirmation
 2. Forward that SMS here or copy-paste the text
-3. We will verify and add funds to your wallet
+3. We will automatically process your deposit
 
 ⚠️ *Only send from your registered accounts*
         `;
@@ -830,7 +819,6 @@ Keep playing to improve your stats! 🎯
           { parse_mode: 'Markdown' }
         );
 
-        // Notify user
         await this.bot.telegram.sendMessage(
           result.smsDeposit.userId.telegramId,
           `🎉 *Deposit Approved!*\n\nYour deposit of $${result.transaction.amount} has been approved!\n*New Balance:* $${result.wallet.balance}\n\nReady to play some Bingo? 🎯`,
@@ -863,7 +851,6 @@ Keep playing to improve your stats! 🎯
           { parse_mode: 'Markdown' }
         );
 
-        // Notify user
         await this.bot.telegram.sendMessage(
           result.userId.telegramId,
           `❌ *Deposit Rejected*\n\nYour deposit of $${result.extractedAmount} was rejected.\n*Reason:* Manual rejection by admin`,
@@ -998,19 +985,19 @@ Keep playing to improve your stats! 🎯
         try {
           await UserService.findOrCreateUser(ctx.from);
           
-          // Process SMS with auto-approval for small amounts (<= $50)
+          // Process SMS with auto-approval for clear amounts
           const result = await WalletService.processSMSDeposit(
             ctx.from.id, 
             paymentMethod, 
             smsText,
-            true // Enable auto-approval for small amounts
+            true // Enable auto-approval
           );
 
           delete ctx.session.pendingDepositMethod;
 
           if (result.autoApproved) {
             await ctx.replyWithMarkdown(
-              `✅ *Deposit Auto-Approved!*\n\n*Amount:* $${result.transaction.amount}\n*Method:* ${paymentMethod}\n*New Balance:* $${result.wallet.balance}\n\nYour deposit was automatically approved and added to your wallet! 🎉`,
+              `✅ *Deposit Auto-Approved!*\n\n*Amount:* $${result.transaction.amount}\n*Method:* ${paymentMethod}\n*New Balance:* $${result.wallet.balance}\n\nYour deposit was automatically processed and added to your wallet! 🎉`,
               Markup.inlineKeyboard([
                 [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
                 [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
@@ -1018,7 +1005,7 @@ Keep playing to improve your stats! 🎯
             );
           } else {
             await ctx.replyWithMarkdown(
-              `✅ *Deposit Request Submitted!*\n\n*Amount:* $${result.smsDeposit.extractedAmount}\n*Method:* ${paymentMethod}\n*Status:* ⏳ Pending Approval\n\nYour deposit is under review. You will be notified once approved.`,
+              `⏳ *Deposit Under Review*\n\n*Amount:* $${result.smsDeposit.extractedAmount}\n*Method:* ${paymentMethod}\n*Status:* Pending Manual Approval\n\nYour deposit has been recorded and is being reviewed by our team. You will be notified once approved.`,
               Markup.inlineKeyboard([
                 [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
                 [Markup.button.callback('🎮 Play Bingo', 'back_to_start')]
@@ -1051,7 +1038,6 @@ Keep playing to improve your stats! 🎯
           text.startsWith('/autoapprove') || 
           text.startsWith('/pending') || 
           text.startsWith('/approve_')) {
-        // Let the command handlers handle these
         return;
       }
 
@@ -1078,7 +1064,7 @@ Keep playing to improve your stats! 🎯
 
   async notifyAdminAboutDeposit(smsDeposit, user) {
     try {
-      const message = `📥 *New SMS Deposit Request*\n\n` +
+      const message = `📥 *New SMS Deposit Needs Review*\n\n` +
         `*User:* ${user.first_name} (${user.username || 'No username'})\n` +
         `*Telegram ID:* ${user.id}\n` +
         `*Amount:* $${smsDeposit.extractedAmount}\n` +
@@ -1095,7 +1081,6 @@ Keep playing to improve your stats! 🎯
   }
 
   launch() {
-    // Initialize payment methods on startup
     WalletService.initializePaymentMethods().catch(console.error);
     
     this.bot.launch();
