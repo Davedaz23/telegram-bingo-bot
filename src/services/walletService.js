@@ -4,6 +4,8 @@ const Wallet = require('../models/Wallet');
 const Transaction = require('../models/Transaction');
 const User = require('../models/User');
 const PaymentMethod = require('../models/PaymentMethod');
+const SMSDeposit = require('../models/SMSDeposit');
+
 
 class WalletService {
   
@@ -387,45 +389,340 @@ class WalletService {
 
   static extractAmountFromSMS(smsText, paymentMethod) {
     try {
-      const formats = {
-        'CBE Bank': /(\d+\.?\d*)\s*ETB/i,
-        'Awash Bank': /(\d+\.?\d*)\s*ETB/i,
-        'Dashen Bank': /(\d+\.?\d*)\s*ETB/i,
-        'CBE Birr': /(\d+\.?\d*)\s*ETB/i,
-        'Telebirr': /(\d+\.?\d*)\s*ETB/i
-      };
+      console.log('🔍 Extracting amount from SMS:', smsText.substring(0, 100));
+      
+      // Multiple pattern matching for Ethiopian SMS formats
+      const patterns = [
+        /(\d+\.?\d*)\s*ETB/i,
+        /(\d+\.?\d*)\s*Br/i,
+        /(\d+\.?\d*)\s*birr/i,
+        /amount[:\s]*(\d+\.?\d*)/i,
+        /sent\s*(\d+\.?\d*)/i,
+        /received\s*(\d+\.?\d*)/i,
+        /transfer\s*(\d+\.?\d*)/i
+      ];
 
-      const regex = formats[paymentMethod] || /(\d+\.?\d*)\s*ETB/i;
-      const match = smsText.match(regex);
+      let amount = null;
       
-      if (match && match[1]) {
-        return parseFloat(match[1]);
+      for (const pattern of patterns) {
+        const match = smsText.match(pattern);
+        if (match && match[1]) {
+          amount = parseFloat(match[1]);
+          console.log('✅ Amount extracted with pattern:', pattern, amount);
+          break;
+        }
       }
-      
-      // Alternative pattern matching
-      const altMatch = smsText.match(/(\d+)\s*birr/i) || smsText.match(/amount[:\s]*(\d+)/i);
-      return altMatch ? parseFloat(altMatch[1]) : null;
+
+      // Special handling for CBE Birr format
+      if (!amount && paymentMethod === 'CBE Birr') {
+        const cbeMatch = smsText.match(/sent\s*(\d+\.?\d*)\.\d*\s*Br/i);
+        if (cbeMatch) {
+          amount = parseFloat(cbeMatch[1]);
+          console.log('✅ CBE Birr amount extracted:', amount);
+        }
+      }
+
+      return amount;
     } catch (error) {
-      console.error('Error extracting amount from SMS:', error);
+      console.error('❌ Error extracting amount from SMS:', error);
       return null;
     }
   }
 
   // Validate SMS format
-  static validateSMSFormat(smsText, paymentMethod) {
+ static validateSMSFormat(smsText, paymentMethod) {
     const method = paymentMethod.toLowerCase();
     const sms = smsText.toLowerCase();
     
+    console.log('🔍 Validating SMS for method:', method);
+    
     const validators = {
-      'cbe bank': () => sms.includes('cbe') && sms.includes('etb'),
-      'awash bank': () => sms.includes('awash') && sms.includes('etb'),
-      'dashen bank': () => sms.includes('dashen') && sms.includes('etb'),
-      'cbe birr': () => (sms.includes('cbe') || sms.includes('cbebirr')) && sms.includes('etb'),
-      'telebirr': () => sms.includes('telebirr') && sms.includes('etb')
+      'cbe bank': () => (sms.includes('cbe') && (sms.includes('etb') || sms.includes('birr') || sms.includes('br'))) || sms.includes('commercial bank'),
+      'awash bank': () => sms.includes('awash') && (sms.includes('etb') || sms.includes('birr') || sms.includes('br')),
+      'dashen bank': () => sms.includes('dashen') && (sms.includes('etb') || sms.includes('birr') || sms.includes('br')),
+      'cbe birr': () => (sms.includes('cbe') || sms.includes('cbebirr') || sms.includes('commercial bank')) && (sms.includes('birr') || sms.includes('br') || sms.includes('etb')),
+      'telebirr': () => sms.includes('telebirr') && (sms.includes('birr') || sms.includes('br') || sms.includes('etb'))
     };
 
     const validator = validators[method];
-    return validator ? validator() : false;
+    const isValid = validator ? validator() : false;
+    
+    console.log('✅ SMS validation result:', isValid);
+    return isValid;
+  }
+   // NEW: Process SMS deposit with auto-approval option
+  static async processSMSDeposit(userId, paymentMethodName, smsText, autoApprove = false) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      // Resolve user ID
+      const mongoUserId = await this.resolveUserId(userId);
+      const user = await User.findById(mongoUserId);
+      
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      // Get payment method
+      const paymentMethod = await PaymentMethod.findOne({ 
+        name: paymentMethodName, 
+        isActive: true 
+      });
+      
+      if (!paymentMethod) {
+        throw new Error('Invalid payment method');
+      }
+
+      // Validate SMS format
+      if (!this.validateSMSFormat(smsText, paymentMethodName)) {
+        throw new Error('Invalid SMS format for selected payment method');
+      }
+
+      // Extract amount
+      const amount = this.extractAmountFromSMS(smsText, paymentMethodName);
+      if (!amount || amount <= 0) {
+        throw new Error('Could not extract valid amount from SMS');
+      }
+
+      // Create SMS deposit record
+      const smsDeposit = new SMSDeposit({
+        userId: mongoUserId,
+        telegramId: user.telegramId,
+        originalSMS: smsText,
+        paymentMethod: paymentMethodName,
+        extractedAmount: amount,
+        status: 'PENDING',
+        metadata: {
+          smsLength: smsText.length,
+          hasTransactionId: smsText.includes('Txn ID') || smsText.includes('Transaction'),
+          hasBalance: smsText.includes('balance') || smsText.includes('Balance')
+        }
+      });
+
+      let transaction = null;
+      let wallet = null;
+
+      // Auto-approve if enabled
+      if (autoApprove) {
+        wallet = await this.getWallet(mongoUserId);
+        const balanceBefore = wallet.balance;
+        wallet.balance += amount;
+        const balanceAfter = wallet.balance;
+
+        // Create completed transaction
+        transaction = new Transaction({
+          userId: mongoUserId,
+          type: 'DEPOSIT',
+          amount,
+          balanceBefore,
+          balanceAfter,
+          status: 'COMPLETED',
+          description: `Auto-approved deposit via ${paymentMethodName}`,
+          reference: `SMS-AUTO-${Date.now()}`,
+          metadata: {
+            paymentMethod: paymentMethodName,
+            smsText: smsText.substring(0, 500), // Store first 500 chars
+            approvedBy: 'SYSTEM',
+            approvedAt: new Date(),
+            autoApproved: true,
+            smsDepositId: smsDeposit._id
+          }
+        });
+
+        smsDeposit.status = 'AUTO_APPROVED';
+        smsDeposit.transactionId = transaction._id;
+        smsDeposit.autoApproved = true;
+
+        await transaction.save({ session });
+        await wallet.save({ session });
+        
+        console.log(`✅ Auto-approved SMS deposit: $${amount} for user ${user.telegramId}`);
+      }
+
+      await smsDeposit.save({ session });
+      await session.commitTransaction();
+
+      return {
+        smsDeposit,
+        transaction,
+        wallet,
+        autoApproved: autoApprove
+      };
+
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Error processing SMS deposit:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
+  // NEW: Manual approval for SMS deposits
+  static async approveSMSDeposit(smsDepositId, adminUserId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      const smsDeposit = await SMSDeposit.findById(smsDepositId).session(session);
+      
+      if (!smsDeposit) {
+        throw new Error('SMS deposit not found');
+      }
+
+      if (smsDeposit.status !== 'PENDING') {
+        throw new Error(`SMS deposit already ${smsDeposit.status}`);
+      }
+
+      const wallet = await this.getWallet(smsDeposit.userId);
+      const balanceBefore = wallet.balance;
+      wallet.balance += smsDeposit.extractedAmount;
+      const balanceAfter = wallet.balance;
+
+      // Create completed transaction
+      const transaction = new Transaction({
+        userId: smsDeposit.userId,
+        type: 'DEPOSIT',
+        amount: smsDeposit.extractedAmount,
+        balanceBefore,
+        balanceAfter,
+        status: 'COMPLETED',
+        description: `Approved deposit via ${smsDeposit.paymentMethod}`,
+        reference: `SMS-APPROVED-${Date.now()}`,
+        metadata: {
+          paymentMethod: smsDeposit.paymentMethod,
+          smsText: smsDeposit.originalSMS.substring(0, 500),
+          approvedBy: adminUserId,
+          approvedAt: new Date(),
+          smsDepositId: smsDeposit._id
+        }
+      });
+
+      // Update SMS deposit
+      smsDeposit.status = 'APPROVED';
+      smsDeposit.transactionId = transaction._id;
+      smsDeposit.processedBy = adminUserId;
+      smsDeposit.processedAt = new Date();
+
+      await transaction.save({ session });
+      await wallet.save({ session });
+      await smsDeposit.save({ session });
+      await session.commitTransaction();
+
+      console.log(`✅ Manual approved SMS deposit: $${smsDeposit.extractedAmount} for user ${smsDeposit.telegramId}`);
+
+      return {
+        smsDeposit,
+        transaction,
+        wallet
+      };
+
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Error approving SMS deposit:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
+  // NEW: Reject SMS deposit
+  static async rejectSMSDeposit(smsDepositId, adminUserId, reason = '') {
+    try {
+      const smsDeposit = await SMSDeposit.findById(smsDepositId);
+      
+      if (!smsDeposit) {
+        throw new Error('SMS deposit not found');
+      }
+
+      if (smsDeposit.status !== 'PENDING') {
+        throw new Error(`SMS deposit already ${smsDeposit.status}`);
+      }
+
+      smsDeposit.status = 'REJECTED';
+      smsDeposit.processedBy = adminUserId;
+      smsDeposit.processedAt = new Date();
+      smsDeposit.metadata.rejectionReason = reason;
+
+      await smsDeposit.save();
+
+      console.log(`❌ Rejected SMS deposit: $${smsDeposit.extractedAmount} for user ${smsDeposit.telegramId}`);
+
+      return smsDeposit;
+    } catch (error) {
+      console.error('❌ Error rejecting SMS deposit:', error);
+      throw error;
+    }
+  }
+
+  // NEW: Get pending SMS deposits
+  static async getPendingSMSDeposits(limit = 50) {
+    try {
+      return await SMSDeposit.find({ status: 'PENDING' })
+        .populate('userId', 'firstName username telegramId')
+        .sort({ createdAt: 1 })
+        .limit(limit);
+    } catch (error) {
+      console.error('❌ Error getting pending SMS deposits:', error);
+      throw error;
+    }
+  }
+
+  // NEW: Get all SMS deposits with pagination
+  static async getSMSDeposits(page = 1, limit = 20, status = null) {
+    try {
+      const skip = (page - 1) * limit;
+      const query = status ? { status } : {};
+      
+      const [deposits, total] = await Promise.all([
+        SMSDeposit.find(query)
+          .populate('userId', 'firstName username telegramId')
+          .populate('processedBy', 'firstName username')
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit),
+        SMSDeposit.countDocuments(query)
+      ]);
+
+      return {
+        deposits,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      console.error('❌ Error getting SMS deposits:', error);
+      throw error;
+    }
+  }
+
+  // NEW: Auto-approve deposits under certain amount
+  static async processAutoApproveDeposits(maxAutoApproveAmount = 100) {
+    try {
+      const pendingDeposits = await this.getPendingSMSDeposits();
+      let approvedCount = 0;
+
+      for (const deposit of pendingDeposits) {
+        if (deposit.extractedAmount <= maxAutoApproveAmount) {
+          try {
+            await this.approveSMSDeposit(deposit._id, 'SYSTEM_AUTO');
+            approvedCount++;
+            console.log(`✅ Auto-approved deposit ${deposit._id} for $${deposit.extractedAmount}`);
+          } catch (error) {
+            console.error(`❌ Failed to auto-approve deposit ${deposit._id}:`, error);
+          }
+        }
+      }
+
+      return { processed: pendingDeposits.length, approved: approvedCount };
+    } catch (error) {
+      console.error('❌ Error in auto-approve process:', error);
+      throw error;
+    }
   }
 
   // Create deposit from SMS
