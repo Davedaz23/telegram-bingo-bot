@@ -1566,7 +1566,188 @@ static async resolveAnyUserId(userId) {
   }
 }
 
+static async ensureUserAndWallet(telegramUserData) {
+  try {
+    console.log('👤 Ensuring user exists and has wallet:', telegramUserData);
+    
+    let user = await User.findOne({ telegramId: telegramUserData.id.toString() });
+    
+    if (!user) {
+      console.log('➕ Creating new user...');
+      user = new User({
+        telegramId: telegramUserData.id.toString(),
+        firstName: telegramUserData.first_name,
+        lastName: telegramUserData.last_name,
+        username: telegramUserData.username,
+        telegramUsername: telegramUserData.username,
+        role: 'user',
+        permissions: ['play_games', 'view_games'],
+        isActive: true
+      });
+      
+      await user.save();
+      console.log('✅ New user created:', user._id);
+    }
+    
+    // Ensure wallet exists
+    const wallet = await this.initializeWallet(user._id);
+    
+    return { user, wallet };
+  } catch (error) {
+    console.error('❌ Error ensuring user and wallet:', error);
+    throw error;
+  }
+}
 
+
+// auto balance
+// NEW: Get wallet with auto user resolution
+static async getWalletAuto(userIdentifier) {
+  try {
+    console.log('💰 Getting wallet with auto resolution for:', userIdentifier);
+    
+    const mongoUserId = await this.resolveAnyUserId(userIdentifier);
+    return await this.getWallet(mongoUserId);
+  } catch (error) {
+    console.error('❌ Error in getWalletAuto:', error);
+    throw error;
+  }
+}
+
+// NEW: Get balance with auto user resolution
+static async getBalanceAuto(userIdentifier) {
+  try {
+    console.log('💰 Getting balance with auto resolution for:', userIdentifier);
+    
+    const wallet = await this.getWalletAuto(userIdentifier);
+    return wallet.balance;
+  } catch (error) {
+    console.error('❌ Error in getBalanceAuto:', error);
+    throw error;
+  }
+}
+// NEW: Bulk operations for multiple users
+static async getBalancesForUsers(userIds) {
+  try {
+    console.log('💰 Getting balances for multiple users:', userIds.length);
+    
+    const resolvedIds = await Promise.all(
+      userIds.map(id => this.resolveAnyUserId(id).catch(() => null))
+    );
+    
+    const validIds = resolvedIds.filter(id => id !== null);
+    
+    const wallets = await Wallet.find({ 
+      userId: { $in: validIds } 
+    }).populate('userId', 'telegramId firstName username');
+    
+    const balanceMap = {};
+    wallets.forEach(wallet => {
+      balanceMap[wallet.userId.telegramId] = wallet.balance;
+      balanceMap[wallet.userId._id.toString()] = wallet.balance;
+    });
+    
+    return balanceMap;
+  } catch (error) {
+    console.error('❌ Error getting balances for multiple users:', error);
+    throw error;
+  }
+}
+
+// NEW: Transaction summary for dashboard
+static async getTransactionSummary(userId, days = 30) {
+  try {
+    const mongoUserId = await this.resolveAnyUserId(userId);
+    
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+    
+    const summary = await Transaction.aggregate([
+      {
+        $match: {
+          userId: new mongoose.Types.ObjectId(mongoUserId),
+          createdAt: { $gte: startDate },
+          status: 'COMPLETED'
+        }
+      },
+      {
+        $group: {
+          _id: '$type',
+          totalAmount: { $sum: '$amount' },
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+    
+    const totalDeposits = summary.find(s => s._id === 'DEPOSIT')?.totalAmount || 0;
+    const totalWinnings = summary.find(s => s._id === 'WINNING')?.totalAmount || 0;
+    const totalGameEntries = Math.abs(summary.find(s => s._id === 'GAME_ENTRY')?.totalAmount || 0);
+    
+    return {
+      totalDeposits,
+      totalWinnings,
+      totalGameEntries,
+      netBalance: totalDeposits + totalWinnings - totalGameEntries,
+      transactionCount: summary.reduce((acc, curr) => acc + curr.count, 0),
+      period: `${days} days`
+    };
+  } catch (error) {
+    console.error('❌ Error getting transaction summary:', error);
+    throw error;
+  }
+}
+
+// NEW: Wallet health check
+static async walletHealthCheck() {
+  try {
+    const totalWallets = await Wallet.countDocuments();
+    const walletsWithBalance = await Wallet.countDocuments({ balance: { $gt: 0 } });
+    const recentTransactions = await Transaction.countDocuments({
+      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+    });
+    
+    const orphanedWallets = await Wallet.aggregate([
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'userId',
+          foreignField: '_id',
+          as: 'user'
+        }
+      },
+      {
+        $match: {
+          user: { $size: 0 }
+        }
+      },
+      {
+        $count: 'orphanedCount'
+      }
+    ]);
+    
+    const orphanedCount = orphanedWallets[0]?.orphanedCount || 0;
+    
+    return {
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      statistics: {
+        totalWallets,
+        walletsWithBalance,
+        activeWalletsPercentage: Math.round((walletsWithBalance / totalWallets) * 100),
+        recentTransactions24h: recentTransactions,
+        orphanedWallets: orphanedCount
+      },
+      issues: orphanedCount > 0 ? [`${orphanedCount} orphaned wallets found`] : []
+    };
+  } catch (error) {
+    console.error('❌ Wallet health check error:', error);
+    return {
+      status: 'unhealthy',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    };
+  }
+}
 }
 
 module.exports = WalletService;
