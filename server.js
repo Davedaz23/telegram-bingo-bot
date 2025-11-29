@@ -37,7 +37,6 @@ try {
 }
 
 // CORS configuration - UPDATED with your live frontend URL
-// CORS configuration - UPDATED with your live frontend URL and additional headers
 app.use(cors({
   origin: [
     'https://bingominiapp.vercel.app', // Your live frontend
@@ -45,17 +44,10 @@ app.use(cors({
     'http://localhost:3000'  // Development
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: [
-    'Content-Type', 
-    'Authorization', 
-    'X-Requested-With',
-    'user-id',  // ✅ ADD THIS
-    'telegram-data' // ✅ Also add this if you're using it
-  ],
-  credentials: true,
-  preflightContinue: false,
-  optionsSuccessStatus: 204
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  credentials: true
 }));
+
 // Middleware
 app.use(express.json({ limit: '10mb' })); // Increased for receipt images if needed
 app.use(express.urlencoded({ extended: true }));
