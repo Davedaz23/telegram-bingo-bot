@@ -27,11 +27,9 @@ const userSchema = new mongoose.Schema({
   },
   authDate: {
     type: Date,
-    required: true
   },
   hash: {
     type: String,
-    required: true
   },
   role: {
     type: String,
