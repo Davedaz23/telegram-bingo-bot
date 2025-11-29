@@ -122,22 +122,6 @@ function assignUserRole(telegramId, userData = {}) {
   return 'user';
 }
 
-// Create test user data for development with role assignment
-function createTestUserData(telegramId) {
-  const role = assignUserRole(telegramId);
-  
-  return {
-    id: telegramId || Math.floor(Math.random() * 1000000),
-    first_name: role === 'admin' ? 'Test Admin' : 
-                role === 'moderator' ? 'Test Moderator' : 'Test User',
-    username: role === 'admin' ? 'test_admin' : 
-              role === 'moderator' ? 'test_moderator' : 'test_user_' + Math.floor(Math.random() * 1000),
-    language_code: 'en',
-    is_bot: false,
-    role: role // Include role in test data
-  };
-}
-
 // Middleware to validate user exists (without auto-creation)
 async function validateUserExists(req, res, next) {
   try {
@@ -237,39 +221,42 @@ async function requireModerator(req, res, next) {
   }
 }
 
-// Play endpoint - only works with Telegram user data
+// Play endpoint - requires Telegram user data
 router.post('/play', async (req, res) => {
   try {
-    const { telegramId, initData } = req.body;
+    const { initData } = req.body;
 
-    let userData = {};
-    let user;
+    if (!initData) {
+      return res.status(400).json({
+        success: false,
+        error: 'Telegram initData is required for authentication'
+      });
+    }
 
-    if (initData && initData !== 'development') {
-      // Production: Validate Telegram initData
-      const validation = validateTelegramInitData(initData);
-      if (!validation.isValid) {
+    // Validate Telegram initData
+    const validation = validateTelegramInitData(initData);
+    if (!validation.isValid) {
+      return res.status(401).json({
+        success: false,
+        error: `Invalid initData: ${validation.error}`
+      });
+    }
+    
+    // Validate hash if BOT_TOKEN is available
+    if (process.env.BOT_TOKEN) {
+      const isValidHash = validateTelegramHash(initData, process.env.BOT_TOKEN);
+      if (!isValidHash) {
         return res.status(401).json({
           success: false,
-          error: `Invalid initData: ${validation.error}`
+          error: 'Invalid Telegram hash'
         });
       }
-      
-      userData = validation.userData;
-      user = await UserService.findOrCreateUser(userData);
     } else {
-      // Development: Create test user data
-      if (initData === 'development') {
-        userData = createTestUserData(telegramId);
-        user = await UserService.findOrCreateUser(userData);
-      } else {
-        // No initData provided and not development mode
-        return res.status(400).json({
-          success: false,
-          error: 'Telegram initData is required for authentication'
-        });
-      }
+      console.warn('⚠️ BOT_TOKEN not set, skipping hash validation');
     }
+    
+    const userData = validation.userData;
+    const user = await UserService.findOrCreateUser(userData);
 
     const token = JWTUtils.generateUserToken({
       userId: user._id.toString(),
@@ -312,39 +299,36 @@ router.post('/telegram', async (req, res) => {
   try {
     const { initData } = req.body;
     
-    let userData;
-    
-    if (initData === 'development' || !initData) {
-      // Development mode
-      userData = createTestUserData();
-      console.log('🔧 Development mode - using test user:', userData.username, 'Role:', userData.role);
-    } else {
-      // Production mode with Telegram validation
-      const validation = validateTelegramInitData(initData);
-      if (!validation.isValid) {
-        return res.status(401).json({
-          success: false,
-          error: `Invalid initData: ${validation.error}`
-        });
-      }
-      
-      // Validate hash if BOT_TOKEN is available
-      if (process.env.BOT_TOKEN) {
-        const isValidHash = validateTelegramHash(initData, process.env.BOT_TOKEN);
-        if (!isValidHash) {
-          return res.status(401).json({
-            success: false,
-            error: 'Invalid Telegram hash'
-          });
-        }
-      } else {
-        console.warn('⚠️ BOT_TOKEN not set, skipping hash validation');
-      }
-      
-      userData = validation.userData;
-      console.log('🔐 Production auth for:', userData.username || userData.first_name);
+    if (!initData) {
+      return res.status(400).json({
+        success: false,
+        error: 'Telegram initData is required'
+      });
+    }
+
+    // Validate Telegram initData
+    const validation = validateTelegramInitData(initData);
+    if (!validation.isValid) {
+      return res.status(401).json({
+        success: false,
+        error: `Invalid initData: ${validation.error}`
+      });
     }
     
+    // Validate hash if BOT_TOKEN is available
+    if (process.env.BOT_TOKEN) {
+      const isValidHash = validateTelegramHash(initData, process.env.BOT_TOKEN);
+      if (!isValidHash) {
+        return res.status(401).json({
+          success: false,
+          error: 'Invalid Telegram hash'
+        });
+      }
+    } else {
+      console.warn('⚠️ BOT_TOKEN not set, skipping hash validation');
+    }
+    
+    const userData = validation.userData;
     const user = await UserService.findOrCreateUser(userData);
     
     const token = JWTUtils.generateUserToken({
@@ -474,37 +458,40 @@ router.get('/stats/:userId', validateUserExists, async (req, res) => {
   }
 });
 
-// Quick auth endpoint - now requires Telegram data
+// Quick auth endpoint - requires Telegram data
 router.post('/quick-auth', async (req, res) => {
   try {
-    const { telegramId, initData } = req.body;
+    const { initData } = req.body;
 
-    if (!telegramId && !initData) {
+    if (!initData) {
       return res.status(400).json({
         success: false,
-        error: 'Either telegramId with initData or development mode required'
+        error: 'Telegram initData is required'
       });
     }
 
-    let userData;
-    let user;
+    // Validate Telegram initData
+    const validation = validateTelegramInitData(initData);
+    if (!validation.isValid) {
+      return res.status(401).json({
+        success: false,
+        error: `Invalid initData: ${validation.error}`
+      });
+    }
 
-    if (initData && initData !== 'development') {
-      // Use real Telegram data
-      const validation = validateTelegramInitData(initData);
-      if (!validation.isValid) {
+    // Validate hash if BOT_TOKEN is available
+    if (process.env.BOT_TOKEN) {
+      const isValidHash = validateTelegramHash(initData, process.env.BOT_TOKEN);
+      if (!isValidHash) {
         return res.status(401).json({
           success: false,
-          error: `Invalid initData: ${validation.error}`
+          error: 'Invalid Telegram hash'
         });
       }
-      userData = validation.userData;
-      user = await UserService.findOrCreateUser(userData);
-    } else {
-      // Development mode
-      userData = createTestUserData(telegramId);
-      user = await UserService.findOrCreateUser(userData);
     }
+
+    const userData = validation.userData;
+    const user = await UserService.findOrCreateUser(userData);
 
     console.log(`⚡ Quick auth for: ${user.telegramId} (Role: ${user.role})`);
     
@@ -539,7 +526,7 @@ router.post('/quick-auth', async (req, res) => {
   }
 });
 
-// Verify endpoint - only with Telegram data
+// Verify endpoint - requires Telegram data
 router.post('/verify', async (req, res) => {
   try {
     const { initData } = req.body;
@@ -547,23 +534,27 @@ router.post('/verify', async (req, res) => {
     if (!initData) {
       return res.status(400).json({
         success: false,
-        error: 'No init data provided'
+        error: 'Telegram initData is required'
       });
     }
 
-    let userData;
+    // Parse and validate initData
+    const userData = parseInitData(initData);
+    
+    if (!userData || !userData.id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid Telegram init data'
+      });
+    }
 
-    if (initData === 'development') {
-      // Development mode
-      userData = createTestUserData();
-    } else {
-      // Parse and validate initData
-      userData = parseInitData(initData);
-      
-      if (!userData || !userData.id) {
-        return res.status(400).json({
+    // Validate Telegram hash if BOT_TOKEN is available
+    if (process.env.BOT_TOKEN) {
+      const isValidHash = validateTelegramHash(initData, process.env.BOT_TOKEN);
+      if (!isValidHash) {
+        return res.status(401).json({
           success: false,
-          error: 'Invalid init data'
+          error: 'Invalid Telegram hash'
         });
       }
     }
