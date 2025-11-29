@@ -721,7 +721,7 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
 }
 
   // NEW: Method to generate available cards for user to choose from
-  static async getAvailableCards(gameId, userId, count = 3) {
+  static async getAvailableCards(gameId, userId, count = 400) {
     const cards = [];
     
     for (let i = 0; i < count; i++) {
