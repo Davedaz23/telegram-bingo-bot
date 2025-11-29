@@ -647,7 +647,8 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
 }
 
   // NEW: Method for user to select their bingo card
-  static async selectCard(gameId, userId, cardNumbers) {
+ // In GameService - UPDATED selectCard method
+static async selectCard(gameId, userId, cardNumbers) {
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -658,8 +659,9 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
       throw new Error('Game not found');
     }
 
-    if (game.status !== 'WAITING') {
-      throw new Error('Cannot select card - game already started');
+    // ALLOW card selection in both WAITING and ACTIVE states
+    if (game.status !== 'WAITING' && game.status !== 'ACTIVE') {
+      throw new Error('Cannot select card - game is not active');
     }
 
     // FIX: Find user by either MongoDB ID or Telegram ID
@@ -675,13 +677,33 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
       throw new Error('User not found');
     }
 
-    // Use the MongoDB _id for card creation
+    // Use the MongoDB _id for card operations
     const mongoUserId = user._id;
 
-    // Check if user already has a card
+    // Check if user already has a card - if so, UPDATE it instead of throwing error
     const existingCard = await BingoCard.findOne({ gameId, userId: mongoUserId }).session(session);
+    
     if (existingCard) {
-      throw new Error('You already have a card for this game');
+      console.log(`🔄 User ${userId} already has a card. Updating card instead of creating new one.`);
+      
+      // UPDATE existing card with new numbers
+      existingCard.numbers = cardNumbers;
+      existingCard.markedPositions = [12]; // Reset marked positions (keep FREE space)
+      existingCard.isWinner = false; // Reset winner status
+      existingCard.updatedAt = new Date();
+      
+      await existingCard.save({ session });
+      
+      await session.commitTransaction();
+      
+      console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) UPDATED card for game ${game.code}`);
+      
+      return { 
+        success: true, 
+        message: 'Card updated successfully',
+        action: 'UPDATED',
+        cardId: existingCard._id
+      };
     }
 
     // Validate card numbers
@@ -695,22 +717,27 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
       }
     }
 
-    // Create the bingo card with MongoDB user ID
-    await BingoCard.create([{
+    // Create NEW card if user doesn't have one
+    const newCard = await BingoCard.create([{
       userId: mongoUserId,
       gameId,
       numbers: cardNumbers,
       markedPositions: [12], // Free space
-      isLateJoiner: false,
+      isLateJoiner: game.status === 'ACTIVE', // Mark as late joiner if game is active
       joinedAt: new Date(),
-      numbersCalledAtJoin: []
+      numbersCalledAtJoin: game.status === 'ACTIVE' ? (game.numbersCalled || []) : []
     }], { session });
 
     await session.commitTransaction();
     
-    console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) selected card for game ${game.code}`);
+    console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) CREATED new card for game ${game.code}`);
     
-    return { success: true, message: 'Card selected successfully' };
+    return { 
+      success: true, 
+      message: 'Card selected successfully',
+      action: 'CREATED',
+      cardId: newCard[0]._id
+    };
   } catch (error) {
     await session.abortTransaction();
     console.error('❌ Select card error:', error);
