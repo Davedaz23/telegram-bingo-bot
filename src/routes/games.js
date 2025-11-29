@@ -1,34 +1,75 @@
 const express = require('express');
 const router = express.Router();
 const GameService = require('../services/gameService');
-const CardSelectionService = require('../services/cardSelectionService');
 
 // ==================== CARD SELECTION ROUTES ====================
 
-// Select a card number
+// Get available cards for user to choose from
+router.get('/:gameId/available-cards/:userId', async (req, res) => {
+  try {
+    const { gameId, userId } = req.params;
+    const { count = 3 } = req.query;
+    
+    console.log(`📋 Get available cards request: gameId=${gameId}, userId=${userId}, count=${count}`);
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required'
+      });
+    }
+
+    const cards = await GameService.getAvailableCards(gameId, userId, parseInt(count));
+    
+    console.log(`✅ Generated ${cards.length} available cards for user ${userId}`);
+    
+    res.json({
+      success: true,
+      cards,
+      count: cards.length
+    });
+  } catch (error) {
+    console.error('❌ Get available cards error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Select a bingo card
 router.post('/:gameId/select-card', async (req, res) => {
   try {
     const { gameId } = req.params;
-    const { userId, cardNumber } = req.body;
+    const { userId, cardNumbers } = req.body;
     
-    console.log(`🎯 Card selection request: gameId=${gameId}, userId=${userId}, cardNumber=${cardNumber}`);
+    console.log(`🎯 Card selection request: gameId=${gameId}, userId=${userId}`);
     
-    if (!userId || !cardNumber) {
+    if (!userId || !cardNumbers) {
       return res.status(400).json({
         success: false,
-        error: 'userId and cardNumber are required'
+        error: 'userId and cardNumbers are required'
       });
     }
 
-    // Validate card number
-    if (cardNumber < 1 || cardNumber > 400) {
+    // Validate card numbers structure
+    if (!Array.isArray(cardNumbers) || cardNumbers.length !== 5) {
       return res.status(400).json({
         success: false,
-        error: 'Card number must be between 1 and 400'
+        error: 'Invalid card format: must be a 5x5 array'
       });
     }
 
-    const result = await CardSelectionService.selectCard(gameId, userId, cardNumber);
+    for (let i = 0; i < 5; i++) {
+      if (!Array.isArray(cardNumbers[i]) || cardNumbers[i].length !== 5) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid card format: each row must have 5 numbers'
+        });
+      }
+    }
+
+    const result = await GameService.selectCard(gameId, userId, cardNumbers);
     
     res.json({
       success: true,
@@ -43,37 +84,12 @@ router.post('/:gameId/select-card', async (req, res) => {
   }
 });
 
-// Get available cards for a game
-router.get('/:gameId/available-cards', async (req, res) => {
+// Check if user has selected a card
+router.get('/:gameId/has-card/:userId', async (req, res) => {
   try {
-    const { gameId } = req.params;
+    const { gameId, userId } = req.params;
     
-    console.log(`📋 Get available cards request: gameId=${gameId}`);
-    
-    const result = await CardSelectionService.getAvailableCards(gameId);
-    
-    console.log(`✅ Found ${result.availableCards.length} available cards for game ${gameId}`);
-    
-    res.json({
-      success: true,
-      ...result
-    });
-  } catch (error) {
-    console.error('❌ Get available cards error:', error);
-    res.status(400).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Release selected card
-router.post('/:gameId/release-card', async (req, res) => {
-  try {
-    const { gameId } = req.params;
-    const { userId } = req.body;
-    
-    console.log(`🔄 Release card request: gameId=${gameId}, userId=${userId}`);
+    console.log(`🔍 Check card selection: gameId=${gameId}, userId=${userId}`);
     
     if (!userId) {
       return res.status(400).json({
@@ -82,14 +98,16 @@ router.post('/:gameId/release-card', async (req, res) => {
       });
     }
 
-    const result = await CardSelectionService.releaseCard(gameId, userId);
+    const bingoCard = await GameService.getUserBingoCard(gameId, userId);
+    const hasCard = !!bingoCard;
     
     res.json({
       success: true,
-      ...result
+      hasCard,
+      bingoCard: hasCard ? bingoCard : null
     });
   } catch (error) {
-    console.error('❌ Card release error:', error);
+    console.error('❌ Check card selection error:', error);
     res.status(400).json({
       success: false,
       error: error.message
@@ -97,19 +115,58 @@ router.post('/:gameId/release-card', async (req, res) => {
   }
 });
 
-// Check card selection status
+// Get card selection status for the entire game
 router.get('/:gameId/card-selection-status', async (req, res) => {
   try {
     const { gameId } = req.params;
     
-    const result = await CardSelectionService.checkCardSelectionStatus(gameId);
+    const game = await GameService.getGameWithDetails(gameId);
     
+    if (!game) {
+      return res.status(404).json({
+        success: false,
+        error: 'Game not found'
+      });
+    }
+
+    // Get all players and their card status
+    const players = game.players || [];
+    const playersWithCards = [];
+    const playersWithoutCards = [];
+
+    for (const player of players) {
+      const bingoCard = await GameService.getUserBingoCard(gameId, player.userId._id || player.userId);
+      if (bingoCard) {
+        playersWithCards.push({
+          userId: player.userId._id || player.userId,
+          username: player.userId.username,
+          firstName: player.userId.firstName
+        });
+      } else {
+        playersWithoutCards.push({
+          userId: player.userId._id || player.userId,
+          username: player.userId.username,
+          firstName: player.userId.firstName
+        });
+      }
+    }
+
+    const canStart = playersWithCards.length >= GameService.MIN_PLAYERS_TO_START && 
+                    playersWithCards.length === players.length;
+
     res.json({
       success: true,
-      ...result
+      gameId,
+      totalPlayers: players.length,
+      playersWithCards: playersWithCards.length,
+      playersWithoutCards: playersWithoutCards.length,
+      canStart,
+      minPlayersRequired: GameService.MIN_PLAYERS_TO_START,
+      playersWithCardsList: playersWithCards,
+      playersWithoutCardsList: playersWithoutCards
     });
   } catch (error) {
-    console.error('❌ Card status error:', error);
+    console.error('❌ Card selection status error:', error);
     res.status(400).json({
       success: false,
       error: error.message
