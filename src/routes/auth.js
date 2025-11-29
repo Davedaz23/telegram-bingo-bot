@@ -82,14 +82,59 @@ function parseInitData(initData) {
   }
 }
 
-// Create test user data for development
+// Get admin Telegram ID from environment
+function getAdminTelegramId() {
+  return process.env.ADMIN_TELEGRAM_ID || null;
+}
+
+// Get moderator Telegram IDs from environment
+function getModeratorTelegramIds() {
+  const moderatorIds = process.env.MODERATOR_TELEGRAM_IDS;
+  return moderatorIds ? moderatorIds.split(',') : [];
+}
+
+// Check and assign user role based on Telegram ID
+function assignUserRole(telegramId, userData = {}) {
+  const adminTelegramId = getAdminTelegramId();
+  const moderatorTelegramIds = getModeratorTelegramIds();
+  
+  console.log('👑 Role assignment check:', {
+    telegramId,
+    adminTelegramId,
+    moderatorTelegramIds,
+    existingRole: userData.role
+  });
+
+  // If user already has a role, preserve it
+  if (userData.role && ['admin', 'moderator'].includes(userData.role)) {
+    return userData.role;
+  }
+
+  // Assign role based on Telegram ID
+  if (telegramId === adminTelegramId) {
+    console.log('✅ Assigning admin role to:', telegramId);
+    return 'admin';
+  } else if (moderatorTelegramIds.includes(telegramId)) {
+    console.log('✅ Assigning moderator role to:', telegramId);
+    return 'moderator';
+  }
+
+  return 'user';
+}
+
+// Create test user data for development with role assignment
 function createTestUserData(telegramId) {
+  const role = assignUserRole(telegramId);
+  
   return {
     id: telegramId || Math.floor(Math.random() * 1000000),
-    first_name: 'Test User',
-    username: 'test_user_' + Math.floor(Math.random() * 1000),
+    first_name: role === 'admin' ? 'Test Admin' : 
+                role === 'moderator' ? 'Test Moderator' : 'Test User',
+    username: role === 'admin' ? 'test_admin' : 
+              role === 'moderator' ? 'test_moderator' : 'test_user_' + Math.floor(Math.random() * 1000),
     language_code: 'en',
-    is_bot: false
+    is_bot: false,
+    role: role // Include role in test data
   };
 }
 
@@ -124,6 +169,70 @@ async function validateUserExists(req, res, next) {
     res.status(500).json({
       success: false,
       error: error.message
+    });
+  }
+}
+
+// Middleware to check if user has admin role
+async function requireAdmin(req, res, next) {
+  try {
+    const userId = req.query.userId || req.headers['x-user-id'];
+    
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required'
+      });
+    }
+
+    const user = await UserService.getUserById(userId);
+    
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Admin access required'
+      });
+    }
+
+    req.adminUser = user;
+    next();
+  } catch (error) {
+    console.error('❌ Admin check error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to verify admin access'
+    });
+  }
+}
+
+// Middleware to check if user has moderator or admin role
+async function requireModerator(req, res, next) {
+  try {
+    const userId = req.query.userId || req.headers['x-user-id'];
+    
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required'
+      });
+    }
+
+    const user = await UserService.getUserById(userId);
+    
+    if (!user || !['admin', 'moderator'].includes(user.role)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Moderator or admin access required'
+      });
+    }
+
+    req.moderatorUser = user;
+    next();
+  } catch (error) {
+    console.error('❌ Moderator check error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to verify moderator access'
     });
   }
 }
@@ -165,7 +274,8 @@ router.post('/play', async (req, res) => {
     const token = JWTUtils.generateUserToken({
       userId: user._id.toString(),
       telegramId: user.telegramId,
-      username: user.username
+      username: user.username,
+      role: user.role
     });
 
     res.json({
@@ -177,6 +287,9 @@ router.post('/play', async (req, res) => {
         username: user.username,
         firstName: user.firstName,
         lastName: user.lastName,
+        role: user.role,
+        isAdmin: user.role === 'admin',
+        isModerator: user.role === 'moderator',
         gamesPlayed: user.gamesPlayed || 0,
         gamesWon: user.gamesWon || 0,
         totalScore: user.totalScore || 0,
@@ -204,7 +317,7 @@ router.post('/telegram', async (req, res) => {
     if (initData === 'development' || !initData) {
       // Development mode
       userData = createTestUserData();
-      console.log('🔧 Development mode - using test user:', userData.username);
+      console.log('🔧 Development mode - using test user:', userData.username, 'Role:', userData.role);
     } else {
       // Production mode with Telegram validation
       const validation = validateTelegramInitData(initData);
@@ -237,7 +350,8 @@ router.post('/telegram', async (req, res) => {
     const token = JWTUtils.generateUserToken({
       userId: user._id.toString(),
       telegramId: user.telegramId,
-      username: user.username
+      username: user.username,
+      role: user.role
     });
 
     res.json({
@@ -249,6 +363,9 @@ router.post('/telegram', async (req, res) => {
         username: user.username,
         firstName: user.firstName,
         lastName: user.lastName,
+        role: user.role,
+        isAdmin: user.role === 'admin',
+        isModerator: user.role === 'moderator',
         gamesPlayed: user.gamesPlayed || 0,
         gamesWon: user.gamesWon || 0,
         totalScore: user.totalScore || 0,
@@ -278,6 +395,9 @@ router.get('/profile/:userId', validateUserExists, async (req, res) => {
         username: user.username,
         firstName: user.firstName,
         lastName: user.lastName,
+        role: user.role,
+        isAdmin: user.role === 'admin',
+        isModerator: user.role === 'moderator',
         gamesPlayed: user.gamesPlayed || 0,
         gamesWon: user.gamesWon || 0,
         totalScore: user.totalScore || 0,
@@ -307,6 +427,9 @@ router.get('/profile/telegram/:telegramId', validateUserExists, async (req, res)
         username: user.username,
         firstName: user.firstName,
         lastName: user.lastName,
+        role: user.role,
+        isAdmin: user.role === 'admin',
+        isModerator: user.role === 'moderator',
         gamesPlayed: user.gamesPlayed || 0,
         gamesWon: user.gamesWon || 0,
         totalScore: user.totalScore || 0,
@@ -338,7 +461,8 @@ router.get('/stats/:userId', validateUserExists, async (req, res) => {
         gamesWon: user.gamesWon || 0,
         totalScore: user.totalScore || 0,
         winRate: parseFloat(winRate),
-        walletBalance: user.walletBalance || 100
+        walletBalance: user.walletBalance || 100,
+        role: user.role
       }
     });
   } catch (error) {
@@ -382,12 +506,13 @@ router.post('/quick-auth', async (req, res) => {
       user = await UserService.findOrCreateUser(userData);
     }
 
-    console.log(`⚡ Quick auth for: ${user.telegramId}`);
+    console.log(`⚡ Quick auth for: ${user.telegramId} (Role: ${user.role})`);
     
     const token = JWTUtils.generateUserToken({
       userId: user._id.toString(),
       telegramId: user.telegramId,
-      username: user.username
+      username: user.username,
+      role: user.role
     });
 
     res.json({
@@ -398,6 +523,9 @@ router.post('/quick-auth', async (req, res) => {
         telegramId: user.telegramId,
         username: user.username,
         firstName: user.firstName,
+        role: user.role,
+        isAdmin: user.role === 'admin',
+        isModerator: user.role === 'moderator',
         walletBalance: user.walletBalance || 100
       }
     });
@@ -442,12 +570,13 @@ router.post('/verify', async (req, res) => {
 
     const user = await UserService.findOrCreateUser(userData);
     
-    console.log(`✅ User verified: ${user.telegramId} -> ${user._id}`);
+    console.log(`✅ User verified: ${user.telegramId} -> ${user._id} (Role: ${user.role})`);
 
     const token = JWTUtils.generateUserToken({
       userId: user._id.toString(),
       telegramId: user.telegramId,
-      username: user.username
+      username: user.username,
+      role: user.role
     });
 
     res.json({
@@ -459,6 +588,9 @@ router.post('/verify', async (req, res) => {
         username: user.username,
         firstName: user.firstName,
         lastName: user.lastName,
+        role: user.role,
+        isAdmin: user.role === 'admin',
+        isModerator: user.role === 'moderator',
         gamesPlayed: user.gamesPlayed || 0,
         gamesWon: user.gamesWon || 0,
         totalScore: user.totalScore || 0,
@@ -476,21 +608,133 @@ router.post('/verify', async (req, res) => {
   }
 });
 
-// Health check for auth service
-router.get('/health', (req, res) => {
-  res.json({
-    success: true,
-    service: 'Authentication Service',
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    features: {
-      telegramAuth: true,
-      jwtTokens: true,
-      userManagement: true,
-      telegramUserCreation: true,
-      quickAuth: true
+// ADMIN ROUTES
+
+// Get all users (admin only)
+router.get('/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const users = await UserService.getAllUsers();
+    
+    const userList = users.map(user => ({
+      id: user._id.toString(),
+      telegramId: user.telegramId,
+      username: user.username,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      role: user.role,
+      gamesPlayed: user.gamesPlayed,
+      gamesWon: user.gamesWon,
+      totalWinnings: user.totalWinnings,
+      walletBalance: user.walletBalance,
+      lastLogin: user.lastLogin,
+      joinedAt: user.joinedAt,
+      isActive: user.isActive
+    }));
+
+    res.json({
+      success: true,
+      users: userList,
+      total: users.length,
+      admin: req.adminUser.firstName
+    });
+  } catch (error) {
+    console.error('❌ Admin get users error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get users'
+    });
+  }
+});
+
+// Update user role (admin only)
+router.patch('/admin/users/:userId/role', requireAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { role } = req.body;
+
+    if (!['user', 'moderator', 'admin'].includes(role)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid role. Must be: user, moderator, or admin'
+      });
     }
-  });
+
+    const user = await UserService.updateUserRole(userId, role);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        role: user.role,
+        isAdmin: user.role === 'admin',
+        isModerator: user.role === 'moderator'
+      },
+      message: `User role updated to ${role}`,
+      updatedBy: req.adminUser.firstName
+    });
+  } catch (error) {
+    console.error('❌ Update user role error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update user role'
+    });
+  }
+});
+
+// Get admin dashboard stats (admin only)
+router.get('/admin/dashboard', requireAdmin, async (req, res) => {
+  try {
+    const stats = await UserService.getAdminStats();
+    
+    res.json({
+      success: true,
+      stats: {
+        ...stats,
+        admin: req.adminUser.firstName,
+        role: req.adminUser.role
+      }
+    });
+  } catch (error) {
+    console.error('❌ Admin dashboard error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get admin stats'
+    });
+  }
+});
+
+// MODERATOR ROUTES
+
+// Get moderation dashboard (moderator and admin)
+router.get('/moderator/dashboard', requireModerator, async (req, res) => {
+  try {
+    const stats = await UserService.getModeratorStats();
+    
+    res.json({
+      success: true,
+      stats: {
+        ...stats,
+        moderator: req.moderatorUser.firstName,
+        role: req.moderatorUser.role
+      }
+    });
+  } catch (error) {
+    console.error('❌ Moderator dashboard error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get moderator stats'
+    });
+  }
 });
 
 // Get user by Telegram ID (read-only, requires existing user)
@@ -506,6 +750,9 @@ router.get('/user/:telegramId', validateUserExists, async (req, res) => {
         username: user.username,
         firstName: user.firstName,
         lastName: user.lastName,
+        role: user.role,
+        isAdmin: user.role === 'admin',
+        isModerator: user.role === 'moderator',
         gamesPlayed: user.gamesPlayed || 0,
         gamesWon: user.gamesWon || 0,
         totalScore: user.totalScore || 0,
@@ -520,6 +767,29 @@ router.get('/user/:telegramId', validateUserExists, async (req, res) => {
       error: error.message
     });
   }
+});
+
+// Health check for auth service
+router.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    service: 'Authentication Service',
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    features: {
+      telegramAuth: true,
+      jwtTokens: true,
+      userManagement: true,
+      roleManagement: true,
+      adminRoutes: true,
+      moderatorRoutes: true,
+      quickAuth: true
+    },
+    roles: {
+      admin: getAdminTelegramId() ? 'Configured' : 'Not configured',
+      moderators: getModeratorTelegramIds().length > 0 ? 'Configured' : 'Not configured'
+    }
+  });
 });
 
 module.exports = router;
