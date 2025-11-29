@@ -648,61 +648,77 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
 
   // NEW: Method for user to select their bingo card
   static async selectCard(gameId, userId, cardNumbers) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-    try {
-      const game = await Game.findById(gameId).session(session);
-      
-      if (!game) {
-        throw new Error('Game not found');
-      }
+  try {
+    const game = await Game.findById(gameId).session(session);
+    
+    if (!game) {
+      throw new Error('Game not found');
+    }
 
-      if (game.status !== 'WAITING') {
-        throw new Error('Cannot select card - game already started');
-      }
+    if (game.status !== 'WAITING') {
+      throw new Error('Cannot select card - game already started');
+    }
 
-      // Check if user already has a card
-      const existingCard = await BingoCard.findOne({ gameId, userId }).session(session);
-      if (existingCard) {
-        throw new Error('You already have a card for this game');
-      }
+    // FIX: Find user by either MongoDB ID or Telegram ID
+    let user;
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId).session(session);
+    } else {
+      // Assume it's a Telegram ID
+      user = await User.findOne({ telegramId: userId }).session(session);
+    }
 
-      // Validate card numbers
-      if (!cardNumbers || !Array.isArray(cardNumbers) || cardNumbers.length !== 5) {
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    // Use the MongoDB _id for card creation
+    const mongoUserId = user._id;
+
+    // Check if user already has a card
+    const existingCard = await BingoCard.findOne({ gameId, userId: mongoUserId }).session(session);
+    if (existingCard) {
+      throw new Error('You already have a card for this game');
+    }
+
+    // Validate card numbers
+    if (!cardNumbers || !Array.isArray(cardNumbers) || cardNumbers.length !== 5) {
+      throw new Error('Invalid card format');
+    }
+
+    for (let i = 0; i < 5; i++) {
+      if (!Array.isArray(cardNumbers[i]) || cardNumbers[i].length !== 5) {
         throw new Error('Invalid card format');
       }
-
-      for (let i = 0; i < 5; i++) {
-        if (!Array.isArray(cardNumbers[i]) || cardNumbers[i].length !== 5) {
-          throw new Error('Invalid card format');
-        }
-      }
-
-      // Create the bingo card
-      await BingoCard.create([{
-        userId,
-        gameId,
-        numbers: cardNumbers,
-        markedPositions: [12], // Free space
-        isLateJoiner: false,
-        joinedAt: new Date(),
-        numbersCalledAtJoin: []
-      }], { session });
-
-      await session.commitTransaction();
-      
-      console.log(`✅ User ${userId} selected card for game ${game.code}`);
-      
-      return { success: true, message: 'Card selected successfully' };
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Select card error:', error);
-      throw error;
-    } finally {
-      session.endSession();
     }
+
+    // Create the bingo card with MongoDB user ID
+    await BingoCard.create([{
+      userId: mongoUserId,
+      gameId,
+      numbers: cardNumbers,
+      markedPositions: [12], // Free space
+      isLateJoiner: false,
+      joinedAt: new Date(),
+      numbersCalledAtJoin: []
+    }], { session });
+
+    await session.commitTransaction();
+    
+    console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) selected card for game ${game.code}`);
+    
+    return { success: true, message: 'Card selected successfully' };
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Select card error:', error);
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
 
   // NEW: Method to generate available cards for user to choose from
   static async getAvailableCards(gameId, userId, count = 3) {
