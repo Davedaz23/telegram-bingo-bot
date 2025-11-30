@@ -648,7 +648,7 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
   }
 }
 
-  // NEW: Method for user to select their bingo card
+// NEW: Method for user to select their bingo card - FIXED VERSION
 static async selectCard(gameId, userId, cardNumbers, cardNumber) {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -661,7 +661,7 @@ static async selectCard(gameId, userId, cardNumbers, cardNumber) {
     }
 
     // ALLOW card selection in both WAITING and ACTIVE states
- if (game.status !== 'WAITING' && game.status !== 'ACTIVE') {
+    if (game.status !== 'WAITING' && game.status !== 'ACTIVE') {
       throw new Error('Cannot select card - game is not active');
     }
 
@@ -691,11 +691,14 @@ static async selectCard(gameId, userId, cardNumbers, cardNumber) {
     // Use the MongoDB _id for card operations
     const mongoUserId = user._id;
 
-    // Check if user already has a card - if so, UPDATE it instead of throwing error
+    // Check if user already has a card - if so, UPDATE it and RELEASE the previous card
     const existingCard = await BingoCard.findOne({ gameId, userId: mongoUserId }).session(session);
     
     if (existingCard) {
       console.log(`🔄 User ${userId} already has a card. Updating card instead of creating new one.`);
+      
+      // FIX: Store the previous card number for release
+      const previousCardNumber = existingCard.cardNumber;
       
       // UPDATE existing card with new numbers
       existingCard.numbers = cardNumbers;
@@ -706,11 +709,17 @@ static async selectCard(gameId, userId, cardNumbers, cardNumber) {
       
       await existingCard.save({ session });
       
+      // FIX: Release the previous card from real-time tracking if it's different
+      if (previousCardNumber && previousCardNumber !== cardNumber) {
+        console.log(`🔄 Releasing previous card #${previousCardNumber} for user ${userId}`);
+        this.updateCardSelection(gameId, previousCardNumber, mongoUserId, 'RELEASED');
+      }
+      
       await session.commitTransaction();
       
       console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) UPDATED card #${cardNumber} for game ${game.code}`);
       
-      // Update real-time tracking
+      // Update real-time tracking with new card
       this.updateCardSelection(gameId, cardNumber, mongoUserId, 'UPDATED');
       
       return { 
@@ -718,7 +727,8 @@ static async selectCard(gameId, userId, cardNumbers, cardNumber) {
         message: 'Card updated successfully',
         action: 'UPDATED',
         cardId: existingCard._id,
-        cardNumber: cardNumber
+        cardNumber: cardNumber,
+        previousCardNumber: previousCardNumber // Return previous card for frontend
       };
     }
 
@@ -750,12 +760,14 @@ static async selectCard(gameId, userId, cardNumbers, cardNumber) {
     console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) CREATED new card #${cardNumber} for game ${game.code}`);
     
     // Update real-time tracking
-  this.updateCardSelection(gameId, cardNumber, mongoUserId, 'CREATED');
-   if (game.status === 'WAITING') {
+    this.updateCardSelection(gameId, cardNumber, mongoUserId, 'CREATED');
+    
+    if (game.status === 'WAITING') {
       setTimeout(() => {
         this.checkAndStartAutoStartTimer(gameId);
       }, 1000);
     }
+    
     return { 
       success: true, 
       message: 'Card selected successfully',
