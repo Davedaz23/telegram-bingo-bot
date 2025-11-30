@@ -71,6 +71,7 @@ router.get('/:gameId/taken-cards', async (req, res) => {
   }
 });
 
+
 // Select card with card number
 router.post('/:gameId/select-card-with-number', async (req, res) => {
   try {

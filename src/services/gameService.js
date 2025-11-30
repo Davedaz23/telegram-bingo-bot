@@ -1434,7 +1434,7 @@ static async getTakenCards(gameId) {
     // Check database for cards that have been selected
     const bingoCards = await BingoCard.find({ gameId });
     const takenCards = bingoCards.map(card => ({
-      cardNumber: card.cardNumber, // You'll need to store cardNumber when creating cards
+      cardNumber: card.cardNumber || card.cardIndex, // Use cardNumber if available, fallback to cardIndex
       userId: card.userId
     }));
     
