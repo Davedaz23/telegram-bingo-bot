@@ -659,6 +659,7 @@ static async selectCard(gameId, userId, cardNumbers, cardNumber) {
     if (!game) {
       throw new Error('Game not found');
     }
+    
 
     // ALLOW card selection in both WAITING and ACTIVE states
     if (game.status !== 'WAITING' && game.status !== 'ACTIVE') {
