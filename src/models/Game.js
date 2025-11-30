@@ -1,4 +1,4 @@
-// models/Game.js - UPDATED VERSION
+// models/Game.js - UPDATED VERSION WITH AUTO-START TIMER
 const mongoose = require('mongoose');
 
 const gameSchema = new mongoose.Schema({
@@ -53,6 +53,14 @@ const gameSchema = new mongoose.Schema({
     default: function() {
       return new Date(Date.now() + 30 * 1000); // 30 seconds from creation
     }
+  },
+  // ADD THESE FIELDS FOR AUTO-START TIMER
+  autoStartEndTime: {
+    type: Date
+  },
+  hasAutoStartTimer: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true,
@@ -67,6 +75,17 @@ const gameSchema = new mongoose.Schema({
       } else {
         ret.selectedCards = {};
       }
+      
+      // Add virtual fields for auto-start timer
+      const now = new Date();
+      if (ret.autoStartEndTime && ret.autoStartEndTime > now) {
+        ret.autoStartTimeRemaining = ret.autoStartEndTime - now;
+        ret.hasAutoStartTimer = true;
+      } else {
+        ret.autoStartTimeRemaining = 0;
+        ret.hasAutoStartTimer = false;
+      }
+      
       return ret;
     }
   },
@@ -76,6 +95,14 @@ const gameSchema = new mongoose.Schema({
 // Add virtual for card selection status
 gameSchema.virtual('isCardSelectionActive').get(function() {
   return new Date() < this.cardSelectionEndTime && this.status === 'WAITING';
+});
+
+// Add virtual for auto-start timer status
+gameSchema.virtual('autoStartTimeRemaining').get(function() {
+  if (this.autoStartEndTime && this.autoStartEndTime > new Date()) {
+    return this.autoStartEndTime - new Date();
+  }
+  return 0;
 });
 
 // Virtual for players
@@ -95,5 +122,17 @@ gameSchema.index({ code: 1 });
 gameSchema.index({ status: 1 });
 gameSchema.index({ isAutoCreated: 1 });
 gameSchema.index({ status: 1, isAutoCreated: 1 });
+gameSchema.index({ autoStartEndTime: 1 }); // New index for auto-start timer
+
+// Pre-save middleware to update hasAutoStartTimer
+gameSchema.pre('save', function(next) {
+  const now = new Date();
+  if (this.autoStartEndTime && this.autoStartEndTime > now) {
+    this.hasAutoStartTimer = true;
+  } else {
+    this.hasAutoStartTimer = false;
+  }
+  next();
+});
 
 module.exports = mongoose.model('Game', gameSchema);

@@ -13,7 +13,8 @@ class GameService {
   static processingGames = new Set(); // Track games being processed
   static MIN_PLAYERS_TO_START = 2;
 static selectedCards = new Map(); // gameId -> Set of selected card numbers
-
+static autoStartTimers = new Map(); // Track auto-start timers per game
+static CARD_SELECTION_DURATION = 30000; // 30 seconds
   // SINGLE GAME MANAGEMENT SYSTEM
   static async getMainGame() {
     try {
@@ -660,7 +661,7 @@ static async selectCard(gameId, userId, cardNumbers, cardNumber) {
     }
 
     // ALLOW card selection in both WAITING and ACTIVE states
-    if (game.status !== 'WAITING' && game.status !== 'ACTIVE') {
+ if (game.status !== 'WAITING' && game.status !== 'ACTIVE') {
       throw new Error('Cannot select card - game is not active');
     }
 
@@ -749,8 +750,12 @@ static async selectCard(gameId, userId, cardNumbers, cardNumber) {
     console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) CREATED new card #${cardNumber} for game ${game.code}`);
     
     // Update real-time tracking
-    this.updateCardSelection(gameId, cardNumber, mongoUserId, 'CREATED');
-    
+  this.updateCardSelection(gameId, cardNumber, mongoUserId, 'CREATED');
+   if (game.status === 'WAITING') {
+      setTimeout(() => {
+        this.checkAndStartAutoStartTimer(gameId);
+      }, 1000);
+    }
     return { 
       success: true, 
       message: 'Card selected successfully',
@@ -933,6 +938,18 @@ static getRealTimeTakenCards(gameId) {
       gameObj.acceptsLateJoiners = gameObj.status === 'ACTIVE' && gameObj.currentPlayers < gameObj.maxPlayers;
       gameObj.numbersCalledCount = gameObj.numbersCalled?.length || 0;
     }
+    if (gameObj.status === 'WAITING') {
+    const now = new Date();
+    const autoStartEndTime = gameObj.autoStartEndTime;
+    
+    if (autoStartEndTime && autoStartEndTime > now) {
+      gameObj.autoStartTimeRemaining = autoStartEndTime - now;
+      gameObj.hasAutoStartTimer = true;
+    } else {
+      gameObj.autoStartTimeRemaining = 0;
+      gameObj.hasAutoStartTimer = false;
+    }
+  }
 
     return gameObj;
   }
@@ -1390,42 +1407,40 @@ static getRealTimeTakenCards(gameId) {
   }
 
   // AUTO RESTART GAME WITHOUT CARD SELECTION TIMER
-  static async autoRestartGame(gameId) {
-    try {
-      console.log(`🔄 Auto-restarting game ${gameId}...`);
-      
-      const game = await Game.findById(gameId);
-      if (!game || game.status !== 'FINISHED') {
-        console.log('❌ Game not found or not finished, cannot restart');
-        return;
-      }
-
-      // Clear all tracking
-      this.winnerDeclared.delete(gameId.toString());
-      this.processingGames.delete(gameId.toString());
-
-      game.status = 'WAITING';
-      game.numbersCalled = [];
-      game.winnerId = null;
-      game.startedAt = null;
-      game.endedAt = null;
-      // REMOVED: Reset selectedCards and cardSelectionEndTime
-      
-      await game.save();
-      
-      await BingoCard.deleteMany({ gameId });
-      
-      console.log(`✅ Game ${game.code} restarted - waiting for players to select cards`);
-      
-      // The game will now remain in WAITING state until:
-      // 1. Players join and select their cards
-      // 2. Game is manually started
-      console.log(`⏳ Game ${game.code} is now waiting for players to select cards and manual start command`);
-      
-    } catch (error) {
-      console.error('❌ Auto-restart error:', error);
+static async autoRestartGame(gameId) {
+  try {
+    console.log(`🔄 Auto-restarting game ${gameId}...`);
+    
+    // Clear any existing auto-start timer
+    this.clearAutoStartTimer(gameId);
+    
+    const game = await Game.findById(gameId);
+    if (!game || game.status !== 'FINISHED') {
+      console.log('❌ Game not found or not finished, cannot restart');
+      return;
     }
+
+    // Clear all tracking
+    this.winnerDeclared.delete(gameId.toString());
+    this.processingGames.delete(gameId.toString());
+
+    game.status = 'WAITING';
+    game.numbersCalled = [];
+    game.winnerId = null;
+    game.startedAt = null;
+    game.endedAt = null;
+    game.autoStartEndTime = null;
+    
+    await game.save();
+    
+    await BingoCard.deleteMany({ gameId });
+    
+    console.log(`✅ Game ${game.code} restarted - waiting for players to select cards`);
+    
+  } catch (error) {
+    console.error('❌ Auto-restart error:', error);
   }
+}
 
 
   //advanced card
@@ -1442,6 +1457,76 @@ static async getTakenCards(gameId) {
   } catch (error) {
     console.error('❌ Get taken cards error:', error);
     return [];
+  }
+}
+static async checkAndStartAutoStartTimer(gameId) {
+  try {
+    const game = await Game.findById(gameId);
+    if (!game || game.status !== 'WAITING') return;
+
+    // Check if we have at least 2 players with cards
+    const playersWithCards = await BingoCard.countDocuments({ gameId });
+    
+    if (playersWithCards >= this.MIN_PLAYERS_TO_START && !this.autoStartTimers.has(gameId.toString())) {
+      console.log(`⏰ Starting auto-start timer for game ${game.code} - ${playersWithCards} players with cards`);
+      
+      // Set auto-start timer for 30 seconds
+      const timer = setTimeout(async () => {
+        try {
+          await this.autoStartGame(gameId);
+        } catch (error) {
+          console.error('❌ Auto-start error:', error);
+        }
+      }, this.CARD_SELECTION_DURATION);
+      
+      this.autoStartTimers.set(gameId.toString(), {
+        timer,
+        startTime: new Date(),
+        endTime: new Date(Date.now() + this.CARD_SELECTION_DURATION)
+      });
+      
+      // Update game with auto-start info
+      game.autoStartEndTime = new Date(Date.now() + this.CARD_SELECTION_DURATION);
+      await game.save();
+      
+      console.log(`✅ Auto-start timer set for game ${game.code}. Game will start in 30 seconds`);
+    }
+  } catch (error) {
+    console.error('❌ Error checking auto-start timer:', error);
+  }
+}
+static async autoStartGame(gameId) {
+  try {
+    const game = await Game.findById(gameId);
+    if (!game || game.status !== 'WAITING') {
+      this.clearAutoStartTimer(gameId);
+      return;
+    }
+
+    // Final check before starting
+    const playersWithCards = await BingoCard.countDocuments({ gameId });
+    
+    if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
+      console.log(`🚀 AUTO-STARTING game ${game.code} with ${playersWithCards} players`);
+      await this.startGame(gameId);
+    } else {
+      console.log(`❌ Auto-start cancelled - only ${playersWithCards} players with cards`);
+    }
+    
+    this.clearAutoStartTimer(gameId);
+  } catch (error) {
+    console.error('❌ Auto-start game error:', error);
+    this.clearAutoStartTimer(gameId);
+  }
+}
+// Clear auto-start timer
+static clearAutoStartTimer(gameId) {
+  const gameIdStr = gameId.toString();
+  if (this.autoStartTimers.has(gameIdStr)) {
+    const timerInfo = this.autoStartTimers.get(gameIdStr);
+    clearTimeout(timerInfo.timer);
+    this.autoStartTimers.delete(gameIdStr);
+    console.log(`🛑 Cleared auto-start timer for game ${gameId}`);
   }
 }
   //advanced
