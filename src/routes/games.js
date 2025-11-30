@@ -36,7 +36,70 @@ router.get('/:gameId/available-cards/:userId', async (req, res) => {
     });
   }
 });
+// Get real-time taken cards
+router.get('/:gameId/taken-cards', async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    
+    console.log(`📋 Get taken cards request: gameId=${gameId}`);
+    
+    // Get taken cards from database
+    const databaseTakenCards = await GameService.getTakenCards(gameId);
+    
+    // Get real-time taken cards
+    const realTimeTakenCards = GameService.getRealTimeTakenCards(gameId);
+    
+    // Merge both sources
+    const allTakenCards = [...databaseTakenCards, ...realTimeTakenCards];
+    
+    // Remove duplicates
+    const uniqueTakenCards = allTakenCards.filter((card, index, self) => 
+      index === self.findIndex(c => c.cardNumber === card.cardNumber)
+    );
+    
+    res.json({
+      success: true,
+      takenCards: uniqueTakenCards,
+      count: uniqueTakenCards.length
+    });
+  } catch (error) {
+    console.error('❌ Get taken cards error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
+// Select card with card number
+router.post('/:gameId/select-card-with-number', async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    const { userId, cardNumbers, cardNumber } = req.body;
+    
+    console.log(`🎯 Card selection with number: gameId=${gameId}, userId=${userId}, cardNumber=${cardNumber}`);
+    
+    if (!userId || !cardNumbers || !cardNumber) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId, cardNumbers, and cardNumber are required'
+      });
+    }
+
+    const result = await GameService.selectCard(gameId, userId, cardNumbers, cardNumber);
+    
+    res.json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    console.error('❌ Card selection with number error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 // Select a bingo card
 router.post('/:gameId/select-card', async (req, res) => {
   try {

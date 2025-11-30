@@ -12,6 +12,7 @@ class GameService {
   static winnerDeclared = new Set();
   static processingGames = new Set(); // Track games being processed
   static MIN_PLAYERS_TO_START = 2;
+static selectedCards = new Map(); // gameId -> Set of selected card numbers
 
   // SINGLE GAME MANAGEMENT SYSTEM
   static async getMainGame() {
@@ -647,8 +648,7 @@ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
 }
 
   // NEW: Method for user to select their bingo card
- // In GameService - UPDATED selectCard method
-static async selectCard(gameId, userId, cardNumbers) {
+static async selectCard(gameId, userId, cardNumbers, cardNumber) {
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -662,6 +662,16 @@ static async selectCard(gameId, userId, cardNumbers) {
     // ALLOW card selection in both WAITING and ACTIVE states
     if (game.status !== 'WAITING' && game.status !== 'ACTIVE') {
       throw new Error('Cannot select card - game is not active');
+    }
+
+    // Check if card is already taken by another user
+    const existingCardWithNumber = await BingoCard.findOne({ 
+      gameId, 
+      cardNumber 
+    }).session(session);
+    
+    if (existingCardWithNumber && existingCardWithNumber.userId.toString() !== userId.toString()) {
+      throw new Error(`Card #${cardNumber} is already taken by another player`);
     }
 
     // FIX: Find user by either MongoDB ID or Telegram ID
@@ -688,6 +698,7 @@ static async selectCard(gameId, userId, cardNumbers) {
       
       // UPDATE existing card with new numbers
       existingCard.numbers = cardNumbers;
+      existingCard.cardNumber = cardNumber; // Store the card number
       existingCard.markedPositions = [12]; // Reset marked positions (keep FREE space)
       existingCard.isWinner = false; // Reset winner status
       existingCard.updatedAt = new Date();
@@ -696,13 +707,17 @@ static async selectCard(gameId, userId, cardNumbers) {
       
       await session.commitTransaction();
       
-      console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) UPDATED card for game ${game.code}`);
+      console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) UPDATED card #${cardNumber} for game ${game.code}`);
+      
+      // Update real-time tracking
+      this.updateCardSelection(gameId, cardNumber, mongoUserId, 'UPDATED');
       
       return { 
         success: true, 
         message: 'Card updated successfully',
         action: 'UPDATED',
-        cardId: existingCard._id
+        cardId: existingCard._id,
+        cardNumber: cardNumber
       };
     }
 
@@ -721,6 +736,7 @@ static async selectCard(gameId, userId, cardNumbers) {
     const newCard = await BingoCard.create([{
       userId: mongoUserId,
       gameId,
+      cardNumber: cardNumber, // Store the selected card number
       numbers: cardNumbers,
       markedPositions: [12], // Free space
       isLateJoiner: game.status === 'ACTIVE', // Mark as late joiner if game is active
@@ -730,13 +746,17 @@ static async selectCard(gameId, userId, cardNumbers) {
 
     await session.commitTransaction();
     
-    console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) CREATED new card for game ${game.code}`);
+    console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) CREATED new card #${cardNumber} for game ${game.code}`);
+    
+    // Update real-time tracking
+    this.updateCardSelection(gameId, cardNumber, mongoUserId, 'CREATED');
     
     return { 
       success: true, 
       message: 'Card selected successfully',
       action: 'CREATED',
-      cardId: newCard[0]._id
+      cardId: newCard[0]._id,
+      cardNumber: cardNumber
     };
   } catch (error) {
     await session.abortTransaction();
@@ -745,6 +765,49 @@ static async selectCard(gameId, userId, cardNumbers) {
   } finally {
     session.endSession();
   }
+}
+// Update real-time card selection tracking
+static updateCardSelection(gameId, cardNumber, userId, action) {
+  const gameIdStr = gameId.toString();
+  
+  if (!this.selectedCards.has(gameIdStr)) {
+    this.selectedCards.set(gameIdStr, new Map());
+  }
+  
+  const gameCards = this.selectedCards.get(gameIdStr);
+  
+  if (action === 'CREATED' || action === 'UPDATED') {
+    gameCards.set(cardNumber, {
+      userId: userId,
+      selectedAt: new Date(),
+      action: action
+    });
+  } else if (action === 'RELEASED') {
+    gameCards.delete(cardNumber);
+  }
+  
+  console.log(`🔄 Card #${cardNumber} ${action} by user ${userId} in game ${gameIdStr}`);
+}
+
+// Get real-time taken cards
+static getRealTimeTakenCards(gameId) {
+  const gameIdStr = gameId.toString();
+  
+  if (!this.selectedCards.has(gameIdStr)) {
+    return [];
+  }
+  
+  const gameCards = this.selectedCards.get(gameIdStr);
+  const takenCards = [];
+  
+  for (const [cardNumber, data] of gameCards.entries()) {
+    takenCards.push({
+      cardNumber: parseInt(cardNumber),
+      userId: data.userId
+    });
+  }
+  
+  return takenCards;
 }
 
   // NEW: Method to generate available cards for user to choose from
@@ -1363,6 +1426,25 @@ static async selectCard(gameId, userId, cardNumbers) {
       console.error('❌ Auto-restart error:', error);
     }
   }
+
+
+  //advanced card
+static async getTakenCards(gameId) {
+  try {
+    // Check database for cards that have been selected
+    const bingoCards = await BingoCard.find({ gameId });
+    const takenCards = bingoCards.map(card => ({
+      cardNumber: card.cardNumber, // You'll need to store cardNumber when creating cards
+      userId: card.userId
+    }));
+    
+    return takenCards;
+  } catch (error) {
+    console.error('❌ Get taken cards error:', error);
+    return [];
+  }
+}
+  //advanced
 }
 
 // Add cleanup on process termination
