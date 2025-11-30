@@ -1466,7 +1466,35 @@ static async getTakenCards(gameId) {
       userId: card.userId
     }));
     
-    return takenCards;
+    // Also include real-time tracking for consistency
+    const realTimeTakenCards = this.getRealTimeTakenCards(gameId);
+    
+    // Merge both sources, giving priority to real-time tracking
+    const mergedTakenCards = [...takenCards];
+    
+    // Add any real-time cards that aren't in the database yet
+    for (const realTimeCard of realTimeTakenCards) {
+      const exists = mergedTakenCards.some(card => 
+        card.cardNumber === realTimeCard.cardNumber && card.userId.toString() === realTimeCard.userId.toString()
+      );
+      if (!exists) {
+        mergedTakenCards.push(realTimeCard);
+      }
+    }
+    
+    // Remove any cards that have been released in real-time
+    const finalTakenCards = mergedTakenCards.filter(card => {
+      const gameIdStr = gameId.toString();
+      if (!this.selectedCards.has(gameIdStr)) return true;
+      
+      const gameCards = this.selectedCards.get(gameIdStr);
+      // If card exists in real-time tracking and is not released, include it
+      return gameCards.has(card.cardNumber.toString());
+    });
+    
+    console.log(`📊 Taken cards: ${finalTakenCards.length} cards (DB: ${takenCards.length}, Real-time: ${realTimeTakenCards.length})`);
+    
+    return finalTakenCards;
   } catch (error) {
     console.error('❌ Get taken cards error:', error);
     return [];
@@ -1542,6 +1570,7 @@ static clearAutoStartTimer(gameId) {
     console.log(`🛑 Cleared auto-start timer for game ${gameId}`);
   }
 }
+
   //advanced
 }
 
