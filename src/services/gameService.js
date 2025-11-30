@@ -794,17 +794,25 @@ static updateCardSelection(gameId, cardNumber, userId, action) {
   
   const gameCards = this.selectedCards.get(gameIdStr);
   
+  // Remove any existing card for this user FIRST
+  for (const [existingCardNumber, data] of gameCards.entries()) {
+    if (data.userId.toString() === userId.toString()) {
+      gameCards.delete(existingCardNumber);
+      console.log(`🔄 Removed previous card #${existingCardNumber} for user ${userId}`);
+    }
+  }
+  
+  // Then add the new card
   if (action === 'CREATED' || action === 'UPDATED') {
     gameCards.set(cardNumber, {
       userId: userId,
       selectedAt: new Date(),
       action: action
     });
-  } else if (action === 'RELEASED') {
-    gameCards.delete(cardNumber);
+    console.log(`✅ Card #${cardNumber} ${action} by user ${userId}`);
   }
   
-  console.log(`🔄 Card #${cardNumber} ${action} by user ${userId} in game ${gameIdStr}`);
+  // For RELEASED, we already removed it above
 }
 
 // Get real-time taken cards
@@ -1459,40 +1467,37 @@ static async autoRestartGame(gameId) {
   //advanced card
 static async getTakenCards(gameId) {
   try {
-    // Check database for cards that have been selected
+    // Get cards from database
     const bingoCards = await BingoCard.find({ gameId });
-    const takenCards = bingoCards.map(card => ({
-      cardNumber: card.cardNumber || card.cardIndex, // Use cardNumber if available, fallback to cardIndex
+    const dbTakenCards = bingoCards.map(card => ({
+      cardNumber: card.cardNumber,
       userId: card.userId
     }));
     
-    // Also include real-time tracking for consistency
+    // Get real-time tracking
     const realTimeTakenCards = this.getRealTimeTakenCards(gameId);
     
-    // Merge both sources, giving priority to real-time tracking
-    const mergedTakenCards = [...takenCards];
+    // Create a map to ensure ONE card per user
+    const userCardMap = new Map();
     
-    // Add any real-time cards that aren't in the database yet
-    for (const realTimeCard of realTimeTakenCards) {
-      const exists = mergedTakenCards.some(card => 
-        card.cardNumber === realTimeCard.cardNumber && card.userId.toString() === realTimeCard.userId.toString()
-      );
-      if (!exists) {
-        mergedTakenCards.push(realTimeCard);
+    // First, add database cards (most reliable)
+    for (const card of dbTakenCards) {
+      if (card.cardNumber && card.userId) {
+        userCardMap.set(card.userId.toString(), card);
       }
     }
     
-    // Remove any cards that have been released in real-time
-    const finalTakenCards = mergedTakenCards.filter(card => {
-      const gameIdStr = gameId.toString();
-      if (!this.selectedCards.has(gameIdStr)) return true;
-      
-      const gameCards = this.selectedCards.get(gameIdStr);
-      // If card exists in real-time tracking and is not released, include it
-      return gameCards.has(card.cardNumber.toString());
-    });
+    // Then, override with real-time cards (more current)
+    for (const card of realTimeTakenCards) {
+      if (card.cardNumber && card.userId) {
+        userCardMap.set(card.userId.toString(), card);
+      }
+    }
     
-    console.log(`📊 Taken cards: ${finalTakenCards.length} cards (DB: ${takenCards.length}, Real-time: ${realTimeTakenCards.length})`);
+    // Convert back to array
+    const finalTakenCards = Array.from(userCardMap.values());
+    
+    console.log(`📊 Taken cards: ${finalTakenCards.length} unique cards (Users: ${userCardMap.size})`);
     
     return finalTakenCards;
   } catch (error) {
