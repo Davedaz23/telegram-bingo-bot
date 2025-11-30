@@ -1032,11 +1032,46 @@ static getRealTimeTakenCards(gameId) {
     return this.formatGameForFrontend(game);
   }
 
-  static async getUserBingoCard(gameId, userId) {
-    return await BingoCard.findOne({ gameId, userId })
-      .populate('userId', 'username firstName');
+// In your GameService.js - UPDATED getUserBingoCard method
+static async getUserBingoCard(gameId, userId) {
+  try {
+    console.log(`🔍 getUserBingoCard called with:`, { gameId, userId });
+    
+    // FIX: Handle both MongoDB ObjectId and Telegram ID strings
+    let query = {};
+    
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      // If it's a valid MongoDB ObjectId, use it directly
+      query = { gameId, userId: new mongoose.Types.ObjectId(userId) };
+    } else {
+      // If it's a Telegram ID string, find the user first
+      const User = require('../models/User');
+      const user = await User.findOne({ telegramId: userId });
+      
+      if (!user) {
+        console.log(`❌ User not found with Telegram ID: ${userId}`);
+        return null;
+      }
+      
+      console.log(`✅ Found user with Telegram ID ${userId}: MongoDB _id = ${user._id}`);
+      query = { gameId, userId: user._id };
+    }
+    
+    const bingoCard = await BingoCard.findOne(query)
+      .populate('userId', 'username firstName telegramId');
+    
+    if (bingoCard) {
+      console.log(`✅ Found bingo card for user ${userId}`);
+    } else {
+      console.log(`❌ No bingo card found for user ${userId}`);
+    }
+    
+    return bingoCard;
+  } catch (error) {
+    console.error('❌ Error in getUserBingoCard:', error);
+    throw error;
   }
-
+}
   static async findByCode(code) {
     const game = await Game.findOne({ code })
       .populate('winnerId', 'username firstName')
