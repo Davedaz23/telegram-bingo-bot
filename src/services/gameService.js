@@ -1515,14 +1515,16 @@ static async getTakenCards(gameId) {
 static async checkAndAutoStartGame(gameId) {
   try {
     const game = await Game.findById(gameId);
-    if (!game || game.status !== 'WAITING') return;
+    if (!game || game.status !== 'WAITING') {
+      return { started: false, reason: 'Game not in waiting state' };
+    }
 
     // Check if we have at least 2 players with cards
     const playersWithCards = await BingoCard.countDocuments({ gameId });
     
     console.log(`🔍 Auto-start check: ${playersWithCards} players with cards for game ${game.code}`);
     
- if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
+    if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
       console.log(`🚀 AUTO-STARTING game ${game.code} with ${playersWithCards} players`);
       await this.startGame(gameId);
       return { started: true, playersCount: playersWithCards };
@@ -1532,30 +1534,12 @@ static async checkAndAutoStartGame(gameId) {
     }
   } catch (error) {
     console.error('❌ Auto-start check error:', error);
-    return false;
+    return { started: false, reason: error.message };
   }
 }
 
 // Update the autoStartGame method to be more robust
-static async autoStartGame(gameId) {
-  try {
-    const game = await Game.findById(gameId);
-    if (!game || game.status !== 'WAITING') {
-      this.clearAutoStartTimer(gameId);
-      return;
-    }
 
-    // Clear the timer first to prevent multiple calls
-    this.clearAutoStartTimer(gameId);
-    
-    // Then check and start the game
-    await this.checkAndAutoStartGame(gameId);
-    
-  } catch (error) {
-    console.error('❌ Auto-start game error:', error);
-    this.clearAutoStartTimer(gameId);
-  }
-}
 static async autoStartGame(gameId) {
   try {
     const game = await Game.findById(gameId);
