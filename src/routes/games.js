@@ -71,7 +71,28 @@ router.get('/:gameId/taken-cards', async (req, res) => {
   }
 });
 
-
+// Check and auto-start game if conditions are met
+router.post('/:gameId/check-auto-start', async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    
+    console.log(`🔍 Manual auto-start check for game: ${gameId}`);
+    
+    const started = await GameService.checkAndAutoStartGame(gameId);
+    
+    res.json({
+      success: true,
+      gameStarted: started,
+      message: started ? 'Game auto-started successfully' : 'Not enough players to start'
+    });
+  } catch (error) {
+    console.error('❌ Auto-start check error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 // Select card with card number
 router.post('/:gameId/select-card-with-number', async (req, res) => {
   try {

@@ -763,11 +763,18 @@ static async selectCard(gameId, userId, cardNumbers, cardNumber) {
     // Update real-time tracking
     this.updateCardSelection(gameId, cardNumber, mongoUserId, 'CREATED');
     
+  
     if (game.status === 'WAITING') {
-      setTimeout(() => {
-        this.checkAndStartAutoStartTimer(gameId);
-      }, 1000);
+      // Schedule auto-start check after a short delay
+      setTimeout(async () => {
+        try {
+          await this.checkAndAutoStartGame(gameId);
+        } catch (error) {
+          console.error('❌ Auto-start after card selection failed:', error);
+        }
+      }, 1500);
     }
+
     
     return { 
       success: true, 
@@ -1505,7 +1512,7 @@ static async getTakenCards(gameId) {
     return [];
   }
 }
-static async checkAndStartAutoStartTimer(gameId) {
+static async checkAndAutoStartGame(gameId) {
   try {
     const game = await Game.findById(gameId);
     if (!game || game.status !== 'WAITING') return;
@@ -1513,32 +1520,40 @@ static async checkAndStartAutoStartTimer(gameId) {
     // Check if we have at least 2 players with cards
     const playersWithCards = await BingoCard.countDocuments({ gameId });
     
-    if (playersWithCards >= this.MIN_PLAYERS_TO_START && !this.autoStartTimers.has(gameId.toString())) {
-      console.log(`⏰ Starting auto-start timer for game ${game.code} - ${playersWithCards} players with cards`);
-      
-      // Set auto-start timer for 30 seconds
-      const timer = setTimeout(async () => {
-        try {
-          await this.autoStartGame(gameId);
-        } catch (error) {
-          console.error('❌ Auto-start error:', error);
-        }
-      }, this.CARD_SELECTION_DURATION);
-      
-      this.autoStartTimers.set(gameId.toString(), {
-        timer,
-        startTime: new Date(),
-        endTime: new Date(Date.now() + this.CARD_SELECTION_DURATION)
-      });
-      
-      // Update game with auto-start info
-      game.autoStartEndTime = new Date(Date.now() + this.CARD_SELECTION_DURATION);
-      await game.save();
-      
-      console.log(`✅ Auto-start timer set for game ${game.code}. Game will start in 30 seconds`);
+    console.log(`🔍 Auto-start check: ${playersWithCards} players with cards for game ${game.code}`);
+    
+ if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
+      console.log(`🚀 AUTO-STARTING game ${game.code} with ${playersWithCards} players`);
+      await this.startGame(gameId);
+      return { started: true, playersCount: playersWithCards };
+    } else {
+      console.log(`⏳ Not enough players with cards: ${playersWithCards}/${this.MIN_PLAYERS_TO_START}`);
+      return { started: false, playersCount: playersWithCards, reason: 'Not enough players' };
     }
   } catch (error) {
-    console.error('❌ Error checking auto-start timer:', error);
+    console.error('❌ Auto-start check error:', error);
+    return false;
+  }
+}
+
+// Update the autoStartGame method to be more robust
+static async autoStartGame(gameId) {
+  try {
+    const game = await Game.findById(gameId);
+    if (!game || game.status !== 'WAITING') {
+      this.clearAutoStartTimer(gameId);
+      return;
+    }
+
+    // Clear the timer first to prevent multiple calls
+    this.clearAutoStartTimer(gameId);
+    
+    // Then check and start the game
+    await this.checkAndAutoStartGame(gameId);
+    
+  } catch (error) {
+    console.error('❌ Auto-start game error:', error);
+    this.clearAutoStartTimer(gameId);
   }
 }
 static async autoStartGame(gameId) {
