@@ -601,33 +601,34 @@ class GameService {
     }
   }
 
-  static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+ static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-    try {
-      const WalletService = require('./walletService');
-      const balance = await WalletService.getBalance(userId);
-      
-      if (balance < entryFee) {
-        throw new Error(`Insufficient balance. Required: $${entryFee}, Available: $${balance}`);
-      }
-
-      await WalletService.deductGameEntry(userId, null, entryFee, `Entry fee for game ${gameCode}`);
-
-      const game = await this.joinGame(gameCode, userId);
-
-      await session.commitTransaction();
-      return game;
-
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Join game with wallet error:', error);
-      throw error;
-    } finally {
-      session.endSession();
+  try {
+    const WalletService = require('./walletService');
+    const balance = await WalletService.getBalance(userId);
+    
+    if (balance < entryFee) {
+      throw new Error(`Insufficient balance. Required: $${entryFee}, Available: $${balance}`);
     }
+
+    // DON'T deduct here - just check balance
+    console.log(`✅ User ${userId} has sufficient balance: $${balance}`);
+
+    const game = await this.joinGame(gameCode, userId);
+
+    await session.commitTransaction();
+    return game;
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Join game with wallet error:', error);
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
 
   // CARD SELECTION METHODS
   static async selectCard(gameId, userId, cardNumbers, cardNumber) {
@@ -838,48 +839,80 @@ class GameService {
     return preview;
   }
 
-  static async startGame(gameId) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+ static async startGame(gameId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-    try {
-      const game = await Game.findById(gameId).session(session);
+  try {
+    const game = await Game.findById(gameId).session(session);
 
-      if (!game) {
-        throw new Error('Game not found');
-      }
-
-      if (game.status !== 'WAITING') {
-        throw new Error('Game already started');
-      }
-
-      const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
-      
-      if (playersWithCards < this.MIN_PLAYERS_TO_START) {
-        throw new Error(`Need at least ${this.MIN_PLAYERS_TO_START} players with selected cards to start the game. Current: ${playersWithCards}`);
-      }
-
-      game.status = 'ACTIVE';
-      game.startedAt = new Date();
-      game.autoStartEndTime = null;
-      await game.save();
-
-      await session.commitTransaction();
-
-      console.log(`🚀 Game ${game.code} started with ${playersWithCards} player(s) with selected cards`);
-
-      this.clearAutoStartTimer(gameId);
-      this.startAutoNumberCalling(gameId);
-
-      return this.getGameWithDetails(game._id);
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Start game error:', error);
-      throw error;
-    } finally {
-      session.endSession();
+    if (!game) {
+      throw new Error('Game not found');
     }
+
+    if (game.status !== 'WAITING') {
+      throw new Error('Game already started');
+    }
+
+    const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
+    
+    if (playersWithCards < this.MIN_PLAYERS_TO_START) {
+      throw new Error(`Need at least ${this.MIN_PLAYERS_TO_START} players with selected cards to start the game. Current: ${playersWithCards}`);
+    }
+
+    // NEW: Get all players with cards
+    const playerCards = await BingoCard.find({ gameId }).session(session);
+    
+    // NEW: Deduct entry fee from all players
+    const WalletService = require('./walletService');
+    const entryFee = 10; // Assuming $10 entry fee
+    
+    console.log(`💰 Deducting entry fees from ${playerCards.length} players...`);
+    
+    for (const card of playerCards) {
+      try {
+        // Get user's Telegram ID to deduct from wallet
+        const User = require('../models/User');
+        const user = await User.findById(card.userId).session(session);
+        
+        if (user && user.telegramId) {
+          await WalletService.deductGameEntry(
+            user.telegramId, 
+            gameId, 
+            entryFee, 
+            `Entry fee for game ${game.code}`
+          );
+          console.log(`✅ Deducted $${entryFee} from ${user.telegramId}`);
+        } else {
+          console.warn(`⚠️ Could not deduct from user ${card.userId} - user not found`);
+        }
+      } catch (error) {
+        console.error(`❌ Failed to deduct from user ${card.userId}:`, error.message);
+        // Continue with other players even if one fails
+      }
+    }
+
+    game.status = 'ACTIVE';
+    game.startedAt = new Date();
+    game.autoStartEndTime = null;
+    await game.save();
+
+    await session.commitTransaction();
+
+    console.log(`🚀 Game ${game.code} started with ${playersWithCards} player(s). Entry fees deducted.`);
+
+    this.clearAutoStartTimer(gameId);
+    this.startAutoNumberCalling(gameId);
+
+    return this.getGameWithDetails(game._id);
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Start game error:', error);
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
 
   // static formatGameForFrontend(game) {
   //   if (!game) return null;
@@ -1318,57 +1351,98 @@ class GameService {
     };
   }
 
-  static async endGame(gameId) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+ static async endGame(gameId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-    try {
-      this.stopAutoNumberCalling(gameId);
+  try {
+    this.stopAutoNumberCalling(gameId);
 
-      const game = await Game.findById(gameId).session(session);
-      
-      if (!game) {
-        throw new Error('Game not found');
-      }
-
-      if (game.status === 'FINISHED' || game.status === 'CANCELLED') {
-        throw new Error('Game already ended');
-      }
-
-      game.status = 'FINISHED';
-      game.endedAt = new Date();
-      
-      if (!game.winnerId) {
-        game.winnerId = null;
-      }
-      
-      await game.save();
-
-      const UserService = require('./userService');
-      const players = await GamePlayer.find({ gameId }).session(session);
-      
-      for (const player of players) {
-        const isWinner = player.userId.toString() === game.winnerId?.toString();
-        await UserService.updateUserStats(player.userId, isWinner);
-      }
-
-      await session.commitTransaction();
-
-      console.log(`🏁 Game ${game.code} ended`);
-
-      setTimeout(() => {
-        this.autoRestartGame(gameId);
-      }, 30000);
-
-      return this.getGameWithDetails(gameId);
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ End game error:', error);
-      throw error;
-    } finally {
-      session.endSession();
+    const game = await Game.findById(gameId).session(session);
+    
+    if (!game) {
+      throw new Error('Game not found');
     }
+
+    if (game.status === 'FINISHED' || game.status === 'CANCELLED') {
+      throw new Error('Game already ended');
+    }
+
+    // NEW: If game is ending without a winner (cancelled), refund players
+    if (!game.winnerId && game.status === 'ACTIVE') {
+      console.log(`🔄 Game ${game.code} cancelled - refunding players`);
+      await this.refundAllPlayers(gameId, session);
+    }
+
+    game.status = 'FINISHED';
+    game.endedAt = new Date();
+    
+    if (!game.winnerId) {
+      game.winnerId = null;
+    }
+    
+    await game.save();
+
+    const UserService = require('./userService');
+    const players = await GamePlayer.find({ gameId }).session(session);
+    
+    for (const player of players) {
+      const isWinner = player.userId.toString() === game.winnerId?.toString();
+      await UserService.updateUserStats(player.userId, isWinner);
+    }
+
+    await session.commitTransaction();
+
+    console.log(`🏁 Game ${game.code} ended`);
+
+    setTimeout(() => {
+      this.autoRestartGame(gameId);
+    }, 30000);
+
+    return this.getGameWithDetails(gameId);
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ End game error:', error);
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
+
+// NEW: Method to refund all players
+static async refundAllPlayers(gameId, session) {
+  try {
+    const WalletService = require('./walletService');
+    const entryFee = 10;
+    
+    const bingoCards = await BingoCard.find({ gameId }).session(session);
+    
+    console.log(`💰 Refunding ${bingoCards.length} players...`);
+    
+    for (const card of bingoCards) {
+      try {
+        const User = require('../models/User');
+        const user = await User.findById(card.userId).session(session);
+        
+        if (user && user.telegramId) {
+          // Refund the entry fee
+          await WalletService.addWinning(
+            user.telegramId,
+            gameId,
+            entryFee,
+            `Refund for cancelled game`
+          );
+          console.log(`✅ Refunded $${entryFee} to ${user.telegramId}`);
+        }
+      } catch (error) {
+        console.error(`❌ Failed to refund user ${card.userId}:`, error.message);
+      }
+    }
+  } catch (error) {
+    console.error('❌ Error in refundAllPlayers:', error);
+    throw error;
+  }
+}
 
   static async getGameStats(gameId) {
     const game = await this.getGameWithDetails(gameId);
@@ -1621,35 +1695,124 @@ class GameService {
       return { started: false, reason: error.message };
     }
   }
+static async autoStartGame(gameId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  static async autoStartGame(gameId) {
-    try {
-      const game = await Game.findById(gameId);
-      if (!game || game.status !== 'WAITING') {
-        this.clearAutoStartTimer(gameId);
-        return;
-      }
+  try {
+    const game = await Game.findById(gameId).session(session);
+    if (!game || game.status !== 'WAITING') {
+      this.clearAutoStartTimer(gameId);
+      await session.abortTransaction();
+      return;
+    }
 
-      const playersWithCards = await BingoCard.countDocuments({ gameId });
+    const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
+    
+    if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
+      console.log(`🚀 AUTO-STARTING game ${game.code} with ${playersWithCards} players`);
       
-      if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
-        console.log(`🚀 AUTO-STARTING game ${game.code} with ${playersWithCards} players`);
-        await this.startGame(gameId);
-      } else {
-        console.log(`❌ Auto-start cancelled - only ${playersWithCards} players with cards (need ${this.MIN_PLAYERS_TO_START})`);
+      // NEW: Get all players with cards and deduct entry fees
+      const playerCards = await BingoCard.find({ gameId }).session(session);
+      const WalletService = require('./walletService');
+      const entryFee = 10; // Assuming $10 entry fee
+      
+      console.log(`💰 Deducting entry fees from ${playerCards.length} players...`);
+      
+      const failedDeductions = [];
+      
+      for (const card of playerCards) {
+        try {
+          const User = require('../models/User');
+          const user = await User.findById(card.userId).session(session);
+          
+          if (user && user.telegramId) {
+            await WalletService.deductGameEntry(
+              user.telegramId, 
+              gameId, 
+              entryFee, 
+              `Entry fee for game ${game.code}`
+            );
+            console.log(`✅ Deducted $${entryFee} from ${user.telegramId}`);
+          } else {
+            console.warn(`⚠️ Could not deduct from user ${card.userId} - user not found`);
+            failedDeductions.push(card.userId);
+          }
+        } catch (error) {
+          console.error(`❌ Failed to deduct from user ${card.userId}:`, error.message);
+          failedDeductions.push(card.userId);
+        }
+      }
+      
+      // Only proceed if we have enough players who paid
+      const successfulPayments = playerCards.length - failedDeductions.length;
+      
+      if (successfulPayments < this.MIN_PLAYERS_TO_START) {
+        console.log(`❌ Auto-start cancelled - only ${successfulPayments} players could pay (need ${this.MIN_PLAYERS_TO_START})`);
         
+        // Refund any successful payments if not enough players
+        for (const card of playerCards) {
+          try {
+            if (!failedDeductions.includes(card.userId.toString())) {
+              const User = require('../models/User');
+              const user = await User.findById(card.userId).session(session);
+              
+              if (user && user.telegramId) {
+                await WalletService.addWinning(
+                  user.telegramId,
+                  gameId,
+                  entryFee,
+                  `Refund - insufficient players`
+                );
+                console.log(`💰 Refunded $${entryFee} to ${user.telegramId}`);
+              }
+            }
+          } catch (refundError) {
+            console.error(`❌ Failed to refund user ${card.userId}:`, refundError.message);
+          }
+        }
+        
+        await session.abortTransaction();
+        this.clearAutoStartTimer(gameId);
+        
+        // Try again later
         setTimeout(() => {
           this.scheduleAutoStartCheck(gameId);
-        }, 5000);
+        }, 10000);
+        
+        return;
       }
       
+      // Update game status
+      game.status = 'ACTIVE';
+      game.startedAt = new Date();
+      game.autoStartEndTime = null;
+      await game.save();
+      
+      await session.commitTransaction();
+      console.log(`✅ Game ${game.code} auto-started with ${successfulPayments} paid players`);
+      
       this.clearAutoStartTimer(gameId);
-    } catch (error) {
-      console.error('❌ Auto-start game error:', error);
-      this.clearAutoStartTimer(gameId);
+      this.startAutoNumberCalling(gameId);
+      
+    } else {
+      console.log(`❌ Auto-start cancelled - only ${playersWithCards} players with cards (need ${this.MIN_PLAYERS_TO_START})`);
+      
+      await session.abortTransaction();
+      
+      setTimeout(() => {
+        this.scheduleAutoStartCheck(gameId);
+      }, 5000);
     }
+    
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Auto-start game error:', error);
+    this.clearAutoStartTimer(gameId);
+  } finally {
+    session.endSession();
   }
-
+}
   static async scheduleAutoStartCheck(gameId) {
     const game = await Game.findById(gameId);
     if (!game || game.status !== 'WAITING') return;
