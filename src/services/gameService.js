@@ -15,7 +15,7 @@ class GameService {
 static selectedCards = new Map(); // gameId -> Set of selected card numbers
 static autoStartTimers = new Map(); // Track auto-start timers per game
 static CARD_SELECTION_DURATION = 30000; // 30 seconds
-static autoStartTimers = new Map();
+
   // SINGLE GAME MANAGEMENT SYSTEM
 static async joinGame(gameCode, userId) {
   const session = await mongoose.startSession();
