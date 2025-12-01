@@ -15,6 +15,7 @@ class GameService {
   static selectedCards = new Map();
   static autoStartTimers = new Map();
   static CARD_SELECTION_DURATION = 30000;
+static alreadyScheduledForAutoStart = new Map();
 
   // SINGLE GAME MANAGEMENT SYSTEM
   static async getMainGame() {
@@ -839,7 +840,7 @@ class GameService {
     return preview;
   }
 
- static async startGame(gameId) {
+static async startGame(gameId) {
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -860,18 +861,17 @@ class GameService {
       throw new Error(`Need at least ${this.MIN_PLAYERS_TO_START} players with selected cards to start the game. Current: ${playersWithCards}`);
     }
 
-    // NEW: Get all players with cards
+    // Get all players with cards
     const playerCards = await BingoCard.find({ gameId }).session(session);
     
-    // NEW: Deduct entry fee from all players
+    // Deduct entry fee from all players
     const WalletService = require('./walletService');
-    const entryFee = 10; // Assuming $10 entry fee
+    const entryFee = 10;
     
     console.log(`💰 Deducting entry fees from ${playerCards.length} players...`);
     
     for (const card of playerCards) {
       try {
-        // Get user's Telegram ID to deduct from wallet
         const User = require('../models/User');
         const user = await User.findById(card.userId).session(session);
         
@@ -888,7 +888,6 @@ class GameService {
         }
       } catch (error) {
         console.error(`❌ Failed to deduct from user ${card.userId}:`, error.message);
-        // Continue with other players even if one fails
       }
     }
 
@@ -901,7 +900,11 @@ class GameService {
 
     console.log(`🚀 Game ${game.code} started with ${playersWithCards} player(s). Entry fees deducted.`);
 
+    // Clear auto-start timer and flag
     this.clearAutoStartTimer(gameId);
+    const gameIdStr = gameId.toString();
+    this.alreadyScheduledForAutoStart.delete(gameIdStr);
+    
     this.startAutoNumberCalling(gameId);
 
     return this.getGameWithDetails(game._id);
@@ -979,7 +982,7 @@ class GameService {
   // }
 
 
-  static async formatGameForFrontend(game) {
+ static async formatGameForFrontend(game) {
   if (!game) return null;
   
   const gameObj = game.toObject ? game.toObject() : { ...game };
@@ -1041,11 +1044,21 @@ class GameService {
         gameObj.autoStartTimeRemaining = 10000;
         gameObj.hasAutoStartTimer = true;
         
-        // Schedule auto-start immediately
-        this.scheduleAutoStart(gameObj._id, 10000);
+        // Only schedule auto-start if we haven't already scheduled it
+        const gameIdStr = gameObj._id.toString();
+        if (!this.alreadyScheduledForAutoStart.has(gameIdStr)) {
+          console.log(`⏰ Scheduling auto-start for game ${gameObj.code} in 10000ms`);
+          this.alreadyScheduledForAutoStart.set(gameIdStr, true);
+          this.scheduleAutoStart(gameObj._id, 10000);
+        }
       } else if (gameObj.autoStartEndTime <= now) {
         // Auto-start time has passed - START THE GAME IMMEDIATELY
         console.log(`🚀 AUTO-START TIME PASSED - Starting game ${gameObj.code} immediately`);
+        
+        // Clear the scheduled flag
+        const gameIdStr = gameObj._id.toString();
+        this.alreadyScheduledForAutoStart.delete(gameIdStr);
+        
         this.autoStartGame(gameObj._id);
       } else {
         gameObj.autoStartTimeRemaining = gameObj.autoStartEndTime - now;
@@ -1054,6 +1067,10 @@ class GameService {
     } else {
       gameObj.autoStartTimeRemaining = 0;
       gameObj.hasAutoStartTimer = false;
+      
+      // If we don't have enough players, clear any existing schedule
+      const gameIdStr = gameObj._id.toString();
+      this.alreadyScheduledForAutoStart.delete(gameIdStr);
     }
   }
 
@@ -1712,10 +1729,10 @@ static async autoStartGame(gameId) {
     if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
       console.log(`🚀 AUTO-STARTING game ${game.code} with ${playersWithCards} players`);
       
-      // NEW: Get all players with cards and deduct entry fees
+      // Get all players with cards and deduct entry fees
       const playerCards = await BingoCard.find({ gameId }).session(session);
       const WalletService = require('./walletService');
-      const entryFee = 10; // Assuming $10 entry fee
+      const entryFee = 10;
       
       console.log(`💰 Deducting entry fees from ${playerCards.length} players...`);
       
@@ -1775,10 +1792,9 @@ static async autoStartGame(gameId) {
         await session.abortTransaction();
         this.clearAutoStartTimer(gameId);
         
-        // Try again later
-        setTimeout(() => {
-          this.scheduleAutoStartCheck(gameId);
-        }, 10000);
+        // Clear scheduled flag so we can try again
+        const gameIdStr = gameId.toString();
+        this.alreadyScheduledForAutoStart.delete(gameIdStr);
         
         return;
       }
@@ -1799,7 +1815,9 @@ static async autoStartGame(gameId) {
       console.log(`❌ Auto-start cancelled - only ${playersWithCards} players with cards (need ${this.MIN_PLAYERS_TO_START})`);
       
       await session.abortTransaction();
+      this.clearAutoStartTimer(gameId);
       
+      // Schedule check again
       setTimeout(() => {
         this.scheduleAutoStartCheck(gameId);
       }, 5000);
@@ -1831,15 +1849,23 @@ static async autoStartGame(gameId) {
     }
   }
 
-  static clearAutoStartTimer(gameId) {
-    const gameIdStr = gameId.toString();
-    if (this.autoStartTimers.has(gameIdStr)) {
-      const timerInfo = this.autoStartTimers.get(gameIdStr);
-      clearTimeout(timerInfo.timer);
-      this.autoStartTimers.delete(gameIdStr);
-      console.log(`🛑 Cleared auto-start timer for game ${gameId}`);
-    }
+ static clearAutoStartTimer(gameId) {
+  const gameIdStr = gameId.toString();
+  
+  // Clear from timer map
+  if (this.autoStartTimers.has(gameIdStr)) {
+    const timerInfo = this.autoStartTimers.get(gameIdStr);
+    clearTimeout(timerInfo.timer);
+    this.autoStartTimers.delete(gameIdStr);
+    console.log(`🛑 Cleared auto-start timer for game ${gameId}`);
   }
+  
+  // Also clear from scheduled flag map
+  if (this.alreadyScheduledForAutoStart.has(gameIdStr)) {
+    this.alreadyScheduledForAutoStart.delete(gameIdStr);
+    console.log(`🛑 Cleared scheduled flag for game ${gameId}`);
+  }
+}
 }
 
 process.on('SIGINT', () => {
