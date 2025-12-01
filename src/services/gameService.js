@@ -17,40 +17,100 @@ static autoStartTimers = new Map(); // Track auto-start timers per game
 static CARD_SELECTION_DURATION = 30000; // 30 seconds
 static autoStartTimers = new Map();
   // SINGLE GAME MANAGEMENT SYSTEM
-  static async getMainGame() {
-    try {
-      if (!this.activeIntervals) {
-        this.activeIntervals = new Map();
-      }
+static async joinGame(gameCode, userId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-      await this.autoRestartFinishedGames();
-      
-      let game = await Game.findOne({ 
-        status: { $in: ['WAITING', 'ACTIVE'] } 
-      })
-      .populate('winnerId', 'username firstName')
-      .populate({
-        path: 'players',
-        populate: {
-          path: 'userId',
-          select: 'username firstName telegramId'
-        }
-      });
-
-      if (!game) {
-        console.log('🎮 No active games found. Creating automatic game...');
-        game = await this.createAutoGame();
-      } else if (game.status === 'ACTIVE' && this.activeIntervals && !this.activeIntervals.has(game._id.toString())) {
-        console.log(`🔄 Restarting auto-calling for active game ${game.code}`);
-        this.startAutoNumberCalling(game._id);
-      }
-
-      return this.formatGameForFrontend(game);
-    } catch (error) {
-      console.error('❌ Error in getMainGame:', error);
-      throw error;
+  try {
+    const mainGame = await this.getMainGame();
+    
+    if (!mainGame) {
+      throw new Error('No game available');
     }
+
+    const game = await Game.findById(mainGame._id).session(session);
+
+    // FIX: Find user by Telegram ID first, then use MongoDB _id
+    let user;
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      // If it's already a MongoDB ObjectId
+      user = await User.findById(userId).session(session);
+    } else {
+      // Assume it's a Telegram ID string
+      user = await User.findOne({ telegramId: userId }).session(session);
+    }
+
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    // Use the MongoDB _id for GamePlayer
+    const mongoUserId = user._id;
+
+    const existingPlayer = await GamePlayer.findOne({ 
+      userId: mongoUserId, 
+      gameId: game._id 
+    }).session(session);
+    
+    if (existingPlayer) {
+      await session.commitTransaction();
+      return this.getGameWithDetails(game._id);
+    }
+
+    if (game.status === 'WAITING' || game.status === 'ACTIVE') {
+      if (game.currentPlayers >= game.maxPlayers) {
+        await session.abortTransaction();
+        throw new Error('Game is full');
+      }
+
+      const isLateJoiner = game.status === 'ACTIVE';
+      const numbersCalledAtJoin = game.numbersCalled || [];
+
+      await GamePlayer.create([{
+        userId: mongoUserId, // Use MongoDB _id here
+        gameId: game._id,
+        isReady: true,
+        playerType: 'PLAYER',
+        joinedAt: new Date()
+      }], { session });
+
+      // REMOVED: Auto card generation - card will be selected by user
+      // Card will be created when user selects one via selectCard endpoint
+
+      game.currentPlayers += 1;
+      game.updatedAt = new Date();
+      await game.save();
+
+      await session.commitTransaction();
+
+      console.log(`✅ User ${userId} (Telegram) joined as ${isLateJoiner ? 'LATE PLAYER' : 'PLAYER'}. Total players: ${game.currentPlayers}`);
+
+      // 🛑 REMOVED: Auto-start game logic
+      // The game will now only start when explicitly called via startGame API
+      if (game.status === 'WAITING') {
+        console.log(`⏳ Player joined. Game ${game.code} waiting for manual start. Current: ${game.currentPlayers}/${game.maxPlayers} players`);
+      }
+
+      return this.getGameWithDetails(game._id);
+    } 
+    else if (game.status === 'FINISHED') {
+      await session.abortTransaction();
+      throw new Error('Game has already finished. A new game will start soon.');
+    }
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Join game error:', error);
+    
+    if (error.code === 11000) {
+      throw new Error('You have already joined this game');
+    }
+    
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
 
  
   static async autoRestartFinishedGames() {
