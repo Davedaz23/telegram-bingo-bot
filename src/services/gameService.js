@@ -112,7 +112,41 @@ static async joinGame(gameCode, userId) {
   }
 }
 
- 
+ // Add this method back to the GameService class (add it near the top after the static properties)
+static async getMainGame() {
+  try {
+    if (!this.activeIntervals) {
+      this.activeIntervals = new Map();
+    }
+
+    await this.autoRestartFinishedGames();
+    
+    let game = await Game.findOne({ 
+      status: { $in: ['WAITING', 'ACTIVE'] } 
+    })
+    .populate('winnerId', 'username firstName')
+    .populate({
+      path: 'players',
+      populate: {
+        path: 'userId',
+        select: 'username firstName telegramId'
+      }
+    });
+
+    if (!game) {
+      console.log('🎮 No active games found. Creating automatic game...');
+      game = await this.createAutoGame();
+    } else if (game.status === 'ACTIVE' && this.activeIntervals && !this.activeIntervals.has(game._id.toString())) {
+      console.log(`🔄 Restarting auto-calling for active game ${game.code}`);
+      this.startAutoNumberCalling(game._id);
+    }
+
+    return this.formatGameForFrontend(game);
+  } catch (error) {
+    console.error('❌ Error in getMainGame:', error);
+    throw error;
+  }
+}
   static async autoRestartFinishedGames() {
     try {
       if (!this.activeIntervals) {
