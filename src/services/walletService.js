@@ -8,31 +8,46 @@ const SMSDeposit = require('../models/SMSDeposit');
 
 class WalletService {
   
+// Update the resolveUserId method to handle both MongoDB ObjectIds and Telegram IDs
 static async resolveUserId(userId) {
-    try {
-      console.log('🔄 Resolving user ID:', userId, 'Type:', typeof userId);
-      
-      if (mongoose.Types.ObjectId.isValid(userId) && new mongoose.Types.ObjectId(userId).toString() === userId) {
+  try {
+    console.log('🔄 Resolving user ID:', userId, 'Type:', typeof userId);
+    
+    // If input is already a valid MongoDB ObjectId, return it
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      // Check if it's properly formatted
+      const asObjectId = new mongoose.Types.ObjectId(userId);
+      if (asObjectId.toString() === userId.toString()) {
         console.log('✅ Input is already MongoDB ObjectId');
         return userId;
       }
+    }
+    
+    // Otherwise, treat it as a Telegram ID string
+    console.log('🔍 Looking for user with Telegram ID:', userId.toString());
+    const user = await User.findOne({ telegramId: userId.toString() });
+    
+    if (!user) {
+      console.error('❌ User not found for Telegram ID:', userId);
       
-      console.log('🔍 Looking for user with Telegram ID:', userId.toString());
-      const user = await User.findOne({ telegramId: userId.toString() });
-      
-      if (!user) {
-        console.error('❌ User not found for Telegram ID:', userId);
-        throw new Error(`User not found for Telegram ID: ${userId}`);
+      // NEW: Try one more check - maybe it's a username?
+      const userByUsername = await User.findOne({ username: userId.toString() });
+      if (userByUsername) {
+        console.log(`✅ Found user by username: ${userId} -> ${userByUsername._id}`);
+        return userByUsername._id;
       }
       
-      console.log(`✅ Resolved Telegram ID ${userId} to MongoDB ID ${user._id}`);
-      return user._id;
-      
-    } catch (error) {
-      console.error('❌ Error resolving user ID:', error);
-      throw error;
+      throw new Error(`User not found for ID: ${userId}`);
     }
+    
+    console.log(`✅ Resolved Telegram ID ${userId} to MongoDB ID ${user._id}`);
+    return user._id;
+    
+  } catch (error) {
+    console.error('❌ Error resolving user ID:', error);
+    throw error;
   }
+}
 
 
  // NEW: Get specific SMS deposit by ID with proper population
@@ -1406,48 +1421,55 @@ static async approveReceivedSMS(smsDepositId, adminUserId) {
     }
   }
 
-  static async addWinning(userId, gameId, amount, description = 'Game winning') {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+static async addWinning(userId, gameId, amount, description = 'Game winning') {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-    try {
-      const mongoUserId = await this.resolveUserId(userId);
-      const wallet = await Wallet.findOne({ userId: mongoUserId }).session(session);
-      
-      if (!wallet) {
-        throw new Error('Wallet not found');
-      }
-
-      const balanceBefore = wallet.balance;
-      wallet.balance += amount;
-      const balanceAfter = wallet.balance;
-
-      const transaction = new Transaction({
-        userId: mongoUserId,
-        type: 'WINNING',
-        amount,
-        balanceBefore,
-        balanceAfter,
-        status: 'COMPLETED',
-        description,
-        gameId
-      });
-
-      await wallet.save({ session });
-      await transaction.save({ session });
-      await session.commitTransaction();
-
-      console.log(`🏆 Winning added for user ${mongoUserId}: $${amount}. New balance: $${balanceAfter}`);
-
-      return { wallet, transaction };
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Error adding winning:', error);
-      throw error;
-    } finally {
-      session.endSession();
+  try {
+    // NEW: Handle both ObjectId and Telegram ID
+    let mongoUserId;
+    if (mongoose.Types.ObjectId.isValid(userId) && new mongoose.Types.ObjectId(userId).toString() === userId) {
+      mongoUserId = userId; // Already ObjectId
+    } else {
+      mongoUserId = await this.resolveUserId(userId); // Need to resolve Telegram ID
     }
+    
+    const wallet = await Wallet.findOne({ userId: mongoUserId }).session(session);
+    
+    if (!wallet) {
+      throw new Error('Wallet not found');
+    }
+
+    const balanceBefore = wallet.balance;
+    wallet.balance += amount;
+    const balanceAfter = wallet.balance;
+
+    const transaction = new Transaction({
+      userId: mongoUserId,
+      type: 'WINNING',
+      amount,
+      balanceBefore,
+      balanceAfter,
+      status: 'COMPLETED',
+      description,
+      gameId
+    });
+
+    await wallet.save({ session });
+    await transaction.save({ session });
+    await session.commitTransaction();
+
+    console.log(`🏆 Winning added for user ${mongoUserId}: $${amount}. New balance: $${balanceAfter}`);
+
+    return { wallet, transaction };
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Error adding winning:', error);
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
 
   static async getTransactionHistory(userId, limit = 10, page = 1) {
     try {
