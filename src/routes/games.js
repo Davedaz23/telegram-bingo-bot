@@ -72,27 +72,77 @@ router.get('/:gameId/taken-cards', async (req, res) => {
 });
 
 // Check and auto-start game if conditions are met
+// routes/gameRoutes.js - ADD THIS NEW ROUTE
 router.post('/:gameId/check-auto-start', async (req, res) => {
   try {
     const { gameId } = req.params;
     
-    console.log(`🔍 Manual auto-start check for game: ${gameId}`);
+    const game = await Game.findById(gameId);
+    if (!game) {
+      return res.status(404).json({ success: false, error: 'Game not found' });
+    }
+
+    if (game.status !== 'WAITING') {
+      return res.json({ 
+        success: true, 
+        gameStarted: false, 
+        reason: 'Game not in waiting state',
+        game: GameService.formatGameForFrontend(game)
+      });
+    }
+
+    // Check if we should auto-start
+    const playersWithCards = await BingoCard.countDocuments({ gameId });
     
-    const started = await GameService.checkAndAutoStartGame(gameId);
-    
-    res.json({
-      success: true,
-      gameStarted: started,
-      message: started ? 'Game auto-started successfully' : 'Not enough players to start'
-    });
+    if (playersWithCards >= GameService.MIN_PLAYERS_TO_START) {
+      console.log(`🎯 Auto-start conditions met: ${playersWithCards} players with cards`);
+      
+      // Check if auto-start timer is already set
+      const now = new Date();
+      let autoStartEndTime = game.autoStartEndTime;
+      
+      if (!autoStartEndTime || autoStartEndTime < now) {
+        // Set new auto-start timer (10 seconds from now)
+        autoStartEndTime = new Date(now.getTime() + 10000);
+        game.autoStartEndTime = autoStartEndTime;
+        await game.save();
+        
+        // Schedule auto-start
+        GameService.scheduleAutoStart(gameId, 10000);
+      }
+      
+      const timeRemaining = autoStartEndTime - now;
+      
+      return res.json({
+        success: true,
+        gameStarted: false,
+        game: GameService.formatGameForFrontend(game),
+        autoStartInfo: {
+          willAutoStart: true,
+          timeRemaining: Math.max(0, timeRemaining),
+          autoStartEndTime: autoStartEndTime,
+          playersWithCards: playersWithCards,
+          minPlayersRequired: GameService.MIN_PLAYERS_TO_START
+        }
+      });
+    } else {
+      return res.json({
+        success: true,
+        gameStarted: false,
+        game: GameService.formatGameForFrontend(game),
+        autoStartInfo: {
+          willAutoStart: false,
+          playersWithCards: playersWithCards,
+          minPlayersRequired: GameService.MIN_PLAYERS_TO_START,
+          playersNeeded: GameService.MIN_PLAYERS_TO_START - playersWithCards
+        }
+      });
+    }
   } catch (error) {
-    console.error('❌ Auto-start check error:', error);
-    res.status(400).json({
-      success: false,
-      error: error.message
-    });
+    console.error('❌ Check auto-start error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
-});
+}); 
 // Select card with card number
 router.post('/:gameId/select-card-with-number', async (req, res) => {
   try {
