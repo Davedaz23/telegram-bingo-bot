@@ -881,69 +881,151 @@ class GameService {
     }
   }
 
-  static formatGameForFrontend(game) {
-    if (!game) return null;
+  // static formatGameForFrontend(game) {
+  //   if (!game) return null;
     
-    const gameObj = game.toObject ? game.toObject() : { ...game };
+  //   const gameObj = game.toObject ? game.toObject() : { ...game };
     
-    if (gameObj.hostId) {
-      delete gameObj.hostId;
-    }
+  //   if (gameObj.hostId) {
+  //     delete gameObj.hostId;
+  //   }
     
-    if (gameObj.winnerId) {
-      gameObj.winner = gameObj.winnerId;
-      delete gameObj.winnerId;
-    }
+  //   if (gameObj.winnerId) {
+  //     gameObj.winner = gameObj.winnerId;
+  //     delete gameObj.winnerId;
+  //   }
 
-    if (gameObj.players) {
-      const activePlayers = gameObj.players.filter(p => p.playerType === 'PLAYER' || !p.playerType);
-      const spectators = gameObj.players.filter(p => p.playerType === 'SPECTATOR');
+  //   if (gameObj.players) {
+  //     const activePlayers = gameObj.players.filter(p => p.playerType === 'PLAYER' || !p.playerType);
+  //     const spectators = gameObj.players.filter(p => p.playerType === 'SPECTATOR');
       
-      gameObj.activePlayers = activePlayers.length;
-      gameObj.spectators = spectators.length;
-      gameObj.totalParticipants = gameObj.players.length;
+  //     gameObj.activePlayers = activePlayers.length;
+  //     gameObj.spectators = spectators.length;
+  //     gameObj.totalParticipants = gameObj.players.length;
       
-      gameObj.minPlayersRequired = this.MIN_PLAYERS_TO_START;
+  //     gameObj.minPlayersRequired = this.MIN_PLAYERS_TO_START;
       
-      const playersWithCards = gameObj.players.filter(player => {
-        return true;
-      }).length;
+  //     const playersWithCards = gameObj.players.filter(player => {
+  //       return true;
+  //     }).length;
       
-      gameObj.playersWithCards = playersWithCards;
-      gameObj.canStart = gameObj.status === 'WAITING' && 
-                        gameObj.activePlayers >= this.MIN_PLAYERS_TO_START && 
-                        playersWithCards >= this.MIN_PLAYERS_TO_START;
-      gameObj.playersNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - gameObj.activePlayers);
-      gameObj.cardsNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - playersWithCards);
+  //     gameObj.playersWithCards = playersWithCards;
+  //     gameObj.canStart = gameObj.status === 'WAITING' && 
+  //                       gameObj.activePlayers >= this.MIN_PLAYERS_TO_START && 
+  //                       playersWithCards >= this.MIN_PLAYERS_TO_START;
+  //     gameObj.playersNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - gameObj.activePlayers);
+  //     gameObj.cardsNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - playersWithCards);
       
-      gameObj.acceptsLateJoiners = gameObj.status === 'ACTIVE' && gameObj.currentPlayers < gameObj.maxPlayers;
-      gameObj.numbersCalledCount = gameObj.numbersCalled?.length || 0;
-    }
+  //     gameObj.acceptsLateJoiners = gameObj.status === 'ACTIVE' && gameObj.currentPlayers < gameObj.maxPlayers;
+  //     gameObj.numbersCalledCount = gameObj.numbersCalled?.length || 0;
+  //   }
 
-    if (gameObj.status === 'WAITING') {
-      const now = new Date();
-      const playersWithCards = gameObj.players?.filter(p => p.hasCard)?.length || 0;
+  //   if (gameObj.status === 'WAITING') {
+  //     const now = new Date();
+  //     const playersWithCards = gameObj.players?.filter(p => p.hasCard)?.length || 0;
       
-      if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
-        if (!gameObj.autoStartEndTime) {
-          const autoStartEndTime = new Date(now.getTime() + 10000);
-          gameObj.autoStartEndTime = autoStartEndTime;
-          gameObj.autoStartTimeRemaining = 10000;
-          gameObj.hasAutoStartTimer = true;
+  //     if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
+  //       if (!gameObj.autoStartEndTime) {
+  //         const autoStartEndTime = new Date(now.getTime() + 10000);
+  //         gameObj.autoStartEndTime = autoStartEndTime;
+  //         gameObj.autoStartTimeRemaining = 10000;
+  //         gameObj.hasAutoStartTimer = true;
           
-          this.scheduleAutoStart(gameId, 10000);
-        } else {
-          gameObj.autoStartTimeRemaining = gameObj.autoStartEndTime - now;
-          gameObj.hasAutoStartTimer = true;
-        }
-      } else {
-        gameObj.autoStartTimeRemaining = 0;
-        gameObj.hasAutoStartTimer = false;
+  //         this.scheduleAutoStart(gameId, 10000);
+  //       } else {
+  //         gameObj.autoStartTimeRemaining = gameObj.autoStartEndTime - now;
+  //         gameObj.hasAutoStartTimer = true;
+  //       }
+  //     } else {
+  //       gameObj.autoStartTimeRemaining = 0;
+  //       gameObj.hasAutoStartTimer = false;
+  //     }
+  //   }
+
+  //   return gameObj;
+  // }
+
+
+  static async formatGameForFrontend(game) {
+  if (!game) return null;
+  
+  const gameObj = game.toObject ? game.toObject() : { ...game };
+  
+  // Remove unnecessary fields
+  if (gameObj.hostId) {
+    delete gameObj.hostId;
+  }
+  
+  // Handle winner field
+  if (gameObj.winnerId) {
+    gameObj.winner = gameObj.winnerId;
+    delete gameObj.winnerId;
+  }
+
+  if (gameObj.players) {
+    const activePlayers = gameObj.players.filter(p => p.playerType === 'PLAYER' || !p.playerType);
+    const spectators = gameObj.players.filter(p => p.playerType === 'SPECTATOR');
+    
+    gameObj.activePlayers = activePlayers.length;
+    gameObj.spectators = spectators.length;
+    gameObj.totalParticipants = gameObj.players.length;
+    
+    gameObj.minPlayersRequired = this.MIN_PLAYERS_TO_START;
+    
+    // FIX: Count players with cards from BingoCard collection
+    let playersWithCards = 0;
+    if (gameObj._id && gameObj.players.length > 0) {
+      try {
+        // Count BingoCards for this game
+        playersWithCards = await BingoCard.countDocuments({ 
+          gameId: gameObj._id 
+        });
+      } catch (error) {
+        console.error('❌ Error counting bingo cards:', error);
+        playersWithCards = 0;
       }
     }
-
-    return gameObj;
+    
+    gameObj.playersWithCards = playersWithCards;
+    gameObj.canStart = gameObj.status === 'WAITING' && 
+                      playersWithCards >= this.MIN_PLAYERS_TO_START;
+    gameObj.playersNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - gameObj.activePlayers);
+    gameObj.cardsNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - playersWithCards);
+    
+    gameObj.acceptsLateJoiners = gameObj.status === 'ACTIVE' && gameObj.currentPlayers < gameObj.maxPlayers;
+    gameObj.numbersCalledCount = gameObj.numbersCalled?.length || 0;
   }
+
+  // AUTO-START LOGIC - FIXED
+  if (gameObj.status === 'WAITING') {
+    const now = new Date();
+    
+    // Check if we have enough players with cards
+    if (gameObj.playersWithCards >= this.MIN_PLAYERS_TO_START) {
+      if (!gameObj.autoStartEndTime) {
+        const autoStartEndTime = new Date(now.getTime() + 10000);
+        gameObj.autoStartEndTime = autoStartEndTime;
+        gameObj.autoStartTimeRemaining = 10000;
+        gameObj.hasAutoStartTimer = true;
+        
+        // Schedule auto-start immediately
+        this.scheduleAutoStart(gameObj._id, 10000);
+      } else if (gameObj.autoStartEndTime <= now) {
+        // Auto-start time has passed - START THE GAME IMMEDIATELY
+        console.log(`🚀 AUTO-START TIME PASSED - Starting game ${gameObj.code} immediately`);
+        this.autoStartGame(gameObj._id);
+      } else {
+        gameObj.autoStartTimeRemaining = gameObj.autoStartEndTime - now;
+        gameObj.hasAutoStartTimer = true;
+      }
+    } else {
+      gameObj.autoStartTimeRemaining = 0;
+      gameObj.hasAutoStartTimer = false;
+    }
+  }
+
+  return gameObj;
+}
 
   static scheduleAutoStart(gameId, delay = 10000) {
     this.clearAutoStartTimer(gameId);
