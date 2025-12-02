@@ -142,7 +142,7 @@ router.post('/:gameId/check-auto-start', async (req, res) => {
     console.error('❌ Check auto-start error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
-}); 
+});
 // Select card with card number
 router.post('/:gameId/select-card-with-number', async (req, res) => {
   try {
@@ -814,6 +814,69 @@ router.get('/:id/stats', async (req, res) => {
     });
   }
 });
+
+//claim card
+// Claim Bingo (manual win declaration)
+router.post('/:id/claim-bingo', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId, patternType = 'BINGO' } = req.body;
+    
+    console.log(`🏆 Bingo claim request: gameId=${id}, userId=${userId}, pattern=${patternType}`);
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId is required',
+      });
+    }
+
+    const result = await GameService.claimBingo(id, userId, patternType);
+    
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error('❌ Claim bingo error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// Also update the mark-number route to remove auto-win checking
+router.post('/:id/mark-number', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId, number } = req.body;
+    
+    console.log(`🎯 Mark number request: gameId=${id}, userId=${userId}, number=${number}`);
+    
+    if (!userId || !number) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId and number are required',
+      });
+    }
+
+    const result = await GameService.markNumber(id, userId, number);
+    
+    res.json({
+      success: true,
+      ...result,
+      message: 'Number marked successfully'
+    });
+  } catch (error) {
+    console.error('❌ Mark number error:', error);
+    res.status(400).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+//claim
 
 // ==================== DEPRECATED ROUTES (for backward compatibility) ====================
 
