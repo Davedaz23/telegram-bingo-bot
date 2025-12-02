@@ -1,52 +1,107 @@
-// models/BingoCard.js - UPDATED with late joiner support
+// models/Game.js - UPDATED WITH PROPER TIMING FIELDS
 const mongoose = require('mongoose');
 
-const bingoCardSchema = new mongoose.Schema({
-  userId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
+const gameSchema = new mongoose.Schema({
+  code: {
+    type: String,
+    required: true,
+    unique: true
   },
-  gameId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Game',
-    required: true
+  status: {
+    type: String,
+    enum: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE', 'FINISHED', 'COOLDOWN'],
+    default: 'WAITING_FOR_PLAYERS'
   },
-  numbers: {
-    type: [[mongoose.Schema.Types.Mixed]],
-    required: true
+  maxPlayers: {
+    type: Number,
+    default: 10
   },
-  markedPositions: {
-    type: [Number],
-    default: [12] // FREE space
+  currentPlayers: {
+    type: Number,
+    default: 0
   },
-  isWinner: {
-    type: Boolean,
-    default: false
-  },
-  isSpectator: {
-    type: Boolean,
-    default: false
-  },
-  // ✅ NEW: Track late joiners
-  isLateJoiner: {
-    type: Boolean,
-    default: false
-  },
-  joinedAt: {
-    type: Date,
-    default: Date.now
-  },
-  // Track which numbers were already called when they joined
-  numbersCalledAtJoin: {
+  numbersCalled: {
     type: [Number],
     default: []
+  },
+  winnerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  isPrivate: {
+    type: Boolean,
+    default: false
+  },
+  isAutoCreated: {
+    type: Boolean,
+    default: false
+  },
+  startedAt: {
+    type: Date
+  },
+  endedAt: {
+    type: Date
+  },
+  
+  // Game Lifecycle Timers
+  cardSelectionStartTime: {
+    type: Date
+  },
+  cardSelectionEndTime: {
+    type: Date
+  },
+  gameStartTime: {
+    type: Date
+  },
+  cooldownEndTime: {
+    type: Date
+  },
+  
+  // Auto-start timing
+  autoStartEndTime: {
+    type: Date
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  toJSON: { 
+    virtuals: true,
+    transform: function(doc, ret) {
+      // Add timing-related virtuals
+      const now = new Date();
+      
+      if (ret.status === 'CARD_SELECTION' && ret.cardSelectionEndTime) {
+        ret.cardSelectionTimeRemaining = Math.max(0, ret.cardSelectionEndTime - now);
+      }
+      
+      if (ret.status === 'COOLDOWN' && ret.cooldownEndTime) {
+        ret.cooldownTimeRemaining = Math.max(0, ret.cooldownEndTime - now);
+      }
+      
+      if (ret.status === 'WAITING_FOR_PLAYERS' && ret.autoStartEndTime) {
+        ret.autoStartTimeRemaining = Math.max(0, ret.autoStartEndTime - now);
+      }
+      
+      return ret;
+    }
+  },
+  toObject: { virtuals: true }
 });
 
-// Index for faster queries
-bingoCardSchema.index({ userId: 1, gameId: 1 }, { unique: true });
+// Virtuals for status checks
+gameSchema.virtual('canJoin').get(function() {
+  return this.status === 'WAITING_FOR_PLAYERS' || this.status === 'CARD_SELECTION';
+});
 
-module.exports = mongoose.model('BingoCard', bingoCardSchema);
+gameSchema.virtual('canSelectCard').get(function() {
+  return this.status === 'CARD_SELECTION';
+});
+
+gameSchema.virtual('isGameActive').get(function() {
+  return this.status === 'ACTIVE';
+});
+
+gameSchema.virtual('isGameFinished').get(function() {
+  return this.status === 'FINISHED' || this.status === 'COOLDOWN';
+});
+
+module.exports = mongoose.model('Game', gameSchema);

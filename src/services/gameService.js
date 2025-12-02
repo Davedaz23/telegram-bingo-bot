@@ -17,17 +17,20 @@ class GameService {
   static CARD_SELECTION_DURATION = 30000;
 static alreadyScheduledForAutoStart = new Map();
 
-  // SINGLE GAME MANAGEMENT SYSTEM
-  static async getMainGame() {
-    try {
-      if (!this.activeIntervals) {
-        this.activeIntervals = new Map();
-      }
 
-      await this.autoRestartFinishedGames();
+  
+  // Constants for timing (all in milliseconds)
+  static AUTO_START_DELAY = 30000; // 30 seconds for auto-start after conditions met
+  static GAME_RESTART_COOLDOWN = 60000; // 60 seconds between games
+  static NUMBER_CALL_INTERVAL = 5000 + Math.random() * 3000; // 5-8 seconds between calls
+
+  // SINGLE GAME MANAGEMENT SYSTEM
+static async getMainGame() {
+    try {
+      await this.manageGameLifecycle();
       
       let game = await Game.findOne({ 
-        status: { $in: ['WAITING', 'ACTIVE'] } 
+        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] } 
       })
       .populate('winnerId', 'username firstName')
       .populate({
@@ -39,9 +42,9 @@ static alreadyScheduledForAutoStart = new Map();
       });
 
       if (!game) {
-        console.log('🎮 No active games found. Creating automatic game...');
-        game = await this.createAutoGame();
-      } else if (game.status === 'ACTIVE' && this.activeIntervals && !this.activeIntervals.has(game._id.toString())) {
+        console.log('🎮 No active games found. Creating new game...');
+        game = await this.createNewGame();
+      } else if (game.status === 'ACTIVE' && !this.activeIntervals.has(game._id.toString())) {
         console.log(`🔄 Restarting auto-calling for active game ${game.code}`);
         this.startAutoNumberCalling(game._id);
       }
@@ -52,6 +55,102 @@ static alreadyScheduledForAutoStart = new Map();
       throw error;
     }
   }
+   static async manageGameLifecycle() {
+    try {
+      // Check for games that need state transitions
+      const now = new Date();
+      
+      // 1. Check CARD_SELECTION → ACTIVE transition
+      const cardSelectionGames = await Game.find({
+        status: 'CARD_SELECTION',
+        cardSelectionEndTime: { $lte: now }
+      });
+      
+      for (const game of cardSelectionGames) {
+        console.log(`⏰ Card selection period ended for game ${game.code}, starting game...`);
+        await this.startGame(game._id);
+      }
+      
+      // 2. Check COOLDOWN → WAITING_FOR_PLAYERS transition
+      const cooldownGames = await Game.find({
+        status: 'COOLDOWN',
+        cooldownEndTime: { $lte: now }
+      });
+      
+      for (const game of cooldownGames) {
+        console.log(`🔄 Cooldown ended for game ${game.code}, resetting to waiting...`);
+        await this.resetGameForNewSession(game._id);
+      }
+      
+      // 3. Check WAITING_FOR_PLAYERS → CARD_SELECTION transition (when enough players)
+      const waitingGames = await Game.find({
+        status: 'WAITING_FOR_PLAYERS',
+        autoStartEndTime: { $lte: now }
+      });
+      
+      for (const game of waitingGames) {
+        const playersWithCards = await BingoCard.countDocuments({ gameId: game._id });
+        if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
+          console.log(`🎯 Enough players with cards for game ${game.code}, starting card selection...`);
+          await this.beginCardSelection(game._id);
+        }
+      }
+      
+    } catch (error) {
+      console.error('❌ Error managing game lifecycle:', error);
+    }
+  }
+    static async beginCardSelection(gameId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      const game = await Game.findById(gameId).session(session);
+      
+      if (!game || game.status !== 'WAITING_FOR_PLAYERS') {
+        throw new Error('Game not in waiting state');
+      }
+
+      const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
+      
+      if (playersWithCards < this.MIN_PLAYERS_TO_START) {
+        throw new Error(`Not enough players with cards. Need ${this.MIN_PLAYERS_TO_START}, have ${playersWithCards}`);
+      }
+
+      const now = new Date();
+      const cardSelectionEndTime = new Date(now.getTime() + this.CARD_SELECTION_DURATION);
+      
+      game.status = 'CARD_SELECTION';
+      game.cardSelectionStartTime = now;
+      game.cardSelectionEndTime = cardSelectionEndTime;
+      game.autoStartEndTime = null;
+      
+      await game.save({ session });
+      await session.commitTransaction();
+      
+      console.log(`🎲 Card selection started for game ${game.code}. Ends at: ${cardSelectionEndTime}`);
+      
+      // Schedule game start after card selection period
+      setTimeout(async () => {
+        try {
+          await this.startGame(gameId);
+        } catch (error) {
+          console.error('❌ Failed to start game after card selection:', error);
+        }
+      }, this.CARD_SELECTION_DURATION);
+      
+      return game;
+      
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Error beginning card selection:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
+
 
   static async autoRestartFinishedGames() {
   try {
@@ -437,92 +536,99 @@ static checkEnhancedWinCondition(cardNumbers, markedPositions) {
   }
 
   // FIXED JOIN GAME METHOD (REMOVED DUPLICATE)
-  static async joinGame(gameCode, userId) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+static async joinGame(gameCode, userId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-    try {
-      const mainGame = await this.getMainGame();
-      
-      if (!mainGame) {
-        throw new Error('No game available');
-      }
-
-      const game = await Game.findById(mainGame._id).session(session);
-
-      // Find user by Telegram ID first, then use MongoDB _id
-      let user;
-      if (mongoose.Types.ObjectId.isValid(userId)) {
-        user = await User.findById(userId).session(session);
-      } else {
-        user = await User.findOne({ telegramId: userId }).session(session);
-      }
-
-      if (!user) {
-        throw new Error('User not found');
-      }
-
-      // Use the MongoDB _id for GamePlayer
-      const mongoUserId = user._id;
-
-      const existingPlayer = await GamePlayer.findOne({ 
-        userId: mongoUserId, 
-        gameId: game._id 
-      }).session(session);
-      
-      if (existingPlayer) {
-        await session.commitTransaction();
-        return this.getGameWithDetails(game._id);
-      }
-
-      if (game.status === 'WAITING' || game.status === 'ACTIVE') {
-        if (game.currentPlayers >= game.maxPlayers) {
-          await session.abortTransaction();
-          throw new Error('Game is full');
-        }
-
-        const isLateJoiner = game.status === 'ACTIVE';
-
-        await GamePlayer.create([{
-          userId: mongoUserId,
-          gameId: game._id,
-          isReady: true,
-          playerType: 'PLAYER',
-          joinedAt: new Date()
-        }], { session });
-
-        game.currentPlayers += 1;
-        game.updatedAt = new Date();
-        await game.save();
-
-        await session.commitTransaction();
-
-        console.log(`✅ User ${userId} (Telegram) joined as ${isLateJoiner ? 'LATE PLAYER' : 'PLAYER'}. Total players: ${game.currentPlayers}`);
-
-        if (game.status === 'WAITING') {
-          console.log(`⏳ Player joined. Game ${game.code} waiting for manual start. Current: ${game.currentPlayers}/${game.maxPlayers} players`);
-        }
-
-        return this.getGameWithDetails(game._id);
-      } 
-      else if (game.status === 'FINISHED') {
-        await session.abortTransaction();
-        throw new Error('Game has already finished. A new game will start soon.');
-      }
-
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Join game error:', error);
-      
-      if (error.code === 11000) {
-        throw new Error('You have already joined this game');
-      }
-      
-      throw error;
-    } finally {
-      session.endSession();
+  try {
+    const mainGame = await this.getMainGame();
+    
+    if (!mainGame) {
+      throw new Error('No game available');
     }
+
+    const game = await Game.findById(mainGame._id).session(session);
+
+    // Check if game allows joining
+    if (!game.canJoin || game.status === 'CARD_SELECTION') {
+      throw new Error('Game is not accepting new players at this time. Please select a card to join.');
+    }
+
+    // Find user
+    let user;
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId).session(session);
+    } else {
+      user = await User.findOne({ telegramId: userId }).session(session);
+    }
+
+    if (!user) {
+      // Create user if doesn't exist
+      user = await User.create([{
+        telegramId: userId,
+        firstName: `Player_${userId.slice(0, 8)}`,
+        username: `player_${userId}`,
+        role: 'user'
+      }], { session });
+      user = user[0];
+    }
+
+    const mongoUserId = user._id;
+
+    // Check if already joined
+    const existingPlayer = await GamePlayer.findOne({ 
+      userId: mongoUserId, 
+      gameId: game._id 
+    }).session(session);
+    
+    if (existingPlayer) {
+      await session.commitTransaction();
+      return this.getGameWithDetails(game._id);
+    }
+
+    if (game.currentPlayers >= game.maxPlayers) {
+      await session.abortTransaction();
+      throw new Error('Game is full');
+    }
+
+    // Add player
+    await GamePlayer.create([{
+      userId: mongoUserId,
+      gameId: game._id,
+      isReady: true,
+      playerType: 'PLAYER',
+      joinedAt: new Date()
+    }], { session });
+
+    game.currentPlayers += 1;
+    game.updatedAt = new Date();
+    
+    // If this is the first player or we reach minimum players, schedule auto-start
+    if (game.currentPlayers >= this.MIN_PLAYERS_TO_START && game.status === 'WAITING_FOR_PLAYERS') {
+      const autoStartTime = new Date(Date.now() + this.AUTO_START_DELAY);
+      game.autoStartEndTime = autoStartTime;
+      
+      console.log(`⏰ Minimum players reached for game ${game.code}. Auto-start scheduled in ${this.AUTO_START_DELAY}ms`);
+      
+      // Schedule auto-start check
+      this.scheduleAutoStartCheck(game._id);
+    }
+    
+    await game.save({ session });
+    await session.commitTransaction();
+
+    console.log(`✅ User ${userId} joined game ${game.code}. Total players: ${game.currentPlayers}`);
+
+    return this.getGameWithDetails(game._id);
+    
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Join game error:', error);
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
 
  static async joinGameWithWallet(gameCode, userId, entryFee = 10) {
   const session = await mongoose.startSession();
@@ -554,141 +660,173 @@ static checkEnhancedWinCondition(cardNumbers, markedPositions) {
 }
 
   // CARD SELECTION METHODS
-  static async selectCard(gameId, userId, cardNumbers, cardNumber) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+ // CARD SELECTION METHODS - UPDATED VERSION
+static async selectCard(gameId, userId, cardNumbers, cardNumber) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-    try {
-      const game = await Game.findById(gameId).session(session);
-      
-      if (!game) {
-        throw new Error('Game not found');
-      }
+  try {
+    const game = await Game.findById(gameId).session(session);
+    
+    if (!game) {
+      throw new Error('Game not found');
+    }
 
-      if (game.status !== 'WAITING' && game.status !== 'ACTIVE') {
-        throw new Error('Cannot select card - game is not active');
-      }
+    // Only allow card selection in waiting or card selection phase
+    if (game.status !== 'WAITING_FOR_PLAYERS' && game.status !== 'CARD_SELECTION') {
+      throw new Error('Cannot select card - game is not accepting players');
+    }
 
-      const existingCardWithNumber = await BingoCard.findOne({ 
-        gameId, 
-        cardNumber 
-      }).session(session);
-      
-      if (existingCardWithNumber && existingCardWithNumber.userId.toString() !== userId.toString()) {
-        throw new Error(`Card #${cardNumber} is already taken by another player`);
-      }
+    const existingCardWithNumber = await BingoCard.findOne({ 
+      gameId, 
+      cardNumber 
+    }).session(session);
+    
+    if (existingCardWithNumber && existingCardWithNumber.userId.toString() !== userId.toString()) {
+      throw new Error(`Card #${cardNumber} is already taken by another player`);
+    }
 
-      let user;
-      if (mongoose.Types.ObjectId.isValid(userId)) {
-        user = await User.findById(userId).session(session);
-      } else {
-        user = await User.findOne({ telegramId: userId }).session(session);
-      }
+    // Find or create user
+    let user;
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId).session(session);
+    } else {
+      user = await User.findOne({ telegramId: userId }).session(session);
+    }
 
-      if (!user) {
-        throw new Error('User not found');
-      }
-
-      const mongoUserId = user._id;
-
-      const existingCard = await BingoCard.findOne({ gameId, userId: mongoUserId }).session(session);
-      
-      if (existingCard) {
-        console.log(`🔄 User ${userId} already has a card. Updating card instead of creating new one.`);
-        
-        const previousCardNumber = existingCard.cardNumber;
-        
-        existingCard.numbers = cardNumbers;
-        existingCard.cardNumber = cardNumber;
-        existingCard.markedPositions = [12];
-        existingCard.isWinner = false;
-        existingCard.updatedAt = new Date();
-        
-        await existingCard.save({ session });
-        
-        if (previousCardNumber && previousCardNumber !== cardNumber) {
-          console.log(`🔄 Releasing previous card #${previousCardNumber} for user ${userId}`);
-          this.updateCardSelection(gameId, previousCardNumber, mongoUserId, 'RELEASED');
-        }
-        
-        await session.commitTransaction();
-        
-        console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) UPDATED card #${cardNumber} for game ${game.code}`);
-        
-        this.updateCardSelection(gameId, cardNumber, mongoUserId, 'UPDATED');
-        
-        if (game.status === 'WAITING') {
-          setTimeout(async () => {
-            try {
-              await this.scheduleAutoStartCheck(gameId);
-            } catch (error) {
-              console.error('❌ Auto-start check failed:', error);
-            }
-          }, 1000);
-        }
-
-        return { 
-          success: true, 
-          message: 'Card updated successfully',
-          action: 'UPDATED',
-          cardId: existingCard._id,
-          cardNumber: cardNumber,
-          previousCardNumber: previousCardNumber
-        };
-      }
-
-      if (!cardNumbers || !Array.isArray(cardNumbers) || cardNumbers.length !== 5) {
-        throw new Error('Invalid card format');
-      }
-
-      for (let i = 0; i < 5; i++) {
-        if (!Array.isArray(cardNumbers[i]) || cardNumbers[i].length !== 5) {
-          throw new Error('Invalid card format');
-        }
-      }
-
-      const newCard = await BingoCard.create([{
-        userId: mongoUserId,
-        gameId,
-        cardNumber: cardNumber,
-        numbers: cardNumbers,
-        markedPositions: [12],
-        isLateJoiner: game.status === 'ACTIVE',
-        joinedAt: new Date(),
-        numbersCalledAtJoin: game.status === 'ACTIVE' ? (game.numbersCalled || []) : []
+    if (!user) {
+      // Create user if doesn't exist
+      user = await User.create([{
+        telegramId: userId,
+        firstName: `Player_${userId.slice(0, 8)}`,
+        username: `player_${userId}`,
+        role: 'user'
       }], { session });
+      user = user[0];
+    }
 
+    const mongoUserId = user._id;
+
+    // AUTO-JOIN: First, ensure user is added as a game player
+    const existingPlayer = await GamePlayer.findOne({ 
+      gameId, 
+      userId: mongoUserId 
+    }).session(session);
+    
+    if (!existingPlayer) {
+      // Add user as player
+      await GamePlayer.create([{
+        userId: mongoUserId,
+        gameId: gameId,
+        isReady: true,
+        playerType: 'PLAYER',
+        joinedAt: new Date()
+      }], { session });
+      
+      // Update player count
+      game.currentPlayers += 1;
+      await game.save({ session });
+      
+      console.log(`✅ User ${userId} auto-joined game ${game.code} via card selection. Total players: ${game.currentPlayers}`);
+    }
+
+    // Check if user already has a card
+    const existingCard = await BingoCard.findOne({ 
+      gameId, 
+      userId: mongoUserId 
+    }).session(session);
+    
+    if (existingCard) {
+      console.log(`🔄 User ${userId} already has a card. Updating card instead of creating new one.`);
+      
+      const previousCardNumber = existingCard.cardNumber;
+      
+      existingCard.numbers = cardNumbers;
+      existingCard.cardNumber = cardNumber;
+      existingCard.markedPositions = [12];
+      existingCard.isWinner = false;
+      existingCard.updatedAt = new Date();
+      
+      await existingCard.save({ session });
+      
+      if (previousCardNumber && previousCardNumber !== cardNumber) {
+        console.log(`🔄 Releasing previous card #${previousCardNumber} for user ${userId}`);
+        this.updateCardSelection(gameId, previousCardNumber, mongoUserId, 'RELEASED');
+      }
+      
       await session.commitTransaction();
       
-      console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) CREATED new card #${cardNumber} for game ${game.code}`);
+      console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) UPDATED card #${cardNumber} for game ${game.code}`);
       
-      this.updateCardSelection(gameId, cardNumber, mongoUserId, 'CREATED');
+      this.updateCardSelection(gameId, cardNumber, mongoUserId, 'UPDATED');
       
-      if (game.status === 'WAITING') {
-        setTimeout(async () => {
-          try {
-            await this.checkAndAutoStartGame(gameId);
-          } catch (error) {
-            console.error('❌ Auto-start after card selection failed:', error);
-          }
-        }, 1500);
-      }
-
       return { 
         success: true, 
-        message: 'Card selected successfully',
-        action: 'CREATED',
-        cardId: newCard[0]._id,
-        cardNumber: cardNumber
+        message: 'Card updated successfully',
+        action: 'UPDATED',
+        cardId: existingCard._id,
+        cardNumber: cardNumber,
+        previousCardNumber: previousCardNumber,
+        gameJoined: true
       };
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Select card error:', error);
-      throw error;
-    } finally {
-      session.endSession();
     }
+
+    // Validate card format
+    if (!cardNumbers || !Array.isArray(cardNumbers) || cardNumbers.length !== 5) {
+      throw new Error('Invalid card format');
+    }
+
+    for (let i = 0; i < 5; i++) {
+      if (!Array.isArray(cardNumbers[i]) || cardNumbers[i].length !== 5) {
+        throw new Error('Invalid card format');
+      }
+    }
+
+    // Create new card
+    const newCard = await BingoCard.create([{
+      userId: mongoUserId,
+      gameId,
+      cardNumber: cardNumber,
+      numbers: cardNumbers,
+      markedPositions: [12],
+      isLateJoiner: game.status === 'CARD_SELECTION' || game.status === 'ACTIVE',
+      joinedAt: new Date(),
+      numbersCalledAtJoin: game.status === 'CARD_SELECTION' || game.status === 'ACTIVE' ? (game.numbersCalled || []) : []
+    }], { session });
+
+    await session.commitTransaction();
+    
+    console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) CREATED new card #${cardNumber} for game ${game.code}`);
+    
+    this.updateCardSelection(gameId, cardNumber, mongoUserId, 'CREATED');
+    
+    // Check if we should schedule auto-start
+    if (game.status === 'WAITING_FOR_PLAYERS' || game.status === 'CARD_SELECTION') {
+      setTimeout(async () => {
+        try {
+          await this.scheduleAutoStartCheck(gameId);
+        } catch (error) {
+          console.error('❌ Auto-start check failed:', error);
+        }
+      }, 1000);
+    }
+
+    return { 
+      success: true, 
+      message: 'Card selected successfully',
+      action: 'CREATED',
+      cardId: newCard[0]._id,
+      cardNumber: cardNumber,
+      gameJoined: true
+    };
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Select card error:', error);
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
 
   static updateCardSelection(gameId, cardNumber, userId, action) {
     const gameIdStr = gameId.toString();
@@ -768,25 +906,67 @@ static async startGame(gameId) {
 
   try {
     const game = await Game.findById(gameId).session(session);
-
-    if (!game) {
-      throw new Error('Game not found');
-    }
-
-    if (game.status !== 'WAITING') {
-      throw new Error('Game already started');
+    
+    if (!game || (game.status !== 'CARD_SELECTION' && game.status !== 'WAITING_FOR_PLAYERS')) {
+      console.log(`⚠️ Game ${gameId} not in correct state to start: ${game?.status}`);
+      await session.abortTransaction();
+      return;
     }
 
     const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
     
     if (playersWithCards < this.MIN_PLAYERS_TO_START) {
-      throw new Error(`Need at least ${this.MIN_PLAYERS_TO_START} players with selected cards to start the game. Current: ${playersWithCards}`);
+      console.log(`❌ Not enough players to start game ${game.code}: ${playersWithCards}/${this.MIN_PLAYERS_TO_START}`);
+      
+      // Reset to waiting and schedule auto-start check
+      game.status = 'WAITING_FOR_PLAYERS';
+      game.cardSelectionStartTime = null;
+      game.cardSelectionEndTime = null;
+      const autoStartTime = new Date(Date.now() + this.AUTO_START_DELAY);
+      game.autoStartEndTime = autoStartTime;
+      await game.save({ session });
+      
+      await session.commitTransaction();
+      
+      console.log(`⏳ Rescheduling auto-start for game ${game.code} in ${this.AUTO_START_DELAY}ms`);
+      
+      // Schedule check again
+      setTimeout(() => {
+        this.scheduleAutoStartCheck(gameId);
+      }, this.AUTO_START_DELAY);
+      
+      return;
     }
 
     // Get all players with cards
     const playerCards = await BingoCard.find({ gameId }).session(session);
     
-    // Deduct entry fee from all players
+    // Ensure all card owners are registered as players
+    const playerUserIds = new Set();
+    for (const card of playerCards) {
+      playerUserIds.add(card.userId.toString());
+    }
+    
+    // Add any missing players
+    for (const userId of playerUserIds) {
+      const existingPlayer = await GamePlayer.findOne({ 
+        gameId, 
+        userId 
+      }).session(session);
+      
+      if (!existingPlayer) {
+        await GamePlayer.create([{
+          userId: userId,
+          gameId: gameId,
+          isReady: true,
+          playerType: 'PLAYER',
+          joinedAt: new Date()
+        }], { session });
+        console.log(`➕ Added missing player ${userId} to game`);
+      }
+    }
+
+    // Deduct entry fees from all players
     const WalletService = require('./walletService');
     const entryFee = 10;
     
@@ -794,7 +974,6 @@ static async startGame(gameId) {
     
     for (const card of playerCards) {
       try {
-        const User = require('../models/User');
         const user = await User.findById(card.userId).session(session);
         
         if (user && user.telegramId) {
@@ -805,31 +984,36 @@ static async startGame(gameId) {
             `Entry fee for game ${game.code}`
           );
           console.log(`✅ Deducted $${entryFee} from ${user.telegramId}`);
-        } else {
-          console.warn(`⚠️ Could not deduct from user ${card.userId} - user not found`);
         }
       } catch (error) {
-        console.error(`❌ Failed to deduct from user ${card.userId}:`, error.message);
+        console.error(`❌ Failed to deduct from user:`, error.message);
       }
     }
 
+    const now = new Date();
     game.status = 'ACTIVE';
-    game.startedAt = new Date();
+    game.startedAt = now;
+    game.cardSelectionStartTime = null;
+    game.cardSelectionEndTime = null;
     game.autoStartEndTime = null;
-    await game.save();
+    
+    // Update player count to match actual card holders
+    game.currentPlayers = playerUserIds.size;
+    
+    await game.save({ session });
 
     await session.commitTransaction();
 
-    console.log(`🚀 Game ${game.code} started with ${playersWithCards} player(s). Entry fees deducted.`);
+    console.log(`🚀 Game ${game.code} started with ${game.currentPlayers} player(s). No new players can join.`);
 
-    // Clear auto-start timer and flag
+    // Clear auto-start timer
     this.clearAutoStartTimer(gameId);
-    const gameIdStr = gameId.toString();
-    this.alreadyScheduledForAutoStart.delete(gameIdStr);
     
+    // Start number calling
     this.startAutoNumberCalling(gameId);
 
     return this.getGameWithDetails(game._id);
+    
   } catch (error) {
     await session.abortTransaction();
     console.error('❌ Start game error:', error);
@@ -840,139 +1024,147 @@ static async startGame(gameId) {
 }
 
 
+static async getGameParticipants(gameId) {
+  try {
+    // Get all players registered in the game
+    const gamePlayers = await GamePlayer.find({ gameId })
+      .populate('userId', 'username firstName telegramId');
+    
+    // Get all card holders (even if they're not in GamePlayer yet)
+    const bingoCards = await BingoCard.find({ gameId })
+      .populate('userId', 'username firstName telegramId');
+    
+    const participants = new Map();
+    
+    // Add registered players
+    for (const player of gamePlayers) {
+      if (player.userId) {
+        participants.set(player.userId._id.toString(), {
+          userId: player.userId._id,
+          telegramId: player.userId.telegramId,
+          username: player.userId.username,
+          firstName: player.userId.firstName,
+          hasCard: false,
+          isRegisteredPlayer: true,
+          joinedAt: player.joinedAt
+        });
+      }
+    }
+    
+    // Add card holders (may not be registered players yet)
+    for (const card of bingoCards) {
+      if (card.userId) {
+        const userIdStr = card.userId._id.toString();
+        if (participants.has(userIdStr)) {
+          // Update existing participant
+          const participant = participants.get(userIdStr);
+          participant.hasCard = true;
+          participant.cardNumber = card.cardNumber;
+        } else {
+          // Add new participant with card
+          participants.set(userIdStr, {
+            userId: card.userId._id,
+            telegramId: card.userId.telegramId,
+            username: card.userId.username,
+            firstName: card.userId.firstName,
+            hasCard: true,
+            cardNumber: card.cardNumber,
+            isRegisteredPlayer: false,
+            joinedAt: card.joinedAt
+          });
+        }
+      }
+    }
+    
+    return Array.from(participants.values());
+  } catch (error) {
+    console.error('❌ Error getting game participants:', error);
+    return [];
+  }
+}
 
-
-static async formatGameForFrontend(game) {
+  static async formatGameForFrontend(game) {
   if (!game) return null;
   
   const gameObj = game.toObject ? game.toObject() : { ...game };
+  const now = new Date();
   
-  // Remove unnecessary fields
-  if (gameObj.hostId) {
-    delete gameObj.hostId;
+  // Add status-specific information
+  switch (gameObj.status) {
+    case 'WAITING_FOR_PLAYERS':
+      gameObj.message = 'Waiting for players to join...';
+      if (gameObj.autoStartEndTime && gameObj.autoStartEndTime > now) {
+        gameObj.autoStartTimeRemaining = gameObj.autoStartEndTime - now;
+        gameObj.hasAutoStartTimer = true;
+      }
+      break;
+      
+    case 'CARD_SELECTION':
+      gameObj.message = 'Select your bingo card!';
+      if (gameObj.cardSelectionEndTime && gameObj.cardSelectionEndTime > now) {
+        gameObj.cardSelectionTimeRemaining = gameObj.cardSelectionEndTime - now;
+      }
+      break;
+      
+    case 'ACTIVE':
+      gameObj.message = 'Game in progress - No new players can join!';
+      break;
+      
+    case 'FINISHED':
+      gameObj.message = 'Game finished!';
+      break;
+      
+    case 'COOLDOWN':
+      gameObj.message = 'Next game starting soon...';
+      if (gameObj.cooldownEndTime && gameObj.cooldownEndTime > now) {
+        gameObj.cooldownTimeRemaining = gameObj.cooldownEndTime - now;
+      }
+      break;
   }
   
-  // Handle winner field
-  if (gameObj.winnerId) {
-    gameObj.winner = gameObj.winnerId;
-    delete gameObj.winnerId;
-  }
-
-  if (gameObj.players) {
-    const activePlayers = gameObj.players.filter(p => p.playerType === 'PLAYER' || !p.playerType);
-    const spectators = gameObj.players.filter(p => p.playerType === 'SPECTATOR');
-    
-    gameObj.activePlayers = activePlayers.length;
-    gameObj.spectators = spectators.length;
-    gameObj.totalParticipants = gameObj.players.length;
-    
-    gameObj.minPlayersRequired = this.MIN_PLAYERS_TO_START;
-    
-    // FIX: Count players with cards from BingoCard collection
-    let playersWithCards = 0;
-    if (gameObj._id && gameObj.players.length > 0) {
-      try {
-        // Count BingoCards for this game
-        playersWithCards = await BingoCard.countDocuments({ 
-          gameId: gameObj._id 
-        });
-      } catch (error) {
-        console.error('❌ Error counting bingo cards:', error);
-        playersWithCards = 0;
-      }
-    }
-    
-    gameObj.playersWithCards = playersWithCards;
-    gameObj.canStart = gameObj.status === 'WAITING' && 
-                      playersWithCards >= this.MIN_PLAYERS_TO_START;
-    gameObj.playersNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - gameObj.activePlayers);
-    gameObj.cardsNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - playersWithCards);
-    
-    gameObj.acceptsLateJoiners = gameObj.status === 'ACTIVE' && gameObj.currentPlayers < gameObj.maxPlayers;
-    gameObj.numbersCalledCount = gameObj.numbersCalled?.length || 0;
-  }
-
-  // AUTO-START LOGIC - MODIFIED TO RESPECT 60-SECOND RESTART DELAY
-  if (gameObj.status === 'WAITING') {
-    const now = new Date();
-    
-    // Check if we have enough players with cards
-    if (gameObj.playersWithCards >= this.MIN_PLAYERS_TO_START) {
-      // Check if this game was recently finished (within last 60 seconds)
-      const isRecentlyFinished = gameObj.endedAt && 
-                               (now - new Date(gameObj.endedAt)) < 60000; // 60 seconds
-      
-      if (isRecentlyFinished) {
-        // Calculate remaining restart cooldown
-        const timeSinceEnded = now - new Date(gameObj.endedAt);
-        const restartCooldownRemaining = 60000 - timeSinceEnded;
-        
-        gameObj.restartCooldownRemaining = restartCooldownRemaining;
-        gameObj.hasRestartCooldown = true;
-        gameObj.hasAutoStartTimer = false;
-        gameObj.autoStartTimeRemaining = 0;
-        
-        console.log(`⏳ Game ${gameObj.code} in restart cooldown: ${Math.ceil(restartCooldownRemaining/1000)}s remaining`);
-        
-        // Schedule auto-start check after cooldown ends
-        if (!this.alreadyScheduledForAutoStart.has(gameObj._id.toString())) {
-          console.log(`⏰ Scheduling post-cooldown auto-start check for game ${gameObj.code} in ${restartCooldownRemaining}ms`);
-          this.alreadyScheduledForAutoStart.set(gameObj._id.toString(), true);
-          
-          setTimeout(() => {
-            this.alreadyScheduledForAutoStart.delete(gameObj._id.toString());
-            console.log(`🔄 Cooldown ended for game ${gameObj.code}, checking auto-start conditions`);
-            this.scheduleAutoStartCheck(gameObj._id);
-          }, restartCooldownRemaining);
-        }
-      } else {
-        // Game is not in cooldown - proceed with normal auto-start
-        if (!gameObj.autoStartEndTime) {
-          const autoStartEndTime = new Date(now.getTime() + 10000);
-          gameObj.autoStartEndTime = autoStartEndTime;
-          gameObj.autoStartTimeRemaining = 10000;
-          gameObj.hasAutoStartTimer = true;
-          gameObj.hasRestartCooldown = false;
-          
-          // Only schedule auto-start if we haven't already scheduled it
-          const gameIdStr = gameObj._id.toString();
-          if (!this.alreadyScheduledForAutoStart.has(gameIdStr)) {
-            console.log(`⏰ Scheduling auto-start for game ${gameObj.code} in 10000ms`);
-            this.alreadyScheduledForAutoStart.set(gameIdStr, true);
-            this.scheduleAutoStart(gameObj._id, 10000);
-          }
-        } else if (gameObj.autoStartEndTime <= now) {
-          // Auto-start time has passed - START THE GAME IMMEDIATELY
-          console.log(`🚀 AUTO-START TIME PASSED - Starting game ${gameObj.code} immediately`);
-          
-          // Clear the scheduled flag
-          const gameIdStr = gameObj._id.toString();
-          this.alreadyScheduledForAutoStart.delete(gameIdStr);
-          
-          this.autoStartGame(gameObj._id);
-        } else {
-          gameObj.autoStartTimeRemaining = gameObj.autoStartEndTime - now;
-          gameObj.hasAutoStartTimer = true;
-          gameObj.hasRestartCooldown = false;
-        }
-      }
-    } else {
-      gameObj.autoStartTimeRemaining = 0;
-      gameObj.hasAutoStartTimer = false;
-      gameObj.hasRestartCooldown = false;
-      
-      // If we don't have enough players, clear any existing schedule
-      const gameIdStr = gameObj._id.toString();
-      this.alreadyScheduledForAutoStart.delete(gameIdStr);
-    }
-  } else {
-    gameObj.autoStartTimeRemaining = 0;
-    gameObj.hasAutoStartTimer = false;
-    gameObj.hasRestartCooldown = false;
-  }
-
+  // Get actual participants with cards
+  const participants = await this.getGameParticipants(gameObj._id);
+  const playersWithCards = participants.filter(p => p.hasCard).length;
+  
+  gameObj.participants = participants;
+  gameObj.playersWithCards = playersWithCards;
+  gameObj.cardsNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - playersWithCards);
+  
+  // Can start if we have enough players with cards AND we're in the right phase
+  gameObj.canStart = (gameObj.status === 'CARD_SELECTION' || 
+                     gameObj.status === 'WAITING_FOR_PLAYERS') && 
+                     playersWithCards >= this.MIN_PLAYERS_TO_START;
+  
+  // Can join only during waiting phase
+  gameObj.canJoin = gameObj.status === 'WAITING_FOR_PLAYERS';
+  
+  // Can select card during waiting or card selection phases
+  gameObj.canSelectCard = gameObj.status === 'WAITING_FOR_PLAYERS' || 
+                         gameObj.status === 'CARD_SELECTION';
+  
   return gameObj;
 }
+
+  static async scheduleAutoStartCheck(gameId) {
+    const game = await Game.findById(gameId);
+    if (!game || game.status !== 'WAITING_FOR_PLAYERS') return;
+    
+    const playersWithCards = await BingoCard.countDocuments({ gameId });
+    
+    if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
+      console.log(`✅ Conditions met for auto-start: ${playersWithCards} players with cards`);
+      
+      // Begin card selection phase
+      await this.beginCardSelection(gameId);
+    } else {
+      console.log(`⏳ Waiting for players: ${playersWithCards}/${this.MIN_PLAYERS_TO_START} with cards`);
+      
+      // Schedule another check
+      setTimeout(() => {
+        this.scheduleAutoStartCheck(gameId);
+      }, 5000);
+    }
+  }
 
   static scheduleAutoStart(gameId, delay = 10000) {
     this.clearAutoStartTimer(gameId);
@@ -1254,63 +1446,96 @@ static async markNumber(gameId, userId, number) {
   };
 }
 
- static async endGame(gameId) {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+   static async endGame(gameId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-  try {
-    this.stopAutoNumberCalling(gameId);
+    try {
+      this.stopAutoNumberCalling(gameId);
 
-    const game = await Game.findById(gameId).session(session);
-    
-    if (!game) {
-      throw new Error('Game not found');
+      const game = await Game.findById(gameId).session(session);
+      
+      if (!game || game.status !== 'ACTIVE') {
+        throw new Error('Game not active');
+      }
+
+      const now = new Date();
+      const cooldownEndTime = new Date(now.getTime() + this.GAME_RESTART_COOLDOWN);
+      
+      game.status = 'COOLDOWN';
+      game.endedAt = now;
+      game.cooldownEndTime = cooldownEndTime;
+      await game.save({ session });
+
+      await session.commitTransaction();
+
+      console.log(`🏁 Game ${game.code} ended. Cooldown until: ${cooldownEndTime}`);
+
+      // Schedule game reset after cooldown
+      setTimeout(async () => {
+        try {
+          await this.resetGameForNewSession(gameId);
+        } catch (error) {
+          console.error('❌ Failed to reset game after cooldown:', error);
+        }
+      }, this.GAME_RESTART_COOLDOWN);
+
+      return this.getGameWithDetails(gameId);
+      
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ End game error:', error);
+      throw error;
+    } finally {
+      session.endSession();
     }
-
-    if (game.status === 'FINISHED' || game.status === 'CANCELLED') {
-      throw new Error('Game already ended');
-    }
-
-    // NEW: If game is ending without a winner (cancelled), refund players
-    if (!game.winnerId && game.status === 'ACTIVE') {
-      console.log(`🔄 Game ${game.code} cancelled - refunding players`);
-      await this.refundAllPlayers(gameId, session);
-    }
-
-    game.status = 'FINISHED';
-    game.endedAt = new Date();
-    
-    if (!game.winnerId) {
-      game.winnerId = null;
-    }
-    
-    await game.save();
-
-    const UserService = require('./userService');
-    const players = await GamePlayer.find({ gameId }).session(session);
-    
-    for (const player of players) {
-      const isWinner = player.userId.toString() === game.winnerId?.toString();
-      await UserService.updateUserStats(player.userId, isWinner);
-    }
-
-    await session.commitTransaction();
-
-    console.log(`🏁 Game ${game.code} ended`);
-
-    setTimeout(() => {
-      this.autoRestartGame(gameId);
-    }, 60000);
-
-    return this.getGameWithDetails(gameId);
-  } catch (error) {
-    await session.abortTransaction();
-    console.error('❌ End game error:', error);
-    throw error;
-  } finally {
-    session.endSession();
   }
-}
+
+  
+  static async resetGameForNewSession(gameId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      const game = await Game.findById(gameId).session(session);
+      
+      if (!game || game.status !== 'COOLDOWN') {
+        console.log('Game not in cooldown state, skipping reset');
+        await session.abortTransaction();
+        return;
+      }
+
+      // Clear game data
+      game.status = 'WAITING_FOR_PLAYERS';
+      game.numbersCalled = [];
+      game.winnerId = null;
+      game.startedAt = null;
+      game.endedAt = null;
+      game.cardSelectionStartTime = null;
+      game.cardSelectionEndTime = null;
+      game.cooldownEndTime = null;
+      game.autoStartEndTime = null;
+      game.currentPlayers = 0;
+      
+      await game.save({ session });
+      
+      // Clear player data
+      await GamePlayer.deleteMany({ gameId }).session(session);
+      await BingoCard.deleteMany({ gameId }).session(session);
+      
+      await session.commitTransaction();
+      
+      console.log(`🔄 Game ${game.code} reset for new session`);
+      
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Error resetting game:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
 
 // NEW: Method to refund all players
 static async refundAllPlayers(gameId, session) {
@@ -1634,122 +1859,32 @@ static async autoRestartGame(gameId) {
     }
   }
 static async autoStartGame(gameId) {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
-    const game = await Game.findById(gameId).session(session);
-    if (!game || game.status !== 'WAITING') {
+    const game = await Game.findById(gameId);
+    if (!game || game.status !== 'WAITING_FOR_PLAYERS') {
       this.clearAutoStartTimer(gameId);
-      await session.abortTransaction();
       return;
     }
 
-    const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
+    const playersWithCards = await BingoCard.countDocuments({ gameId });
     
     if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
-      console.log(`🚀 AUTO-STARTING game ${game.code} with ${playersWithCards} players`);
+      console.log(`🎯 Auto-start conditions met for game ${game.code}: ${playersWithCards} players with cards`);
       
-      // Get all players with cards and deduct entry fees
-      const playerCards = await BingoCard.find({ gameId }).session(session);
-      const WalletService = require('./walletService');
-      const entryFee = 10;
-      
-      console.log(`💰 Deducting entry fees from ${playerCards.length} players...`);
-      
-      const failedDeductions = [];
-      
-      for (const card of playerCards) {
-        try {
-          const User = require('../models/User');
-          const user = await User.findById(card.userId).session(session);
-          
-          if (user && user.telegramId) {
-            await WalletService.deductGameEntry(
-              user.telegramId, 
-              gameId, 
-              entryFee, 
-              `Entry fee for game ${game.code}`
-            );
-            console.log(`✅ Deducted $${entryFee} from ${user.telegramId}`);
-          } else {
-            console.warn(`⚠️ Could not deduct from user ${card.userId} - user not found`);
-            failedDeductions.push(card.userId);
-          }
-        } catch (error) {
-          console.error(`❌ Failed to deduct from user ${card.userId}:`, error.message);
-          failedDeductions.push(card.userId);
-        }
-      }
-      
-      // Only proceed if we have enough players who paid
-      const successfulPayments = playerCards.length - failedDeductions.length;
-      
-      if (successfulPayments < this.MIN_PLAYERS_TO_START) {
-        console.log(`❌ Auto-start cancelled - only ${successfulPayments} players could pay (need ${this.MIN_PLAYERS_TO_START})`);
-        
-        // Refund any successful payments if not enough players
-        for (const card of playerCards) {
-          try {
-            if (!failedDeductions.includes(card.userId.toString())) {
-              const User = require('../models/User');
-              const user = await User.findById(card.userId).session(session);
-              
-              if (user && user.telegramId) {
-                await WalletService.addWinning(
-                  user.telegramId,
-                  gameId,
-                  entryFee,
-                  `Refund - insufficient players`
-                );
-                console.log(`💰 Refunded $${entryFee} to ${user.telegramId}`);
-              }
-            }
-          } catch (refundError) {
-            console.error(`❌ Failed to refund user ${card.userId}:`, refundError.message);
-          }
-        }
-        
-        await session.abortTransaction();
-        this.clearAutoStartTimer(gameId);
-        
-        // Clear scheduled flag so we can try again
-        const gameIdStr = gameId.toString();
-        this.alreadyScheduledForAutoStart.delete(gameIdStr);
-        
-        return;
-      }
-      
-      // Update game status
-      game.status = 'ACTIVE';
-      game.startedAt = new Date();
-      game.autoStartEndTime = null;
-      await game.save();
-      
-      await session.commitTransaction();
-      console.log(`✅ Game ${game.code} auto-started with ${successfulPayments} paid players`);
-      
-      this.clearAutoStartTimer(gameId);
-      this.startAutoNumberCalling(gameId);
-      
+      // Begin card selection phase instead of starting directly
+      await this.beginCardSelection(gameId);
     } else {
       console.log(`❌ Auto-start cancelled - only ${playersWithCards} players with cards (need ${this.MIN_PLAYERS_TO_START})`);
       
-      await session.abortTransaction();
-      this.clearAutoStartTimer(gameId);
-      
-      // Schedule check again
+      // Schedule another check with longer delay
       setTimeout(() => {
         this.scheduleAutoStartCheck(gameId);
-      }, 5000);
+      }, 10000);
     }
     
   } catch (error) {
-    await session.abortTransaction();
     console.error('❌ Auto-start game error:', error);
     this.clearAutoStartTimer(gameId);
-  } finally {
-    session.endSession();
   }
 }
   static async scheduleAutoStartCheck(gameId) {
