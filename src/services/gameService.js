@@ -242,93 +242,101 @@ static alreadyScheduledForAutoStart = new Map();
   }
 }
 
-  static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions) {
-    const maxRetries = 3;
-    let retryCount = 0;
+ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions) {
+  const maxRetries = 3;
+  let retryCount = 0;
 
-    while (retryCount < maxRetries) {
-      const session = await mongoose.startSession();
+  while (retryCount < maxRetries) {
+    const session = await mongoose.startSession();
+    let transactionInProgress = false;
+    
+    try {
+      session.startTransaction();
+      transactionInProgress = true;
       
-      try {
-        session.startTransaction();
-        
-        console.log(`🔄 Attempt ${retryCount + 1} to declare winner for game ${gameId}`);
+      console.log(`🔄 Attempt ${retryCount + 1} to declare winner for game ${gameId}`);
 
-        const game = await Game.findById(gameId).session(session);
-        const card = await BingoCard.findById(winningCard._id).session(session);
+      const game = await Game.findById(gameId).session(session);
+      const card = await BingoCard.findById(winningCard._id).session(session);
 
-        if (!game || game.status !== 'ACTIVE') {
-          console.log('❌ Game no longer active, aborting winner declaration');
-          await session.abortTransaction();
-          return;
-        }
-
-        if (this.winnerDeclared.has(gameId.toString())) {
-          console.log('✅ Winner already declared, aborting');
-          await session.abortTransaction();
-          return;
-        }
-
-        card.isWinner = true;
-        card.markedPositions = [...new Set([...card.markedPositions, ...winningPositions])];
-        await card.save({ session });
-
-        game.status = 'FINISHED';
-        game.winnerId = winningUserId;
-        game.endedAt = new Date();
-        await game.save({ session });
-
-        const totalPlayers = game.currentPlayers;
-        const entryFee = 10;
-        const totalPot = totalPlayers * entryFee;
-        const platformFee = totalPot * 0.1;
-        const winnerPrize = totalPot - platformFee;
-
-        const WalletService = require('./walletService');
-        await WalletService.addWinning(winningUserId, gameId, winnerPrize, `Winner prize for game ${game.code}`);
-
-        this.winnerDeclared.add(gameId.toString());
-
-        await session.commitTransaction();
-        
-        console.log(`🎊 Game ${game.code} ENDED - Winner: ${winningUserId} won $${winnerPrize}`);
-
-        const UserService = require('./userService');
-        await UserService.updateUserStats(winningUserId, true);
-
-        const bingoCards = await BingoCard.find({ gameId });
-        const losingPlayers = bingoCards.filter(c => c.userId.toString() !== winningUserId.toString());
-        for (const losingCard of losingPlayers) {
-          await UserService.updateUserStats(losingCard.userId, false);
-        }
-
-        this.stopAutoNumberCalling(gameId);
-        setTimeout(() => {
-          this.autoRestartGame(gameId);
-        }, 60000);
-
-        return;
-
-      } catch (error) {
-        await session.abortTransaction();
-        
-        if (error.code === 112) {
-          retryCount++;
-          console.log(`🔄 Write conflict detected, retrying... (${retryCount}/${maxRetries})`);
-          
-          if (retryCount < maxRetries) {
-            await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
-            continue;
-          }
-        }
-        
-        console.error('❌ Failed to declare winner after retries:', error);
-        throw error;
-      } finally {
-        session.endSession();
+      if (!game || game.status !== 'ACTIVE') {
+        console.log('❌ Game no longer active, aborting winner declaration');
+        throw new Error('Game no longer active');
       }
+
+      if (this.winnerDeclared.has(gameId.toString())) {
+        console.log('✅ Winner already declared, aborting');
+        throw new Error('Winner already declared');
+      }
+
+      card.isWinner = true;
+      card.markedPositions = [...new Set([...card.markedPositions, ...winningPositions])];
+      await card.save({ session });
+
+      game.status = 'FINISHED';
+      game.winnerId = winningUserId;
+      game.endedAt = new Date();
+      await game.save({ session });
+
+      const totalPlayers = game.currentPlayers;
+      const entryFee = 10;
+      const totalPot = totalPlayers * entryFee;
+      const platformFee = totalPot * 0.1;
+      const winnerPrize = totalPot - platformFee;
+
+      const WalletService = require('./walletService');
+      await WalletService.addWinning(winningUserId, gameId, winnerPrize, `Winner prize for game ${game.code}`);
+
+      this.winnerDeclared.add(gameId.toString());
+
+      await session.commitTransaction();
+      transactionInProgress = false;
+      
+      console.log(`🎊 Game ${game.code} ENDED - Winner: ${winningUserId} won $${winnerPrize}`);
+
+      const UserService = require('./userService');
+      await UserService.updateUserStats(winningUserId, true);
+
+      const bingoCards = await BingoCard.find({ gameId });
+      const losingPlayers = bingoCards.filter(c => c.userId.toString() !== winningUserId.toString());
+      for (const losingCard of losingPlayers) {
+        await UserService.updateUserStats(losingCard.userId, false);
+      }
+
+      this.stopAutoNumberCalling(gameId);
+      setTimeout(() => {
+        this.autoRestartGame(gameId);
+      }, 60000);
+
+      return;
+
+    } catch (error) {
+      // Only abort transaction if it's in progress
+      if (transactionInProgress && session.inTransaction()) {
+        try {
+          await session.abortTransaction();
+        } catch (abortError) {
+          console.warn('⚠️ Error aborting transaction in declareWinnerWithRetry:', abortError.message);
+        }
+      }
+      
+      if (error.code === 112) {
+        retryCount++;
+        console.log(`🔄 Write conflict detected, retrying... (${retryCount}/${maxRetries})`);
+        
+        if (retryCount < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
+          continue;
+        }
+      }
+      
+      console.error('❌ Failed to declare winner after retries:', error);
+      throw error;
+    } finally {
+      session.endSession();
     }
   }
+}
 
   static checkEnhancedWinCondition(cardNumbers, markedPositions) {
     if (!cardNumbers || !markedPositions) {
@@ -1678,19 +1686,17 @@ static async autoStartGame(gameId) {
 
 static async claimBingo(gameId, userId, patternType = 'BINGO') {
   const session = await mongoose.startSession();
-  session.startTransaction();
+  let transactionInProgress = false;
 
   try {
     console.log(`🏆 BINGO CLAIM attempt by user ${userId} for game ${gameId}`);
     
     if (this.winnerDeclared.has(gameId.toString())) {
-      await session.abortTransaction();
       throw new Error('Winner already declared for this game');
     }
 
     const game = await Game.findById(gameId).session(session);
     if (!game || game.status !== 'ACTIVE') {
-      await session.abortTransaction();
       throw new Error('Game not active');
     }
 
@@ -1703,7 +1709,6 @@ static async claimBingo(gameId, userId, patternType = 'BINGO') {
     }
 
     if (!user) {
-      await session.abortTransaction();
       throw new Error('User not found');
     }
 
@@ -1714,7 +1719,6 @@ static async claimBingo(gameId, userId, patternType = 'BINGO') {
     }).session(session);
 
     if (!bingoCard) {
-      await session.abortTransaction();
       throw new Error('No bingo card found for this user');
     }
 
@@ -1740,16 +1744,20 @@ static async claimBingo(gameId, userId, patternType = 'BINGO') {
     const winResult = this.checkEnhancedWinCondition(numbers, effectiveMarkedPositions);
     
     if (!winResult.isWinner) {
-      await session.abortTransaction();
       throw new Error('Invalid claim - no winning pattern found on your card');
     }
 
     console.log(`✅ VALID BINGO CLAIM by user ${userId} with ${winResult.patternType} pattern`);
     
+    // Start transaction
+    session.startTransaction();
+    transactionInProgress = true;
+    
     // Declare this user as winner
     await this.declareWinnerWithRetry(gameId, mongoUserId, bingoCard, winResult.winningPositions);
     
     await session.commitTransaction();
+    transactionInProgress = false;
     
     return {
       success: true,
@@ -1760,10 +1768,18 @@ static async claimBingo(gameId, userId, patternType = 'BINGO') {
     };
     
   } catch (error) {
-    await session.abortTransaction();
+    // Only abort transaction if it's in progress
+    if (transactionInProgress && session.inTransaction()) {
+      try {
+        await session.abortTransaction();
+      } catch (abortError) {
+        console.warn('⚠️ Error aborting transaction:', abortError.message);
+      }
+    }
     console.error('❌ Bingo claim error:', error);
     throw error;
   } finally {
+    // Always end the session
     session.endSession();
   }
 }
