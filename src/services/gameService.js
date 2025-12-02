@@ -1008,41 +1008,38 @@ static async startGame(gameId) {
   }
 
   static async getUserBingoCard(gameId, userId) {
-    try {
-      console.log(`🔍 getUserBingoCard called with:`, { gameId, userId });
-      
-      let query = {};
-      
-      if (mongoose.Types.ObjectId.isValid(userId)) {
-        query = { gameId, userId: new mongoose.Types.ObjectId(userId) };
-      } else {
-        const User = require('../models/User');
-        const user = await User.findOne({ telegramId: userId });
-        
-        if (!user) {
-          console.log(`❌ User not found with Telegram ID: ${userId}`);
-          return null;
-        }
-        
-        console.log(`✅ Found user with Telegram ID ${userId}: MongoDB _id = ${user._id}`);
-        query = { gameId, userId: user._id };
-      }
-      
-      const bingoCard = await BingoCard.findOne(query)
-        .populate('userId', 'username firstName telegramId');
-      
-      if (bingoCard) {
-        console.log(`✅ Found bingo card for user ${userId}`);
-      } else {
-        console.log(`❌ No bingo card found for user ${userId}`);
-      }
-      
-      return bingoCard;
-    } catch (error) {
-      console.error('❌ Error in getUserBingoCard:', error);
-      throw error;
+  try {
+    console.log(`🔍 getUserBingoCard called with:`, { gameId, userId });
+    
+    let user;
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId);
+    } else {
+      user = await User.findOne({ telegramId: userId });
     }
+    
+    if (!user) {
+      console.log(`❌ User not found with ID: ${userId}`);
+      return null;
+    }
+    
+    const query = { gameId, userId: user._id };
+    
+    const bingoCard = await BingoCard.findOne(query)
+      .populate('userId', 'username firstName telegramId');
+    
+    if (bingoCard) {
+      console.log(`✅ Found bingo card for user ${userId} (MongoDB: ${user._id})`);
+    } else {
+      console.log(`❌ No bingo card found for user ${userId} (MongoDB: ${user._id})`);
+    }
+    
+    return bingoCard;
+  } catch (error) {
+    console.error('❌ Error in getUserBingoCard:', error);
+    throw error;
   }
+}
 
   static async findByCode(code) {
     const game = await Game.findOne({ code })
@@ -1062,28 +1059,57 @@ static async startGame(gameId) {
     return this.formatGameForFrontend(game);
   }
 
-  static async leaveGame(gameId, userId) {
-    const game = await Game.findById(gameId);
-    if (!game) {
-      throw new Error('Game not found');
-    }
-
-    await GamePlayer.deleteOne({ gameId, userId });
-    await BingoCard.deleteOne({ gameId, userId });
-
-    game.currentPlayers = Math.max(0, game.currentPlayers - 1);
-    
-    if (game.currentPlayers === 0) {
-      game.status = 'CANCELLED';
-      game.endedAt = new Date();
-    }
-    
-    await game.save();
-    return this.getGameWithDetails(game._id);
+ static async leaveGame(gameId, userId) {
+  // Find user first
+  let user;
+  if (mongoose.Types.ObjectId.isValid(userId)) {
+    user = await User.findById(userId);
+  } else {
+    user = await User.findOne({ telegramId: userId });
   }
 
- static async markNumber(gameId, userId, number) {
-  const bingoCard = await BingoCard.findOne({ gameId, userId });
+  if (!user) {
+    throw new Error('User not found');
+  }
+
+  const mongoUserId = user._id;
+  
+  const game = await Game.findById(gameId);
+  if (!game) {
+    throw new Error('Game not found');
+  }
+
+  await GamePlayer.deleteOne({ gameId, userId: mongoUserId });
+  await BingoCard.deleteOne({ gameId, userId: mongoUserId });
+
+  game.currentPlayers = Math.max(0, game.currentPlayers - 1);
+  
+  if (game.currentPlayers === 0) {
+    game.status = 'CANCELLED';
+    game.endedAt = new Date();
+  }
+  
+  await game.save();
+  return this.getGameWithDetails(game._id);
+}
+
+static async markNumber(gameId, userId, number) {
+  // First find the user by Telegram ID or MongoDB ID
+  let user;
+  if (mongoose.Types.ObjectId.isValid(userId)) {
+    user = await User.findById(userId);
+  } else {
+    user = await User.findOne({ telegramId: userId });
+  }
+
+  if (!user) {
+    throw new Error('User not found');
+  }
+
+  const mongoUserId = user._id;
+  
+  // Now find the bingo card using the MongoDB _id
+  const bingoCard = await BingoCard.findOne({ gameId, userId: mongoUserId });
   if (!bingoCard) {
     throw new Error('Bingo card not found');
   }
@@ -1117,7 +1143,7 @@ static async startGame(gameId) {
   bingoCard.markedPositions.push(position);
   await bingoCard.save();
 
-  console.log(`✅ User ${userId} marked number ${number} on card`);
+  console.log(`✅ User ${userId} (MongoDB: ${mongoUserId}) marked number ${number} on card`);
 
   return { 
     bingoCard, 
@@ -1125,8 +1151,22 @@ static async startGame(gameId) {
     markedCount: bingoCard.markedPositions.length
   };
 }
-  static async checkForWin(gameId, userId) {
-  const bingoCard = await BingoCard.findOne({ gameId, userId });
+ static async checkForWin(gameId, userId) {
+  // Find user first
+  let user;
+  if (mongoose.Types.ObjectId.isValid(userId)) {
+    user = await User.findById(userId);
+  } else {
+    user = await User.findOne({ telegramId: userId });
+  }
+
+  if (!user) {
+    throw new Error('User not found');
+  }
+
+  const mongoUserId = user._id;
+  
+  const bingoCard = await BingoCard.findOne({ gameId, userId: mongoUserId });
   if (!bingoCard) {
     throw new Error('Bingo card not found');
   }
@@ -1138,7 +1178,7 @@ static async startGame(gameId) {
 
   const numbers = bingoCard.numbers.flat();
   
-  // REMOVED: Late joiner auto-marking logic
+  // Use only manually marked positions (no late joiner auto-marking)
   let effectiveMarkedPositions = bingoCard.markedPositions || [];
   
   // Always include FREE space (position 12)
@@ -1154,14 +1194,14 @@ static async startGame(gameId) {
 
     if (game.status === 'ACTIVE') {
       game.status = 'FINISHED';
-      game.winnerId = userId;
+      game.winnerId = mongoUserId;
       game.endedAt = new Date();
       await game.save();
 
       const UserService = require('./userService');
-      await UserService.updateUserStats(userId, true);
+      await UserService.updateUserStats(mongoUserId, true);
       
-      console.log(`🎉 Manual win check: Winner found for user ${userId}`);
+      console.log(`🎉 Manual win check: Winner found for user ${userId} (MongoDB: ${mongoUserId})`);
       
       this.stopAutoNumberCalling(gameId);
       setTimeout(() => {
