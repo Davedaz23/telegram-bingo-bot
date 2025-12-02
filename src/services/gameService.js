@@ -242,7 +242,7 @@ static alreadyScheduledForAutoStart = new Map();
   }
 }
 
- static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions) {
+static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions) {
   const maxRetries = 3;
   let retryCount = 0;
 
@@ -269,8 +269,9 @@ static alreadyScheduledForAutoStart = new Map();
         throw new Error('Winner already declared');
       }
 
+      // ONLY set winner flag, don't auto-add winning positions to marked positions
       card.isWinner = true;
-      card.markedPositions = [...new Set([...card.markedPositions, ...winningPositions])];
+      // REMOVED: card.markedPositions = [...new Set([...card.markedPositions, ...winningPositions])];
       await card.save({ session });
 
       game.status = 'FINISHED';
@@ -338,54 +339,55 @@ static alreadyScheduledForAutoStart = new Map();
   }
 }
 
-  static checkEnhancedWinCondition(cardNumbers, markedPositions) {
-    if (!cardNumbers || !markedPositions) {
-      return { isWinner: false, patternType: null, winningPositions: [] };
-    }
-
-    const effectiveMarked = [...new Set([...markedPositions, 12])];
-    
-    console.log(`🔍 Enhanced win check: ${effectiveMarked.length} marked positions`);
-
-    const winningPatterns = [
-      { type: 'ROW', positions: [0, 1, 2, 3, 4] },
-      { type: 'ROW', positions: [5, 6, 7, 8, 9] },
-      { type: 'ROW', positions: [10, 11, 12, 13, 14] },
-      { type: 'ROW', positions: [15, 16, 17, 18, 19] },
-      { type: 'ROW', positions: [20, 21, 22, 23, 24] },
-      { type: 'COLUMN', positions: [0, 5, 10, 15, 20] },
-      { type: 'COLUMN', positions: [1, 6, 11, 16, 21] },
-      { type: 'COLUMN', positions: [2, 7, 12, 17, 22] },
-      { type: 'COLUMN', positions: [3, 8, 13, 18, 23] },
-      { type: 'COLUMN', positions: [4, 9, 14, 19, 24] },
-      { type: 'DIAGONAL', positions: [0, 6, 12, 18, 24] },
-      { type: 'DIAGONAL', positions: [4, 8, 12, 16, 20] }
-    ];
-
-    for (const pattern of winningPatterns) {
-      const isComplete = pattern.positions.every(pos => effectiveMarked.includes(pos));
-      
-      if (isComplete) {
-        console.log(`🎯 WINNING ${pattern.type} PATTERN DETECTED!`);
-        
-        const winningNumbers = pattern.positions.map(pos => {
-          const number = cardNumbers[pos];
-          const row = Math.floor(pos / 5);
-          const col = pos % 5;
-          return `${number} (${row},${col})`;
-        });
-        console.log(`🔢 Winning numbers: ${winningNumbers.join(' → ')}`);
-        
-        return {
-          isWinner: true,
-          patternType: pattern.type,
-          winningPositions: pattern.positions
-        };
-      }
-    }
-
+static checkEnhancedWinCondition(cardNumbers, markedPositions) {
+  if (!cardNumbers || !markedPositions) {
     return { isWinner: false, patternType: null, winningPositions: [] };
   }
+
+  // DO NOT automatically add FREE space or other numbers
+  const effectiveMarked = [...markedPositions];
+  
+  console.log(`🔍 Enhanced win check: ${effectiveMarked.length} manually marked positions`);
+
+  const winningPatterns = [
+    { type: 'ROW', positions: [0, 1, 2, 3, 4] },
+    { type: 'ROW', positions: [5, 6, 7, 8, 9] },
+    { type: 'ROW', positions: [10, 11, 12, 13, 14] },
+    { type: 'ROW', positions: [15, 16, 17, 18, 19] },
+    { type: 'ROW', positions: [20, 21, 22, 23, 24] },
+    { type: 'COLUMN', positions: [0, 5, 10, 15, 20] },
+    { type: 'COLUMN', positions: [1, 6, 11, 16, 21] },
+    { type: 'COLUMN', positions: [2, 7, 12, 17, 22] },
+    { type: 'COLUMN', positions: [3, 8, 13, 18, 23] },
+    { type: 'COLUMN', positions: [4, 9, 14, 19, 24] },
+    { type: 'DIAGONAL', positions: [0, 6, 12, 18, 24] },
+    { type: 'DIAGONAL', positions: [4, 8, 12, 16, 20] }
+  ];
+
+  for (const pattern of winningPatterns) {
+    const isComplete = pattern.positions.every(pos => effectiveMarked.includes(pos));
+    
+    if (isComplete) {
+      console.log(`🎯 WINNING ${pattern.type} PATTERN DETECTED!`);
+      
+      const winningNumbers = pattern.positions.map(pos => {
+        const number = cardNumbers[pos];
+        const row = Math.floor(pos / 5);
+        const col = pos % 5;
+        return `${number} (${row},${col})`;
+      });
+      console.log(`🔢 Winning numbers: ${winningNumbers.join(' → ')}`);
+      
+      return {
+        isWinner: true,
+        patternType: pattern.type,
+        winningPositions: pattern.positions
+      };
+    }
+  }
+
+  return { isWinner: false, patternType: null, winningPositions: [] };
+}
 
   static async endGameDueToNoWinner(gameId) {
     try {
@@ -1080,7 +1082,7 @@ static async startGame(gameId) {
     return this.getGameWithDetails(game._id);
   }
 
-  static async markNumber(gameId, userId, number) {
+ static async markNumber(gameId, userId, number) {
   const bingoCard = await BingoCard.findOne({ gameId, userId });
   if (!bingoCard) {
     throw new Error('Bingo card not found');
@@ -1123,65 +1125,57 @@ static async startGame(gameId) {
     markedCount: bingoCard.markedPositions.length
   };
 }
-
   static async checkForWin(gameId, userId) {
-    const bingoCard = await BingoCard.findOne({ gameId, userId });
-    if (!bingoCard) {
-      throw new Error('Bingo card not found');
-    }
-
-    const game = await Game.findById(gameId);
-    if (!game) {
-      throw new Error('Game not found');
-    }
-
-    const numbers = bingoCard.numbers.flat();
-    
-    let effectiveMarkedPositions = [...bingoCard.markedPositions];
-    
-    if (bingoCard.isLateJoiner) {
-      const numbersCalledAtJoin = bingoCard.numbersCalledAtJoin || [];
-      const allCalledNumbers = game.numbersCalled || [];
-      
-      for (let i = 0; i < numbers.length; i++) {
-        const cardNumber = numbers[i];
-        if (allCalledNumbers.includes(cardNumber) && !effectiveMarkedPositions.includes(i)) {
-          effectiveMarkedPositions.push(i);
-        }
-      }
-    }
-
-    const isWinner = GameUtils.checkWinCondition(numbers, effectiveMarkedPositions);
-    
-    if (isWinner && !bingoCard.isWinner) {
-      bingoCard.isWinner = true;
-      bingoCard.markedPositions = effectiveMarkedPositions;
-      await bingoCard.save();
-
-      if (game.status === 'ACTIVE') {
-        game.status = 'FINISHED';
-        game.winnerId = userId;
-        game.endedAt = new Date();
-        await game.save();
-
-        const UserService = require('./userService');
-        await UserService.updateUserStats(userId, true);
-        
-        console.log(`🎉 Manual win check: Winner found for user ${userId}`);
-        
-        this.stopAutoNumberCalling(gameId);
-        setTimeout(() => {
-          this.autoRestartGame(gameId);
-        }, 30000);
-      }
-    }
-
-    return {
-      isWinner,
-      bingoCard,
-      winningPattern: isWinner ? GameUtils.getWinningPattern(effectiveMarkedPositions) : null
-    };
+  const bingoCard = await BingoCard.findOne({ gameId, userId });
+  if (!bingoCard) {
+    throw new Error('Bingo card not found');
   }
+
+  const game = await Game.findById(gameId);
+  if (!game) {
+    throw new Error('Game not found');
+  }
+
+  const numbers = bingoCard.numbers.flat();
+  
+  // REMOVED: Late joiner auto-marking logic
+  let effectiveMarkedPositions = bingoCard.markedPositions || [];
+  
+  // Always include FREE space (position 12)
+  if (!effectiveMarkedPositions.includes(12)) {
+    effectiveMarkedPositions.push(12);
+  }
+
+  const isWinner = GameUtils.checkWinCondition(numbers, effectiveMarkedPositions);
+  
+  if (isWinner && !bingoCard.isWinner) {
+    bingoCard.isWinner = true;
+    await bingoCard.save();
+
+    if (game.status === 'ACTIVE') {
+      game.status = 'FINISHED';
+      game.winnerId = userId;
+      game.endedAt = new Date();
+      await game.save();
+
+      const UserService = require('./userService');
+      await UserService.updateUserStats(userId, true);
+      
+      console.log(`🎉 Manual win check: Winner found for user ${userId}`);
+      
+      this.stopAutoNumberCalling(gameId);
+      setTimeout(() => {
+        this.autoRestartGame(gameId);
+      }, 30000);
+    }
+  }
+
+  return {
+    isWinner,
+    bingoCard,
+    winningPattern: isWinner ? GameUtils.getWinningPattern(effectiveMarkedPositions) : null
+  };
+}
 
  static async endGame(gameId) {
   const session = await mongoose.startSession();
