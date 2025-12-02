@@ -1364,6 +1364,7 @@ static async refundAllPlayers(gameId, session) {
   }
 
   static async getWinnerInfo(gameId) {
+  try {
     const game = await Game.findById(gameId)
       .populate('winnerId', 'username firstName telegramId');
     
@@ -1371,14 +1372,47 @@ static async refundAllPlayers(gameId, session) {
       return null;
     }
 
+    // Get winner's bingo card
+    let winningCard = null;
+    let winningPattern = null;
+    
+    if (game.winnerId) {
+      const bingoCard = await BingoCard.findOne({ 
+        gameId, 
+        userId: game.winnerId._id 
+      });
+      
+      if (bingoCard) {
+        winningCard = {
+          cardNumber: bingoCard.cardNumber || bingoCard.cardIndex || 0,
+          numbers: bingoCard.numbers || [],
+          markedPositions: bingoCard.markedNumbers || bingoCard.markedPositions || [],
+          winningPatternPositions: bingoCard.winningPatternPositions || []
+        };
+        
+        // Determine winning pattern
+        const winResult = this.checkEnhancedWinCondition(
+          bingoCard.numbers.flat(), 
+          bingoCard.markedNumbers || bingoCard.markedPositions || []
+        );
+        winningPattern = winResult.patternType;
+      }
+    }
+
     return {
       winner: game.winnerId,
       gameCode: game.code,
       endedAt: game.endedAt,
       totalPlayers: game.currentPlayers,
-      numbersCalled: game.numbersCalled?.length || 0
+      numbersCalled: game.numbersCalled?.length || 0,
+      winningPattern: winningPattern,
+      winningCard: winningCard
     };
+  } catch (error) {
+    console.error('Error getting winner info:', error);
+    throw error;
   }
+}
 
   static async getUserActiveGames(userId) {
     const games = await Game.find({
@@ -1756,7 +1790,7 @@ static async claimBingo(gameId, userId, patternType = 'BINGO') {
       throw new Error('No bingo card found for this user');
     }
 
-    // Verify the claim - check if user actually has a winning pattern
+    // Verify the claim
     const numbers = bingoCard.numbers.flat();
     let effectiveMarkedPositions = [...bingoCard.markedPositions];
     
@@ -1782,6 +1816,11 @@ static async claimBingo(gameId, userId, patternType = 'BINGO') {
     }
 
     console.log(`✅ VALID BINGO CLAIM by user ${userId} with ${winResult.patternType} pattern`);
+    
+    // Save winning pattern positions to the card
+    bingoCard.winningPatternPositions = winResult.winningPositions;
+    bingoCard.winningPatternType = winResult.patternType;
+    await bingoCard.save({ session });
     
     // Start transaction
     session.startTransaction();
