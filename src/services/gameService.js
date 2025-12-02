@@ -842,7 +842,7 @@ static async startGame(gameId) {
 
 
 
- static async formatGameForFrontend(game) {
+static async formatGameForFrontend(game) {
   if (!game) return null;
   
   const gameObj = game.toObject ? game.toObject() : { ...game };
@@ -892,46 +892,83 @@ static async startGame(gameId) {
     gameObj.numbersCalledCount = gameObj.numbersCalled?.length || 0;
   }
 
-  // AUTO-START LOGIC - FIXED
+  // AUTO-START LOGIC - MODIFIED TO RESPECT 60-SECOND RESTART DELAY
   if (gameObj.status === 'WAITING') {
     const now = new Date();
     
     // Check if we have enough players with cards
     if (gameObj.playersWithCards >= this.MIN_PLAYERS_TO_START) {
-      if (!gameObj.autoStartEndTime) {
-        const autoStartEndTime = new Date(now.getTime() + 10000);
-        gameObj.autoStartEndTime = autoStartEndTime;
-        gameObj.autoStartTimeRemaining = 10000;
-        gameObj.hasAutoStartTimer = true;
+      // Check if this game was recently finished (within last 60 seconds)
+      const isRecentlyFinished = gameObj.endedAt && 
+                               (now - new Date(gameObj.endedAt)) < 60000; // 60 seconds
+      
+      if (isRecentlyFinished) {
+        // Calculate remaining restart cooldown
+        const timeSinceEnded = now - new Date(gameObj.endedAt);
+        const restartCooldownRemaining = 60000 - timeSinceEnded;
         
-        // Only schedule auto-start if we haven't already scheduled it
-        const gameIdStr = gameObj._id.toString();
-        if (!this.alreadyScheduledForAutoStart.has(gameIdStr)) {
-          console.log(`⏰ Scheduling auto-start for game ${gameObj.code} in 10000ms`);
-          this.alreadyScheduledForAutoStart.set(gameIdStr, true);
-          this.scheduleAutoStart(gameObj._id, 10000);
+        gameObj.restartCooldownRemaining = restartCooldownRemaining;
+        gameObj.hasRestartCooldown = true;
+        gameObj.hasAutoStartTimer = false;
+        gameObj.autoStartTimeRemaining = 0;
+        
+        console.log(`⏳ Game ${gameObj.code} in restart cooldown: ${Math.ceil(restartCooldownRemaining/1000)}s remaining`);
+        
+        // Schedule auto-start check after cooldown ends
+        if (!this.alreadyScheduledForAutoStart.has(gameObj._id.toString())) {
+          console.log(`⏰ Scheduling post-cooldown auto-start check for game ${gameObj.code} in ${restartCooldownRemaining}ms`);
+          this.alreadyScheduledForAutoStart.set(gameObj._id.toString(), true);
+          
+          setTimeout(() => {
+            this.alreadyScheduledForAutoStart.delete(gameObj._id.toString());
+            console.log(`🔄 Cooldown ended for game ${gameObj.code}, checking auto-start conditions`);
+            this.scheduleAutoStartCheck(gameObj._id);
+          }, restartCooldownRemaining);
         }
-      } else if (gameObj.autoStartEndTime <= now) {
-        // Auto-start time has passed - START THE GAME IMMEDIATELY
-        console.log(`🚀 AUTO-START TIME PASSED - Starting game ${gameObj.code} immediately`);
-        
-        // Clear the scheduled flag
-        const gameIdStr = gameObj._id.toString();
-        this.alreadyScheduledForAutoStart.delete(gameIdStr);
-        
-        this.autoStartGame(gameObj._id);
       } else {
-        gameObj.autoStartTimeRemaining = gameObj.autoStartEndTime - now;
-        gameObj.hasAutoStartTimer = true;
+        // Game is not in cooldown - proceed with normal auto-start
+        if (!gameObj.autoStartEndTime) {
+          const autoStartEndTime = new Date(now.getTime() + 10000);
+          gameObj.autoStartEndTime = autoStartEndTime;
+          gameObj.autoStartTimeRemaining = 10000;
+          gameObj.hasAutoStartTimer = true;
+          gameObj.hasRestartCooldown = false;
+          
+          // Only schedule auto-start if we haven't already scheduled it
+          const gameIdStr = gameObj._id.toString();
+          if (!this.alreadyScheduledForAutoStart.has(gameIdStr)) {
+            console.log(`⏰ Scheduling auto-start for game ${gameObj.code} in 10000ms`);
+            this.alreadyScheduledForAutoStart.set(gameIdStr, true);
+            this.scheduleAutoStart(gameObj._id, 10000);
+          }
+        } else if (gameObj.autoStartEndTime <= now) {
+          // Auto-start time has passed - START THE GAME IMMEDIATELY
+          console.log(`🚀 AUTO-START TIME PASSED - Starting game ${gameObj.code} immediately`);
+          
+          // Clear the scheduled flag
+          const gameIdStr = gameObj._id.toString();
+          this.alreadyScheduledForAutoStart.delete(gameIdStr);
+          
+          this.autoStartGame(gameObj._id);
+        } else {
+          gameObj.autoStartTimeRemaining = gameObj.autoStartEndTime - now;
+          gameObj.hasAutoStartTimer = true;
+          gameObj.hasRestartCooldown = false;
+        }
       }
     } else {
       gameObj.autoStartTimeRemaining = 0;
       gameObj.hasAutoStartTimer = false;
+      gameObj.hasRestartCooldown = false;
       
       // If we don't have enough players, clear any existing schedule
       const gameIdStr = gameObj._id.toString();
       this.alreadyScheduledForAutoStart.delete(gameIdStr);
     }
+  } else {
+    gameObj.autoStartTimeRemaining = 0;
+    gameObj.hasAutoStartTimer = false;
+    gameObj.hasRestartCooldown = false;
   }
 
   return gameObj;
@@ -1503,7 +1540,7 @@ static async refundAllPlayers(gameId, session) {
     }
   }
 
- static async autoRestartGame(gameId) {
+static async autoRestartGame(gameId) {
   try {
     console.log(`🔄 Auto-restarting game ${gameId}...`);
     
@@ -1522,14 +1559,15 @@ static async refundAllPlayers(gameId, session) {
     game.numbersCalled = [];
     game.winnerId = null;
     game.startedAt = null;
-    game.endedAt = null;
+    // DON'T clear endedAt - we need it to calculate restart cooldown
+    // game.endedAt = null; // REMOVE THIS LINE
     game.autoStartEndTime = null;
     
     await game.save();
     
     await BingoCard.deleteMany({ gameId });
     
-    console.log(`✅ Game ${game.code} restarted - waiting for players to select cards`);
+    console.log(`✅ Game ${game.code} restarted - waiting for players to select cards (60s cooldown before auto-start)`);
     
   } catch (error) {
     console.error('❌ Auto-restart error:', error);
