@@ -245,6 +245,7 @@ gameSchema.pre('save', function(next) {
       this.cardSelectionStartTime = null;
       this.cardSelectionEndTime = null;
       this.cooldownEndTime = null;
+      
       break;
   }
   
