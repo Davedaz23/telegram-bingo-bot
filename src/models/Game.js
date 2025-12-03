@@ -1,4 +1,4 @@
-// models/Game.js - UPDATED WITH NEW GAME LIFECYCLE
+// models/Game.js - SINGLE UPDATED VERSION (WITH FIXES)
 const mongoose = require('mongoose');
 
 const gameSchema = new mongoose.Schema({
@@ -9,7 +9,7 @@ const gameSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE', 'FINISHED', 'CANCELLED', 'COOLDOWN'],
+    enum: ['WAITING', 'WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE', 'FINISHED', 'CANCELLED', 'COOLDOWN'],
     default: 'WAITING_FOR_PLAYERS'
   },
   maxPlayers: {
@@ -79,6 +79,11 @@ const gameSchema = new mongoose.Schema({
         ret.selectedCards = {};
       }
       
+      // Backward compatibility: map old 'WAITING' to 'WAITING_FOR_PLAYERS'
+      if (ret.status === 'WAITING') {
+        ret.status = 'WAITING_FOR_PLAYERS';
+      }
+      
       // Add virtual fields for timing
       
       // Auto-start timer
@@ -116,9 +121,12 @@ const gameSchema = new mongoose.Schema({
 gameSchema.virtual('canJoin').get(function() {
   const now = new Date();
   
+  // Handle backward compatibility
+  const status = this.status === 'WAITING' ? 'WAITING_FOR_PLAYERS' : this.status;
+  
   // Can only join during WAITING_FOR_PLAYERS phase
   // NOT during CARD_SELECTION or ACTIVE phases
-  return this.status === 'WAITING_FOR_PLAYERS' && 
+  return status === 'WAITING_FOR_PLAYERS' && 
          (!this.cardSelectionEndTime || now < this.cardSelectionEndTime);
 });
 
@@ -126,9 +134,12 @@ gameSchema.virtual('canJoin').get(function() {
 gameSchema.virtual('canSelectCard').get(function() {
   const now = new Date();
   
+  // Handle backward compatibility
+  const status = this.status === 'WAITING' ? 'WAITING_FOR_PLAYERS' : this.status;
+  
   // Can select card during WAITING_FOR_PLAYERS or CARD_SELECTION phases
   // But only before card selection ends
-  return (this.status === 'WAITING_FOR_PLAYERS' || this.status === 'CARD_SELECTION') &&
+  return (status === 'WAITING_FOR_PLAYERS' || status === 'CARD_SELECTION') &&
          (!this.cardSelectionEndTime || now < this.cardSelectionEndTime);
 });
 
@@ -142,33 +153,17 @@ gameSchema.virtual('isGameFinished').get(function() {
   return this.status === 'FINISHED' || this.status === 'COOLDOWN';
 });
 
-// Virtual for isCardSelectionActive (alternative calculation)
-gameSchema.virtual('isCardSelectionActiveAlt').get(function() {
+// Virtual for isCardSelectionActive
+gameSchema.virtual('isCardSelectionActive').get(function() {
   const now = new Date();
-  return (this.status === 'WAITING_FOR_PLAYERS' || this.status === 'CARD_SELECTION') &&
-         this.cardSelectionEndTime && now < this.cardSelectionEndTime;
+  const status = this.status === 'WAITING' ? 'WAITING_FOR_PLAYERS' : this.status;
+  return (status === 'CARD_SELECTION') && this.cardSelectionEndTime && now < this.cardSelectionEndTime;
 });
 
-// Virtual for autoStartTimeRemaining (alternative calculation)
-gameSchema.virtual('autoStartTimeRemainingAlt').get(function() {
+// Virtual for autoStartTimeRemaining
+gameSchema.virtual('autoStartTimeRemaining').get(function() {
   if (this.autoStartEndTime && this.autoStartEndTime > new Date()) {
     return this.autoStartEndTime - new Date();
-  }
-  return 0;
-});
-
-// Virtual for cardSelectionTimeRemaining
-gameSchema.virtual('cardSelectionTimeRemaining').get(function() {
-  if (this.cardSelectionEndTime && this.cardSelectionEndTime > new Date()) {
-    return this.cardSelectionEndTime - new Date();
-  }
-  return 0;
-});
-
-// Virtual for cooldownTimeRemaining
-gameSchema.virtual('cooldownTimeRemaining').get(function() {
-  if (this.cooldownEndTime && this.cooldownEndTime > new Date()) {
-    return this.cooldownEndTime - new Date();
   }
   return 0;
 });
@@ -199,10 +194,18 @@ gameSchema.index({ status: 1, cardSelectionEndTime: 1 });
 gameSchema.pre('save', function(next) {
   const now = new Date();
   
+  // Backward compatibility: map old 'WAITING' to 'WAITING_FOR_PLAYERS'
+  if (this.status === 'WAITING') {
+    this.status = 'WAITING_FOR_PLAYERS';
+  }
+  
   // Clear timing fields based on status
   switch (this.status) {
     case 'WAITING_FOR_PLAYERS':
-      // Keep autoStartEndTime if set, clear others
+      // Keep autoStartEndTime if set, set default if not
+      if (!this.autoStartEndTime) {
+        this.autoStartEndTime = new Date(now.getTime() + (30 * 1000)); // 30 seconds default
+      }
       this.cardSelectionStartTime = null;
       this.cardSelectionEndTime = null;
       this.cooldownEndTime = null;
@@ -214,7 +217,7 @@ gameSchema.pre('save', function(next) {
         this.cardSelectionStartTime = now;
       }
       if (!this.cardSelectionEndTime) {
-        this.cardSelectionEndTime = new Date(now.getTime() + (30 * 1000)); // 30 seconds default
+        this.cardSelectionEndTime = new Date(now.getTime() + (60 * 1000)); // 60 seconds for card selection
       }
       this.autoStartEndTime = null;
       this.cooldownEndTime = null;
@@ -226,6 +229,7 @@ gameSchema.pre('save', function(next) {
       this.cardSelectionStartTime = null;
       this.cardSelectionEndTime = null;
       this.cooldownEndTime = null;
+      this.startedAt = this.startedAt || now;
       break;
       
     case 'COOLDOWN':
@@ -236,6 +240,7 @@ gameSchema.pre('save', function(next) {
       this.autoStartEndTime = null;
       this.cardSelectionStartTime = null;
       this.cardSelectionEndTime = null;
+      this.endedAt = this.endedAt || now;
       break;
       
     case 'FINISHED':
@@ -245,7 +250,7 @@ gameSchema.pre('save', function(next) {
       this.cardSelectionStartTime = null;
       this.cardSelectionEndTime = null;
       this.cooldownEndTime = null;
-      
+      this.endedAt = this.endedAt || now;
       break;
   }
   
@@ -259,4 +264,5 @@ gameSchema.pre('save', function(next) {
   next();
 });
 
+// SINGLE MODEL EXPORT - REMOVE THE DUPLICATE AT THE BOTTOM
 module.exports = mongoose.model('Game', gameSchema);
