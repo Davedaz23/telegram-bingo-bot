@@ -100,6 +100,29 @@ static async getMainGame() {
       console.error('❌ Error managing game lifecycle:', error);
     }
   }
+   static async createNewGame() {
+    try {
+      const gameCode = GameUtils.generateGameCode();
+      
+      const game = new Game({
+        code: gameCode,
+        maxPlayers: 10,
+        isPrivate: false,
+        numbersCalled: [],
+        status: 'WAITING_FOR_PLAYERS',
+        currentPlayers: 0,
+        isAutoCreated: true
+      });
+
+      await game.save();
+      console.log(`🎯 Created new game: ${gameCode} - Waiting for players`);
+      
+      return this.getGameWithDetails(game._id);
+    } catch (error) {
+      console.error('❌ Error creating new game:', error);
+      throw error;
+    }
+  }
     static async beginCardSelection(gameId) {
     const session = await mongoose.startSession();
     session.startTransaction();
