@@ -792,7 +792,38 @@ router.post('/:id/end', async (req, res) => {
     });
   }
 });
+// Get game participants
+router.get('/:id/participants', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    console.log(`👥 Get game participants: gameId=${id}`);
+    
+    const game = await GameService.getGameWithDetails(id);
+    
+    if (!game) {
+      return res.status(404).json({
+        success: false,
+        error: 'Game not found'
+      });
+    }
 
+    // Get participants from the formatted game
+    const participants = game.participants || [];
+    
+    res.json({
+      success: true,
+      participants,
+      count: participants.length
+    });
+  } catch (error) {
+    console.error('❌ Get participants error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 // Get game statistics
 router.get('/:id/stats', async (req, res) => {
   try {
