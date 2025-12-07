@@ -280,204 +280,204 @@ Keep playing to improve your stats! 🎯
         await ctx.reply('❌ Error loading admin panel: ' + error.message);
       }
     });
-this.bot.command('processsms', async (ctx) => {
-  if (ctx.from.id.toString() !== this.adminId) {
-    await ctx.reply('❌ Access denied');
-    return;
-  }
+    this.bot.command('processsms', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.reply('❌ Access denied');
+        return;
+      }
 
-  try {
-    await ctx.reply('🔄 Processing all received SMS messages...');
-    
-    const result = await WalletService.autoProcessReceivedSMS();
-    
-    await ctx.replyWithMarkdown(
-      `📊 *SMS Processing Complete*\n\n*Total Received SMS:* ${result.total}\n*Successfully Processed:* ${result.processed}\n*Auto-Approved:* ${result.approved}`
-    );
-  } catch (error) {
-    console.error('Process SMS error:', error);
-    await ctx.reply('❌ Error processing SMS: ' + error.message);
-  }
-});
+      try {
+        await ctx.reply('🔄 Processing all received SMS messages...');
 
-// View received SMS
-this.bot.command('smslist', async (ctx) => {
-  if (ctx.from.id.toString() !== this.adminId) {
-    await ctx.reply('❌ Access denied');
-    return;
-  }
+        const result = await WalletService.autoProcessReceivedSMS();
 
-  try {
-    const page = parseInt(ctx.message.text.split(' ')[1]) || 1;
-    const result = await WalletService.getAllSMSDeposits(page, 10);
+        await ctx.replyWithMarkdown(
+          `📊 *SMS Processing Complete*\n\n*Total Received SMS:* ${result.total}\n*Successfully Processed:* ${result.processed}\n*Auto-Approved:* ${result.approved}`
+        );
+      } catch (error) {
+        console.error('Process SMS error:', error);
+        await ctx.reply('❌ Error processing SMS: ' + error.message);
+      }
+    });
 
-    let message = `📱 *All SMS Deposits - Page ${page}*\n\n`;
+    // View received SMS
+    this.bot.command('smslist', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.reply('❌ Access denied');
+        return;
+      }
 
-    if (result.deposits.length === 0) {
-      message += `No SMS deposits found.\n`;
-    } else {
-      result.deposits.forEach((sms, index) => {
-        const statusEmoji = sms.status === 'APPROVED' ? '✅' :
-          sms.status === 'REJECTED' ? '❌' :
-          sms.status === 'AUTO_APPROVED' ? '🤖' :
-          sms.status === 'RECEIVED' ? '📥' : '⏳';
-        
-        const userName = sms.userId?.firstName || sms.userId?.username || 'Unknown User';
+      try {
+        const page = parseInt(ctx.message.text.split(' ')[1]) || 1;
+        const result = await WalletService.getAllSMSDeposits(page, 10);
 
-        message += `${statusEmoji} $${sms.extractedAmount} - ${userName}\n`;
-        message += `   Method: ${sms.paymentMethod} | Status: ${sms.status}\n`;
-        message += `   Time: ${new Date(sms.createdAt).toLocaleDateString()}\n`;
+        let message = `📱 *All SMS Deposits - Page ${page}*\n\n`;
 
-        if (sms.status === 'RECEIVED' || sms.status === 'PENDING') {
-          message += `   [Approve: /approvesms_${sms._id}] [Reject: /rejectsms_${sms._id}]\n`;
+        if (result.deposits.length === 0) {
+          message += `No SMS deposits found.\n`;
+        } else {
+          result.deposits.forEach((sms, index) => {
+            const statusEmoji = sms.status === 'APPROVED' ? '✅' :
+              sms.status === 'REJECTED' ? '❌' :
+                sms.status === 'AUTO_APPROVED' ? '🤖' :
+                  sms.status === 'RECEIVED' ? '📥' : '⏳';
+
+            const userName = sms.userId?.firstName || sms.userId?.username || 'Unknown User';
+
+            message += `${statusEmoji} $${sms.extractedAmount} - ${userName}\n`;
+            message += `   Method: ${sms.paymentMethod} | Status: ${sms.status}\n`;
+            message += `   Time: ${new Date(sms.createdAt).toLocaleDateString()}\n`;
+
+            if (sms.status === 'RECEIVED' || sms.status === 'PENDING') {
+              message += `   [Approve: /approvesms_${sms._id}] [Reject: /rejectsms_${sms._id}]\n`;
+            }
+
+            message += `   [View: /viewsms_${sms._id}]\n\n`;
+          });
         }
 
-        message += `   [View: /viewsms_${sms._id}]\n\n`;
-      });
-    }
+        message += `\nPage ${page} of ${result.pagination.pages}`;
 
-    message += `\nPage ${page} of ${result.pagination.pages}`;
+        const keyboard = [];
+        if (page > 1) {
+          keyboard.push(Markup.button.callback('⬅️ Previous', `sms_page_${page - 1}`));
+        }
+        if (page < result.pagination.pages) {
+          keyboard.push(Markup.button.callback('Next ➡️', `sms_page_${page + 1}`));
+        }
 
-    const keyboard = [];
-    if (page > 1) {
-      keyboard.push(Markup.button.callback('⬅️ Previous', `sms_page_${page - 1}`));
-    }
-    if (page < result.pagination.pages) {
-      keyboard.push(Markup.button.callback('Next ➡️', `sms_page_${page + 1}`));
-    }
-
-    if (keyboard.length > 0) {
-      await ctx.replyWithMarkdown(message, Markup.inlineKeyboard(keyboard));
-    } else {
-      await ctx.replyWithMarkdown(message);
-    }
-  } catch (error) {
-    console.error('SMS list error:', error);
-    await ctx.reply('❌ Error loading SMS list: ' + error.message);
-  }
-});
-
-// Update approve SMS command to handle RECEIVED status
-this.bot.command(/^approvesms_(.+)/, async (ctx) => {
-  if (ctx.from.id.toString() !== this.adminId) {
-    await ctx.reply('❌ Access denied');
-    return;
-  }
-
-  const smsId = ctx.match[1];
-
-  try {
-    // First, get SMS deposit details to show confirmation
-    const smsDeposit = await WalletService.getSMSDepositById(smsId);
-    
-    if (!smsDeposit) {
-      await ctx.reply('❌ SMS deposit not found');
-      return;
-    }
-
-    const userName = smsDeposit.userId?.firstName || smsDeposit.userId?.username || 'Unknown User';
-    const amount = smsDeposit.extractedAmount;
-
-    // Show confirmation
-    await ctx.replyWithMarkdown(
-      `⚠️ *Confirm Approval*\n\n*User:* ${userName}\n*Amount:* $${amount}\n*Method:* ${smsDeposit.paymentMethod}\n\nAre you sure you want to approve this deposit?`,
-      Markup.inlineKeyboard([
-        [Markup.button.callback('✅ Yes, Approve', `confirm_approve_${smsId}`)],
-        [Markup.button.callback('❌ Cancel', `cancel_approve_${smsId}`)]
-      ])
-    );
-
-  } catch (error) {
-    await ctx.reply(`❌ Error: ${error.message}`);
-  }
-});
-
-// Add confirmation handler
-this.bot.action(/confirm_approve_(.+)/, async (ctx) => {
-  if (ctx.from.id.toString() !== this.adminId) {
-    await ctx.answerCbQuery('❌ Access denied');
-    return;
-  }
-
-  const smsId = ctx.match[1];
-  
-  try {
-    await ctx.answerCbQuery('🔄 Approving deposit...');
-    
-    const result = await WalletService.approveReceivedSMS(smsId, ctx.from.id);
-
-    await ctx.editMessageText(
-      `✅ *SMS Deposit Approved!*\n\n*User:* ${result.user.firstName || result.user.username}\n*Amount:* $${result.transaction.amount}\n*New Balance:* $${result.wallet.balance}`,
-      { parse_mode: 'Markdown' }
-    );
-
-    // Notify user
-    await this.bot.telegram.sendMessage(
-      result.user.telegramId,
-      `🎉 *Deposit Approved!*\n\nYour deposit of $${result.transaction.amount} has been approved!\n*New Balance:* $${result.wallet.balance}\n\nReady to play some Bingo? 🎯`,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.webApp('🎮 Play Bingo', 'https://bingominiapp.vercel.app')]
-        ])
+        if (keyboard.length > 0) {
+          await ctx.replyWithMarkdown(message, Markup.inlineKeyboard(keyboard));
+        } else {
+          await ctx.replyWithMarkdown(message);
+        }
+      } catch (error) {
+        console.error('SMS list error:', error);
+        await ctx.reply('❌ Error loading SMS list: ' + error.message);
       }
-    );
+    });
 
-  } catch (error) {
-    await ctx.answerCbQuery(`❌ Error: ${error.message}`);
-    await ctx.editMessageText(`❌ Failed to approve: ${error.message}`);
-  }
-});
+    // Update approve SMS command to handle RECEIVED status
+    this.bot.command(/^approvesms_(.+)/, async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.reply('❌ Access denied');
+        return;
+      }
 
-// Add cancel handler
-this.bot.action(/cancel_approve_(.+)/, async (ctx) => {
-  await ctx.answerCbQuery('Approval cancelled');
-  await ctx.deleteMessage();
-});
+      const smsId = ctx.match[1];
 
-// NEW: Batch approve command
-this.bot.command('batchapprove', async (ctx) => {
-  if (ctx.from.id.toString() !== this.adminId) {
-    await ctx.reply('❌ Access denied');
-    return;
-  }
+      try {
+        // First, get SMS deposit details to show confirmation
+        const smsDeposit = await WalletService.getSMSDepositById(smsId);
 
-  try {
-    // Get all received SMS deposits
-    const receivedSMS = await WalletService.getReceivedSMSDeposits();
-    
-    if (receivedSMS.length === 0) {
-      await ctx.reply('✅ No received SMS deposits to approve.');
-      return;
-    }
+        if (!smsDeposit) {
+          await ctx.reply('❌ SMS deposit not found');
+          return;
+        }
 
-    const smsIds = receivedSMS.map(sms => sms._id);
-    const result = await WalletService.batchApproveSMSDeposits(smsIds, ctx.from.id);
+        const userName = smsDeposit.userId?.firstName || smsDeposit.userId?.username || 'Unknown User';
+        const amount = smsDeposit.extractedAmount;
 
-    let message = `🔄 *Batch Approval Results*\n\n`;
-    message += `✅ Successful: ${result.successful.length}\n`;
-    message += `❌ Failed: ${result.failed.length}\n\n`;
+        // Show confirmation
+        await ctx.replyWithMarkdown(
+          `⚠️ *Confirm Approval*\n\n*User:* ${userName}\n*Amount:* $${amount}\n*Method:* ${smsDeposit.paymentMethod}\n\nAre you sure you want to approve this deposit?`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback('✅ Yes, Approve', `confirm_approve_${smsId}`)],
+            [Markup.button.callback('❌ Cancel', `cancel_approve_${smsId}`)]
+          ])
+        );
 
-    if (result.successful.length > 0) {
-      message += `*Approved Deposits:*\n`;
-      result.successful.forEach((success, index) => {
-        message += `${index + 1}. $${success.amount} - User ${success.user}\n`;
-      });
-    }
+      } catch (error) {
+        await ctx.reply(`❌ Error: ${error.message}`);
+      }
+    });
 
-    if (result.failed.length > 0) {
-      message += `\n*Failed:*\n`;
-      result.failed.forEach((fail, index) => {
-        message += `${index + 1}. ${fail.smsDepositId} - ${fail.error}\n`;
-      });
-    }
+    // Add confirmation handler
+    this.bot.action(/confirm_approve_(.+)/, async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
 
-    await ctx.replyWithMarkdown(message);
+      const smsId = ctx.match[1];
 
-  } catch (error) {
-    await ctx.reply(`❌ Batch approval error: ${error.message}`);
-  }
-});
+      try {
+        await ctx.answerCbQuery('🔄 Approving deposit...');
+
+        const result = await WalletService.approveReceivedSMS(smsId, ctx.from.id);
+
+        await ctx.editMessageText(
+          `✅ *SMS Deposit Approved!*\n\n*User:* ${result.user.firstName || result.user.username}\n*Amount:* $${result.transaction.amount}\n*New Balance:* $${result.wallet.balance}`,
+          { parse_mode: 'Markdown' }
+        );
+
+        // Notify user
+        await this.bot.telegram.sendMessage(
+          result.user.telegramId,
+          `🎉 *Deposit Approved!*\n\nYour deposit of $${result.transaction.amount} has been approved!\n*New Balance:* $${result.wallet.balance}\n\nReady to play some Bingo? 🎯`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.webApp('🎮 Play Bingo', 'https://bingominiapp.vercel.app')]
+            ])
+          }
+        );
+
+      } catch (error) {
+        await ctx.answerCbQuery(`❌ Error: ${error.message}`);
+        await ctx.editMessageText(`❌ Failed to approve: ${error.message}`);
+      }
+    });
+
+    // Add cancel handler
+    this.bot.action(/cancel_approve_(.+)/, async (ctx) => {
+      await ctx.answerCbQuery('Approval cancelled');
+      await ctx.deleteMessage();
+    });
+
+    // NEW: Batch approve command
+    this.bot.command('batchapprove', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.reply('❌ Access denied');
+        return;
+      }
+
+      try {
+        // Get all received SMS deposits
+        const receivedSMS = await WalletService.getReceivedSMSDeposits();
+
+        if (receivedSMS.length === 0) {
+          await ctx.reply('✅ No received SMS deposits to approve.');
+          return;
+        }
+
+        const smsIds = receivedSMS.map(sms => sms._id);
+        const result = await WalletService.batchApproveSMSDeposits(smsIds, ctx.from.id);
+
+        let message = `🔄 *Batch Approval Results*\n\n`;
+        message += `✅ Successful: ${result.successful.length}\n`;
+        message += `❌ Failed: ${result.failed.length}\n\n`;
+
+        if (result.successful.length > 0) {
+          message += `*Approved Deposits:*\n`;
+          result.successful.forEach((success, index) => {
+            message += `${index + 1}. $${success.amount} - User ${success.user}\n`;
+          });
+        }
+
+        if (result.failed.length > 0) {
+          message += `\n*Failed:*\n`;
+          result.failed.forEach((fail, index) => {
+            message += `${index + 1}. ${fail.smsDepositId} - ${fail.error}\n`;
+          });
+        }
+
+        await ctx.replyWithMarkdown(message);
+
+      } catch (error) {
+        await ctx.reply(`❌ Batch approval error: ${error.message}`);
+      }
+    });
     // SMS List command
     this.bot.command('smslist', async (ctx) => {
       if (ctx.from.id.toString() !== this.adminId) {
@@ -1169,7 +1169,7 @@ Keep playing to improve your stats! 🎯
 
     // ========== TEXT HANDLER (MUST BE LAST) ==========
 
- this.bot.on('text', async (ctx) => {
+   this.bot.on('text', async (ctx) => {
   console.log('📝 Text received:', ctx.message.text.substring(0, 100));
 
   // Handle SMS deposits with payment method selected
@@ -1181,38 +1181,38 @@ Keep playing to improve your stats! 🎯
 
     try {
       await UserService.findOrCreateUser(ctx.from);
-
-      // Store SMS first
-      const storedSMS = await WalletService.storeSMSMessage(
-        ctx.from.id, 
-        smsText, 
-        paymentMethod
-      );
-
-      // Then process it immediately
-      const result = await WalletService.processSMSDeposit(
-        ctx.from.id,
-        paymentMethod,
+      
+      // Use new matching system
+      const result = await WalletService.matchAndAutoApproveSMS(
         smsText,
-        true
+        ctx.from.id,
+        paymentMethod
       );
 
       delete ctx.session.pendingDepositMethod;
 
-      if (result.autoApproved) {
+      if (result.status === 'AUTO_APPROVED') {
         await ctx.replyWithMarkdown(
-          `✅ *Deposit Auto-Approved!*\n\n*Amount:* $${result.transaction.amount}\n*Method:* ${paymentMethod}\n*New Balance:* $${result.wallet.balance}\n\nYour deposit was automatically processed! 🎉`,
+          `✅ *Deposit Auto-Approved!*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n\nYour deposit was automatically matched and approved! 🎉`,
           Markup.inlineKeyboard([
             [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
             [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
           ])
         );
-      } else {
+      } else if (result.metadata?.matched) {
         await ctx.replyWithMarkdown(
-          `⏳ *Deposit Under Review*\n\n*Amount:* $${result.transaction.amount}\n*Method:* ${paymentMethod}\n*Status:* Pending Manual Approval\n\nYour deposit has been recorded and is being reviewed.`,
+          `⏳ *Deposit Matched, Awaiting Confirmation*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n\nYour SMS has been matched with a corresponding transaction. Awaiting final confirmation.`,
           Markup.inlineKeyboard([
             [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
             [Markup.button.callback('🎮 Play Bingo', 'back_to_start')]
+          ])
+        );
+      } else {
+        await ctx.replyWithMarkdown(
+          `📱 *SMS Received & Stored*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n\nYour SMS has been received and will be processed when a matching transaction is found.`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback('💼 Check Status', 'show_wallet')],
+            [Markup.button.callback('💰 New Deposit', 'show_deposit')]
           ])
         );
       }
@@ -1230,55 +1230,47 @@ Keep playing to improve your stats! 🎯
     return;
   }
 
-  // Handle automatic SMS detection and storage
-  const text = ctx.message.text;
-  if (this.looksLikeBankSMS(text)) {
-    console.log('🏦 Detected bank SMS, storing immediately...');
+      // Handle automatic SMS detection and storage
+      const text = ctx.message.text;
+        if (this.looksLikeBankSMS(text)) {
+    console.log('🏦 Detected bank SMS, using matching system...');
     
     try {
       await UserService.findOrCreateUser(ctx.from);
       
-      // Store the SMS immediately
-      const storedSMS = await WalletService.storeSMSMessage(ctx.from.id, text);
+      // Use matching system
+      const result = await WalletService.matchAndAutoApproveSMS(
+        text,
+        ctx.from.id,
+        'UNKNOWN'
+      );
       
-      console.log('✅ SMS stored successfully:', storedSMS._id);
-      
-      // Try to auto-process immediately
-      try {
-        const result = await WalletService.autoProcessReceivedSMS();
-        
-        if (result.processed > 0) {
-          await ctx.replyWithMarkdown(
-            `📱 *SMS Processed!*\n\nYour bank SMS has been processed automatically.\n\n*Amount:* $${storedSMS.extractedAmount}\n*Method:* ${storedSMS.paymentMethod}\n\nCheck your wallet for the updated balance.`,
-            Markup.inlineKeyboard([
-              [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
-              [Markup.button.webApp('🎮 Play Bingo', 'https://bingominiapp.vercel.app')]
-            ])
-          );
-        } else {
-          await ctx.replyWithMarkdown(
-            `📱 *SMS Received!*\n\nYour bank SMS has been received and will be processed shortly.\n\n*Amount:* $${storedSMS.extractedAmount}\n*Method:* ${storedSMS.paymentMethod}\n\nWe will notify you once processed.`,
-            Markup.inlineKeyboard([
-              [Markup.button.callback('💼 Check Status', 'show_wallet')],
-              [Markup.button.callback('💰 New Deposit', 'show_deposit')]
-            ])
-          );
-        }
-      } catch (processError) {
-        console.log('⚠️ Auto-processing in progress:', processError.message);
+      if (result.status === 'AUTO_APPROVED') {
         await ctx.replyWithMarkdown(
-          `📱 *SMS Received!*\n\nYour bank SMS has been stored successfully.\n\n*Amount:* $${storedSMS.extractedAmount}\n*Method:* ${storedSMS.paymentMethod}\n\nProcessing will complete shortly.`,
+          `✅ *SMS Auto-Matched & Approved!*\n\n*Amount:* $${result.extractedAmount}\n\nYour deposit was automatically matched and approved! 🎉`,
           Markup.inlineKeyboard([
             [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+          ])
+        );
+      } else {
+        await ctx.replyWithMarkdown(
+          `📱 *SMS Received*\n\n*Amount:* $${result.extractedAmount}\n\nYour SMS has been received. ${
+            result.metadata?.smsType === 'SENDER' 
+              ? 'We\'ll match it when we receive the corresponding credit SMS.'
+              : 'We\'ll match it with existing sender SMS.'
+          }`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback('💼 Check Status', 'show_wallet')],
             [Markup.button.callback('💰 New Deposit', 'show_deposit')]
           ])
         );
       }
       
     } catch (error) {
-      console.error('❌ Error storing SMS:', error);
+      console.error('❌ Error processing SMS:', error);
       await ctx.reply(
-        `❌ Failed to store your SMS. Please try the deposit menu.`,
+        `❌ Failed to process your SMS. Please try the deposit menu.`,
         Markup.inlineKeyboard([
           [Markup.button.callback('💰 Use Deposit Menu', 'show_deposit')]
         ])
@@ -1287,79 +1279,79 @@ Keep playing to improve your stats! 🎯
     return;
   }
 
-  // Handle admin commands
-  if (text.startsWith('/admin') ||
-      text.startsWith('/smslist') ||
-      text.startsWith('/viewsms_') ||
-      text.startsWith('/approvesms_') ||
-      text.startsWith('/rejectsms_') ||
-      text.startsWith('/autoapprove') ||
-      text.startsWith('/pending') ||
-      text.startsWith('/approve_') ||
-      text.startsWith('/processsms') ||
-      text.startsWith('/received')) {
-    return;
+      // Handle admin commands
+      if (text.startsWith('/admin') ||
+        text.startsWith('/smslist') ||
+        text.startsWith('/viewsms_') ||
+        text.startsWith('/approvesms_') ||
+        text.startsWith('/rejectsms_') ||
+        text.startsWith('/autoapprove') ||
+        text.startsWith('/pending') ||
+        text.startsWith('/approve_') ||
+        text.startsWith('/processsms') ||
+        text.startsWith('/received')) {
+        return;
+      }
+
+      // Handle unknown commands
+      if (ctx.message.text.startsWith('/')) {
+        await ctx.replyWithMarkdown(
+          `❓ *Unknown Command*\n\nAvailable commands:\n/start, /help, /deposit, /wallet, /stats`,
+          Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+            [Markup.button.callback('📋 Show All Commands', 'show_help')]
+          ])
+        );
+      } else {
+        await ctx.replyWithMarkdown(
+          'Want to play some Bingo? 🎯 Use /help to see all commands!',
+          Markup.inlineKeyboard([
+            [Markup.button.webApp('🎮 YES, PLAY BINGO!', 'https://bingominiapp.vercel.app')],
+            [Markup.button.callback('📋 Commands Help', 'show_help')]
+          ])
+        );
+      }
+    });
   }
+  looksLikeBankSMS(text) {
+    const sms = text.toLowerCase();
 
-  // Handle unknown commands
-  if (ctx.message.text.startsWith('/')) {
-    await ctx.replyWithMarkdown(
-      `❓ *Unknown Command*\n\nAvailable commands:\n/start, /help, /deposit, /wallet, /stats`,
-      Markup.inlineKeyboard([
-        [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
-        [Markup.button.callback('📋 Show All Commands', 'show_help')]
-      ])
-    );
-  } else {
-    await ctx.replyWithMarkdown(
-      'Want to play some Bingo? 🎯 Use /help to see all commands!',
-      Markup.inlineKeyboard([
-        [Markup.button.webApp('🎮 YES, PLAY BINGO!', 'https://bingominiapp.vercel.app')],
-        [Markup.button.callback('📋 Commands Help', 'show_help')]
-      ])
-    );
+    // Bank SMS patterns for Ethiopian banks
+    const bankPatterns = [
+      // Transaction patterns
+      /sent.*etb|birr|br/i,
+      /received.*etb|birr|br/i,
+      /transfer.*etb|birr|br/i,
+      /transaction.*etb|birr|br/i,
+      /deposit.*etb|birr|br/i,
+
+      // Bank names
+      /cbe.*bank/i,
+      /awash.*bank/i,
+      /dashen.*bank/i,
+      /cbe.*birr/i,
+      /telebirr/i,
+
+      // Common SMS formats
+      /dear.*customer/i,
+      /txn.*id/i,
+      /transaction.*id/i,
+      /balance.*etb|birr|br/i,
+      /amount.*etb|birr|br/i
+    ];
+
+    // Check if text matches any bank pattern
+    const isBankSMS = bankPatterns.some(pattern => pattern.test(sms));
+
+    // Additional checks for common SMS characteristics
+    const hasAmount = /\d+\.?\d*\s*(ETB|Birr|Br)/i.test(text);
+    const hasTransactionWords = text.includes('Txn') || text.includes('Transaction') || text.includes('sent') || text.includes('received');
+    const reasonableLength = text.length > 20 && text.length < 500;
+
+    console.log(`🔍 SMS Detection: BankPattern=${isBankSMS}, HasAmount=${hasAmount}, HasTransaction=${hasTransactionWords}, LengthOK=${reasonableLength}`);
+
+    return isBankSMS || (hasAmount && hasTransactionWords && reasonableLength);
   }
-});
-  }
-looksLikeBankSMS(text) {
-  const sms = text.toLowerCase();
-  
-  // Bank SMS patterns for Ethiopian banks
-  const bankPatterns = [
-    // Transaction patterns
-    /sent.*etb|birr|br/i,
-    /received.*etb|birr|br/i, 
-    /transfer.*etb|birr|br/i,
-    /transaction.*etb|birr|br/i,
-    /deposit.*etb|birr|br/i,
-    
-    // Bank names
-    /cbe.*bank/i,
-    /awash.*bank/i,
-    /dashen.*bank/i,
-    /cbe.*birr/i,
-    /telebirr/i,
-    
-    // Common SMS formats
-    /dear.*customer/i,
-    /txn.*id/i,
-    /transaction.*id/i,
-    /balance.*etb|birr|br/i,
-    /amount.*etb|birr|br/i
-  ];
-
-  // Check if text matches any bank pattern
-  const isBankSMS = bankPatterns.some(pattern => pattern.test(sms));
-  
-  // Additional checks for common SMS characteristics
-  const hasAmount = /\d+\.?\d*\s*(ETB|Birr|Br)/i.test(text);
-  const hasTransactionWords = text.includes('Txn') || text.includes('Transaction') || text.includes('sent') || text.includes('received');
-  const reasonableLength = text.length > 20 && text.length < 500;
-
-  console.log(`🔍 SMS Detection: BankPattern=${isBankSMS}, HasAmount=${hasAmount}, HasTransaction=${hasTransactionWords}, LengthOK=${reasonableLength}`);
-
-  return isBankSMS || (hasAmount && hasTransactionWords && reasonableLength);
-}
   async notifyAdminAboutDeposit(smsDeposit, user) {
     try {
       const message = `📥 *New SMS Deposit Needs Review*\n\n` +

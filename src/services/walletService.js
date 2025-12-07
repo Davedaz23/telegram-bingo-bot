@@ -61,56 +61,924 @@ static async resolveUserId(userId) {
       throw error;
     }
   }
+  // Add these new methods to your WalletService class:
+
+// NEW: Enhanced SMS matching system for automatic approval
+static async matchAndAutoApproveSMS(smsText, telegramId, paymentMethod) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    console.log('🔄 Starting SMS matching and auto-approval...');
+    
+    // First, store the SMS (this could be either sender or receiver SMS)
+    const smsDeposit = await this.storeSMSMessage(telegramId, smsText, paymentMethod);
+    
+    // Analyze SMS type
+    const smsAnalysis = this.analyzeSMSType(smsText);
+    console.log('🔍 SMS Analysis:', smsAnalysis);
+    
+    if (smsAnalysis.type === 'SENDER') {
+      console.log('📤 This is a SENDER SMS (user sent money)');
+      
+      // Extract key identifiers
+      const senderIdentifiers = this.extractTransactionIdentifiers(smsText);
+      console.log('🔑 Sender identifiers:', senderIdentifiers);
+      
+      // Store in metadata for future matching
+      smsDeposit.metadata.smsType = 'SENDER';
+      smsDeposit.metadata.transactionIdentifiers = senderIdentifiers;
+      smsDeposit.metadata.recipientName = senderIdentifiers.recipientName;
+      smsDeposit.status = 'RECEIVED_WAITING_MATCH';
+      await smsDeposit.save({ session });
+      
+      // Try to match with existing RECEIVER SMS
+      await this.tryAutoMatchSMS(smsDeposit, smsText);
+      
+    } else if (smsAnalysis.type === 'RECEIVER') {
+      console.log('📥 This is a RECEIVER SMS (admin received money)');
+      
+      // Extract key identifiers
+      const receiverIdentifiers = this.extractTransactionIdentifiers(smsText);
+      console.log('🔑 Receiver identifiers:', receiverIdentifiers);
+      
+      // Store in metadata
+      smsDeposit.metadata.smsType = 'RECEIVER';
+      smsDeposit.metadata.transactionIdentifiers = receiverIdentifiers;
+      smsDeposit.metadata.senderName = receiverIdentifiers.senderName;
+      smsDeposit.status = 'RECEIVED_WAITING_MATCH';
+      await smsDeposit.save({ session });
+      
+      // Try to match with existing SENDER SMS
+      await this.tryAutoMatchSMS(smsDeposit, smsText);
+      
+    } else {
+      console.log('❓ Unknown SMS type, storing as regular deposit');
+    }
+    
+    await session.commitTransaction();
+    return smsDeposit;
+    
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Error in SMS matching:', error);
+    throw error;
+  } finally {
+    session.endSession();
+  }
+}
+
+// NEW: Analyze SMS type (sender vs receiver)
+static analyzeSMSType(smsText) {
+  const sms = smsText.toLowerCase();
+  
+  // Sender SMS patterns (user sent money)
+  const senderPatterns = [
+    /you have transfered.*etb.*to/i,
+    /your account has been debited/i,
+    /sent.*etb.*to/i,
+    /transfer.*to.*account/i,
+    /you have sent.*birr.*to/i
+  ];
+  
+  // Receiver SMS patterns (admin received money)
+  const receiverPatterns = [
+    /your account.*has been credited/i,
+    /received.*etb.*from/i,
+    /credited with.*etb.*from/i,
+    /account.*credited.*with/i,
+    /you have received.*birr.*from/i
+  ];
+  
+  // Check for sender patterns
+  for (const pattern of senderPatterns) {
+    if (pattern.test(sms)) {
+      return { type: 'SENDER', confidence: 0.9 };
+    }
+  }
+  
+  // Check for receiver patterns
+  for (const pattern of receiverPatterns) {
+    if (pattern.test(sms)) {
+      return { type: 'RECEIVER', confidence: 0.9 };
+    }
+  }
+  
+  // Default based on common words
+  if (sms.includes('sent') || sms.includes('transfered') || sms.includes('debited')) {
+    return { type: 'SENDER', confidence: 0.7 };
+  }
+  
+  if (sms.includes('received') || sms.includes('credited') || sms.includes('credit')) {
+    return { type: 'RECEIVER', confidence: 0.7 };
+  }
+  
+  return { type: 'UNKNOWN', confidence: 0.5 };
+}
+
+// NEW: Extract transaction identifiers from SMS
+ static extractTransactionIdentifiers(smsText) {
+    const identifiers = {
+      amount: this.extractAmountFromSMS(smsText),
+      transactionId: null,
+      refNumber: null,
+      time: null,
+      senderName: null,
+      recipientName: null,
+      accountNumbers: [],
+      smsBank: this.detectBankFromSMS(smsText)
+    };
+    
+    // Extract transaction/ref number (FT253422RPRW format)
+    const refMatch = smsText.match(/Ref No\s*(\w+)/i) || 
+                     smsText.match(/FT\d+\w+/i) ||
+                     smsText.match(/Transaction.*?(\w+)/i) ||
+                     smsText.match(/Txn.*?(\w+)/i);
+    if (refMatch) {
+      identifiers.refNumber = refMatch[1];
+      identifiers.transactionId = refMatch[1];
+    }
+    
+    // Extract time/date - CBE format: "07/12/2025 at 21:58:15"
+    const timeMatch = smsText.match(/(\d{2}\/\d{2}\/\d{4})\s*(?:at)?\s*(\d{2}:\d{2}:\d{2})/i);
+    if (timeMatch) {
+      identifiers.time = `${timeMatch[1]} ${timeMatch[2]}`;
+    }
+    
+    // Extract names for CBE format
+    // "from Defar Gobeze" or "to Defar Gobeze"
+    const fromMatch = smsText.match(/from\s+([A-Za-z\s]+?)(?:,|\.|on|with|Your)/i);
+    if (fromMatch) {
+      identifiers.senderName = fromMatch[1].trim();
+    }
+    
+    const toMatch = smsText.match(/to\s+([A-Za-z\s]+?)(?:,|\.|on|with|from)/i);
+    if (toMatch) {
+      identifiers.recipientName = toMatch[1].trim();
+    }
+    
+    // Extract masked account numbers (1*****5743)
+    const accountMatches = smsText.match(/\d\*{5,}\d+/g);
+    if (accountMatches) {
+      identifiers.accountNumbers = accountMatches;
+    }
+    
+    return identifiers;
+  }
+  static detectBankFromSMS(smsText) {
+    const sms = smsText.toLowerCase();
+    if (sms.includes('cbe')) return 'CBE';
+    if (sms.includes('awash')) return 'Awash';
+    if (sms.includes('dashen')) return 'Dashen';
+    if (sms.includes('telebirr')) return 'Telebirr';
+    return 'UNKNOWN';
+  }
+// NEW: Try to auto-match SMS with existing ones
+
+// NEW: Calculate match score between two SMS
+ static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
+    let score = 0;
+    const maxScore = 100;
+    
+    // Get second SMS identifiers
+    const sms2Text = sms2Deposit.originalSMS;
+    const sms2Identifiers = this.extractTransactionIdentifiers(sms2Text);
+    
+    console.log('📊 Comparing SMS identifiers:');
+    console.log('SMS1 Amount:', sms1Identifiers.amount);
+    console.log('SMS2 Amount:', sms2Identifiers.amount);
+    console.log('SMS1 Ref:', sms1Identifiers.refNumber);
+    console.log('SMS2 Ref:', sms2Identifiers.refNumber);
+    
+    // 1. Amount match (40 points) - Must be exact for CBE
+    if (sms1Identifiers.amount && sms2Identifiers.amount) {
+      if (sms1Identifiers.amount === sms2Identifiers.amount) {
+        score += 40;
+      } else {
+        // CBE transfers should have exact same amount
+        console.log('⚠️ Amount mismatch');
+        return 0; // Early exit for amount mismatch
+      }
+    }
+    
+    // 2. Transaction/Ref number match (40 points) - Most important for CBE
+    if (sms1Identifiers.refNumber && sms2Identifiers.refNumber) {
+      if (sms1Identifiers.refNumber === sms2Identifiers.refNumber) {
+        score += 40;
+      } else if (sms1Identifiers.refNumber && sms2Identifiers.refNumber) {
+        // Partial match (some CBE SMS might have different formats)
+        if (sms1Identifiers.refNumber.includes(sms2Identifiers.refNumber) || 
+            sms2Identifiers.refNumber.includes(sms1Identifiers.refNumber)) {
+          score += 30;
+        }
+      }
+    }
+    
+    // 3. Time match (15 points) - within 2 minutes for CBE
+    if (sms1Identifiers.time && sms2Identifiers.time) {
+      const time1 = this.parseSMSTime(sms1Identifiers.time);
+      const time2 = this.parseSMSTime(sms2Identifiers.time);
+      
+      if (time1 && time2) {
+        const timeDiff = Math.abs(time1.getTime() - time2.getTime());
+        if (timeDiff <= 2 * 60 * 1000) { // 2 minutes
+          score += 15;
+        } else if (timeDiff <= 10 * 60 * 1000) { // 10 minutes
+          score += 10;
+        }
+      }
+    }
+    
+    // 4. Bank match (5 points)
+    if (sms1Identifiers.smsBank && sms2Identifiers.smsBank) {
+      if (sms1Identifiers.smsBank === sms2Identifiers.smsBank) {
+        score += 5;
+      }
+    }
+    
+    // Convert to percentage
+    const percentage = (score / maxScore) * 100;
+    console.log(`📈 Match percentage: ${percentage}% (${score}/${maxScore})`);
+    
+    return percentage / 100; // Return as decimal
+  }
+
+  // ENHANCED: Approve matched SMS
+  static async approveMatchedSMS(senderSMS, receiverSMS) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      console.log('🤖 Approving matched SMS pair...');
+      
+      // Determine which is sender (user) and which is receiver (admin)
+      let userSMS, adminSMS;
+      if (senderSMS.metadata?.smsType === 'SENDER') {
+        userSMS = senderSMS;
+        adminSMS = receiverSMS;
+      } else {
+        userSMS = receiverSMS;
+        adminSMS = senderSMS;
+      }
+      
+      // Get user from user SMS
+      const user = await User.findById(userSMS.userId);
+      if (!user) {
+        throw new Error('User not found for matched SMS');
+      }
+      
+      const amount = userSMS.extractedAmount;
+      
+      // Get or create wallet
+      let wallet = await Wallet.findOne({ userId: user._id }).session(session);
+      if (!wallet) {
+        wallet = new Wallet({
+          userId: user._id,
+          balance: 0,
+          currency: 'USD'
+        });
+      }
+      
+      const balanceBefore = wallet.balance;
+      wallet.balance += amount;
+      const balanceAfter = wallet.balance;
+      
+      // Create transaction
+      const transaction = new Transaction({
+        userId: user._id,
+        type: 'DEPOSIT',
+        amount,
+        balanceBefore,
+        balanceAfter,
+        status: 'COMPLETED',
+        description: `Matched deposit via ${userSMS.paymentMethod} (CBE Transfer)`,
+        reference: `SMS-MATCHED-${userSMS.metadata?.transactionId || Date.now()}`,
+        metadata: {
+          paymentMethod: userSMS.paymentMethod,
+          autoMatched: true,
+          matchedPair: {
+            senderSMSId: userSMS._id,
+            receiverSMSId: adminSMS._id,
+            transactionId: userSMS.metadata?.transactionId,
+            matchedAt: new Date()
+          }
+        }
+      });
+      
+      // Update both SMS deposits
+      userSMS.status = 'APPROVED';
+      userSMS.transactionId = transaction._id;
+      userSMS.autoApproved = true;
+      userSMS.processedAt = new Date();
+      userSMS.metadata.matched = true;
+      userSMS.metadata.matchedWith = adminSMS._id;
+      userSMS.metadata.approvedAt = new Date();
+      
+      adminSMS.status = 'CONFIRMED';
+      adminSMS.metadata.matched = true;
+      adminSMS.metadata.matchedWith = userSMS._id;
+      adminSMS.metadata.confirmedAmount = amount;
+      adminSMS.metadata.confirmedAt = new Date();
+      
+      await transaction.save({ session });
+      await wallet.save({ session });
+      await userSMS.save({ session });
+      await adminSMS.save({ session });
+      await session.commitTransaction();
+      
+      console.log(`✅ Approved matched deposit: $${amount} for user ${user.telegramId}`);
+      
+      return {
+        transaction,
+        wallet,
+        userSMS,
+        adminSMS,
+        autoApproved: true
+      };
+      
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Error approving matched SMS:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+ static async getUnmatchedSMS() {
+    try {
+      const unmatchedSMS = await SMSDeposit.find({ 
+        status: 'RECEIVED_WAITING_MATCH',
+        'metadata.smsType': { $in: ['SENDER', 'RECEIVER'] }
+      })
+      .populate('userId', 'firstName username telegramId')
+      .sort({ createdAt: -1 })
+      .limit(50);
+      
+      // Group by type
+      const grouped = {
+        SENDER: unmatchedSMS.filter(sms => sms.metadata?.smsType === 'SENDER'),
+        RECEIVER: unmatchedSMS.filter(sms => sms.metadata?.smsType === 'RECEIVER')
+      };
+      
+      return grouped;
+    } catch (error) {
+      console.error('❌ Error getting unmatched SMS:', error);
+      throw error;
+    }
+  }
+
+  // NEW: Manual match for admin
+  static async manualMatchSMS(senderSMSId, receiverSMSId, adminUserId) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      console.log('🔄 Admin manually matching SMS...');
+      
+      const [senderSMS, receiverSMS] = await Promise.all([
+        SMSDeposit.findById(senderSMSId).populate('userId'),
+        SMSDeposit.findById(receiverSMSId)
+      ]);
+      
+      if (!senderSMS || !receiverSMS) {
+        throw new Error('One or both SMS deposits not found');
+      }
+      
+      if (senderSMS.metadata?.smsType !== 'SENDER') {
+        throw new Error('First SMS must be a SENDER type');
+      }
+      
+      if (receiverSMS.metadata?.smsType !== 'RECEIVER') {
+        throw new Error('Second SMS must be a RECEIVER type');
+      }
+      
+      // Use the same approve logic
+      const result = await this.approveMatchedSMS(senderSMS, receiverSMS);
+      
+      // Update with admin info
+      senderSMS.processedBy = adminUserId;
+      senderSMS.metadata.manuallyApprovedBy = adminUserId;
+      await senderSMS.save({ session });
+      
+      await session.commitTransaction();
+      
+      return {
+        ...result,
+        manuallyApproved: true,
+        approvedBy: adminUserId
+      };
+      
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Error in manual match:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
+// NEW: Parse SMS time string to Date
+static parseSMSTime(timeString) {
+  try {
+    // Handle format: "07/12/2025 at 21:58:15"
+    const cleaned = timeString.replace(' at ', ' ');
+    return new Date(cleaned);
+  } catch (error) {
+    console.error('Error parsing time:', timeString, error);
+    return null;
+  }
+}
+
+// NEW: Check if names are similar (allowing for small differences)
+static namesAreSimilar(name1, name2) {
+  if (!name1 || !name2) return false;
+  
+  const clean1 = name1.toLowerCase().replace(/\s+/g, ' ').trim();
+  const clean2 = name2.toLowerCase().replace(/\s+/g, ' ').trim();
+  
+  // Exact match
+  if (clean1 === clean2) return true;
+  
+  // Check if one contains the other
+  if (clean1.includes(clean2) || clean2.includes(clean1)) {
+    return true;
+  }
+  
+  // Check first name match (split by space)
+  const name1Parts = clean1.split(' ');
+  const name2Parts = clean2.split(' ');
+  
+  if (name1Parts[0] === name2Parts[0]) {
+    return true; // Same first name
+  }
+  
+  // Calculate similarity using simple algorithm
+  let matches = 0;
+  for (const word1 of name1Parts) {
+    for (const word2 of name2Parts) {
+      if (word1 === word2 || word1.includes(word2) || word2.includes(word1)) {
+        matches++;
+        break;
+      }
+    }
+  }
+  
+  const similarity = matches / Math.max(name1Parts.length, name2Parts.length);
+  return similarity >= 0.5; // 50% similarity
+}
+
+// NEW: Auto-approve matched SMS
+static async autoApproveMatchedSMS(senderSMS, receiverSMS) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    console.log('🤖 Auto-approving matched SMS pair...');
+    
+    // Determine which is sender (user) and which is receiver (admin)
+    let userSMS, adminSMS;
+    if (senderSMS.metadata?.smsType === 'SENDER') {
+      userSMS = senderSMS;
+      adminSMS = receiverSMS;
+    } else {
+      userSMS = receiverSMS;
+      adminSMS = senderSMS;
+    }
+    
+    // Get user from user SMS
+    const user = await User.findById(userSMS.userId);
+    if (!user) {
+      throw new Error('User not found for matched SMS');
+    }
+    
+    const amount = userSMS.extractedAmount;
+    
+    // Get or create wallet
+    let wallet = await Wallet.findOne({ userId: user._id }).session(session);
+    if (!wallet) {
+      wallet = new Wallet({
+        userId: user._id,
+        balance: 0,
+        currency: 'USD'
+      });
+    }
+    
+    const balanceBefore = wallet.balance;
+    wallet.balance += amount;
+    const balanceAfter = wallet.balance;
+    
+    // Create transaction
+    const transaction = new Transaction({
+      userId: user._id,
+      type: 'DEPOSIT',
+      amount,
+      balanceBefore,
+      balanceAfter,
+      status: 'COMPLETED',
+      description: `Auto-approved deposit via ${userSMS.paymentMethod} (SMS matched)`,
+      reference: `SMS-MATCHED-${Date.now()}`,
+      metadata: {
+        paymentMethod: userSMS.paymentMethod,
+        autoMatched: true,
+        matchedPair: {
+          senderSMSId: userSMS._id,
+          receiverSMSId: adminSMS._id,
+          matchConfidence: this.calculateSMSMatchScore(
+            this.extractTransactionIdentifiers(userSMS.originalSMS),
+            this.extractTransactionIdentifiers(adminSMS.originalSMS)
+          ),
+          matchedAt: new Date()
+        }
+      }
+    });
+    
+    // Update both SMS deposits
+    userSMS.status = 'AUTO_APPROVED';
+    userSMS.transactionId = transaction._id;
+    userSMS.autoApproved = true;
+    userSMS.processedAt = new Date();
+    userSMS.metadata.matched = true;
+    userSMS.metadata.matchedWith = adminSMS._id;
+    
+    adminSMS.status = 'CONFIRMED';
+    adminSMS.metadata.matched = true;
+    adminSMS.metadata.matchedWith = userSMS._id;
+    adminSMS.metadata.confirmedAmount = amount;
+    
+    await transaction.save({ session });
+    await wallet.save({ session });
+    await userSMS.save({ session });
+    await adminSMS.save({ session });
+    await session.commitTransaction();
+    
+    console.log(`✅ Auto-approved matched deposit: $${amount} for user ${user.telegramId}`);
+    
+    return {
+      transaction,
+      wallet,
+      userSMS,
+      adminSMS,
+      autoApproved: true
+    };
+    
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Error auto-approving matched SMS:', error);
+    throw error;
+  } finally {
+    session.endSession();
+  }
+}
+
+// NEW: Admin command to force match SMS
+static async adminForceMatchSMS(senderSMSId, receiverSMSId, adminUserId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    console.log('🔄 Admin forcing SMS match...');
+    
+    const [senderSMS, receiverSMS] = await Promise.all([
+      SMSDeposit.findById(senderSMSId).populate('userId'),
+      SMSDeposit.findById(receiverSMSId).populate('userId')
+    ]);
+    
+    if (!senderSMS || !receiverSMS) {
+      throw new Error('One or both SMS deposits not found');
+    }
+    
+    const user = senderSMS.userId;
+    const amount = senderSMS.extractedAmount;
+    
+    // Get or create wallet
+    let wallet = await Wallet.findOne({ userId: user._id }).session(session);
+    if (!wallet) {
+      wallet = new Wallet({
+        userId: user._id,
+        balance: 0,
+        currency: 'USD'
+      });
+    }
+    
+    const balanceBefore = wallet.balance;
+    wallet.balance += amount;
+    const balanceAfter = wallet.balance;
+    
+    // Create transaction
+    const transaction = new Transaction({
+      userId: user._id,
+      type: 'DEPOSIT',
+      amount,
+      balanceBefore,
+      balanceAfter,
+      status: 'COMPLETED',
+      description: `Admin-approved deposit via ${senderSMS.paymentMethod}`,
+      reference: `SMS-ADMIN-${Date.now()}`,
+      metadata: {
+        paymentMethod: senderSMS.paymentMethod,
+        adminApproved: true,
+        approvedBy: adminUserId,
+        approvedAt: new Date(),
+        matchedByAdmin: true,
+        matchedPair: {
+          senderSMSId: senderSMS._id,
+          receiverSMSId: receiverSMS._id
+        }
+      }
+    });
+    
+    // Update SMS deposits
+    senderSMS.status = 'APPROVED';
+    senderSMS.transactionId = transaction._id;
+    senderSMS.processedBy = adminUserId;
+    senderSMS.processedAt = new Date();
+    senderSMS.metadata.adminMatched = true;
+    senderSMS.metadata.matchedWith = receiverSMS._id;
+    
+    receiverSMS.status = 'CONFIRMED';
+    receiverSMS.metadata.adminMatched = true;
+    receiverSMS.metadata.matchedWith = senderSMS._id;
+    receiverSMS.metadata.confirmedAmount = amount;
+    
+    await transaction.save({ session });
+    await wallet.save({ session });
+    await senderSMS.save({ session });
+    await receiverSMS.save({ session });
+    await session.commitTransaction();
+    
+    console.log(`✅ Admin matched and approved deposit: $${amount} for user ${user.telegramId}`);
+    
+    return {
+      transaction,
+      wallet,
+      senderSMS,
+      receiverSMS,
+      adminApproved: true
+    };
+    
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Error in admin force match:', error);
+    throw error;
+  } finally {
+    session.endSession();
+  }
+}
+
+// NEW: Find matching SMS for admin
+static async findMatchingSMS(smsDepositId) {
+  try {
+    const smsDeposit = await SMSDeposit.findById(smsDepositId);
+    if (!smsDeposit) {
+      throw new Error('SMS deposit not found');
+    }
+    
+    const smsText = smsDeposit.originalSMS;
+    const analysis = this.analyzeSMSType(smsText);
+    const identifiers = this.extractTransactionIdentifiers(smsText);
+    
+    const oppositeType = analysis.type === 'SENDER' ? 'RECEIVER' : 'SENDER';
+    
+    const query = {
+      _id: { $ne: smsDepositId },
+      status: { $in: ['RECEIVED', 'RECEIVED_WAITING_MATCH', 'PENDING'] },
+      'metadata.smsType': oppositeType,
+      createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } // Last 7 days
+    };
+    
+    const potentialMatches = await SMSDeposit.find(query)
+      .populate('userId', 'firstName username telegramId')
+      .sort({ createdAt: -1 })
+      .limit(50);
+    
+    // Calculate match scores
+    const matchesWithScores = potentialMatches.map(match => {
+      const matchIdentifiers = this.extractTransactionIdentifiers(match.originalSMS);
+      const score = this.calculateSMSMatchScore(identifiers, match);
+      
+      return {
+        smsDeposit: match,
+        score: Math.round(score * 100), // Percentage
+        identifiers: matchIdentifiers
+      };
+    });
+    
+    // Sort by score descending
+    matchesWithScores.sort((a, b) => b.score - a.score);
+    
+    return {
+      originalSMS: smsDeposit,
+      analysis,
+      identifiers,
+      matches: matchesWithScores.filter(m => m.score >= 50), // Only show 50%+ matches
+      totalFound: potentialMatches.length
+    };
+    
+  } catch (error) {
+    console.error('❌ Error finding matching SMS:', error);
+    throw error;
+  }
+}
   // NEW: Auto-process received SMS immediately
   static async autoProcessReceivedSMS() {
     try {
-      const receivedSMS = await SMSDeposit.find({ status: 'RECEIVED' })
-        .populate('userId', 'firstName username telegramId')
-        .sort({ createdAt: 1 })
-        .limit(50);
+      const receivedSMS = await SMSDeposit.find({ 
+        status: 'RECEIVED_WAITING_MATCH',
+        'metadata.smsType': { $in: ['SENDER', 'RECEIVER'] }
+      })
+      .populate('userId', 'firstName username telegramId')
+      .sort({ createdAt: 1 })
+      .limit(50);
 
-      let processedCount = 0;
-      let approvedCount = 0;
+      console.log(`🔄 Found ${receivedSMS.length} SMS waiting for match`);
 
-      console.log(`🔄 Found ${receivedSMS.length} received SMS to process`);
+      let matchedCount = 0;
+      let processingErrors = 0;
 
       for (const sms of receivedSMS) {
         try {
-          // Mark as processing
-          sms.status = 'PROCESSING';
-          await sms.save();
-
-          const result = await this.processSMSDeposit(
-            sms.userId.telegramId,
-            sms.paymentMethod,
-            sms.originalSMS,
-            true // Auto-approve
-          );
-
-          processedCount++;
-          if (result.autoApproved) {
-            approvedCount++;
+          // Try to find match for this SMS
+          const matchResult = await this.tryAutoMatchSMS(sms, sms.originalSMS);
+          
+          if (matchResult) {
+            matchedCount++;
+            console.log(`✅ Matched SMS ${sms._id} with ${matchResult._id}`);
           }
-
-          console.log(`✅ Processed SMS ${sms._id}: ${result.autoApproved ? 'Auto-approved' : 'Needs review'}`);
         } catch (error) {
-          console.error(`❌ Failed to process SMS ${sms._id}:`, error.message);
-          // Reset status to RECEIVED if processing failed
-          await SMSDeposit.findByIdAndUpdate(sms._id, { 
-            status: 'RECEIVED',
-            'metadata.processError': error.message 
-          });
+          console.error(`❌ Error processing SMS ${sms._id}:`, error.message);
+          processingErrors++;
         }
       }
 
       return { 
         total: receivedSMS.length, 
-        processed: processedCount, 
-        approved: approvedCount 
+        matched: matchedCount,
+        errors: processingErrors
       };
     } catch (error) {
       console.error('❌ Error in auto-process SMS:', error);
       throw error;
+    }
+  }
+
+  // ENHANCED: Analyze SMS type for CBE format
+  static analyzeSMSType(smsText) {
+    const sms = smsText.toLowerCase();
+    
+    // Sender SMS patterns (user sent money to admin)
+    const senderPatterns = [
+      /you have transfered.*etb.*to/i,
+      /your account has been debited/i,
+      /sent.*etb.*to/i,
+      /transfer.*to.*account/i,
+      /you have sent.*birr.*to/i,
+      /you have transfered etb.*to.*on.*from your account/i, // CBE specific
+      /your account has been debited with a s.charge/i // CBE specific
+    ];
+    
+    // Receiver SMS patterns (admin received money from user)
+    const receiverPatterns = [
+      /your account.*has been credited/i,
+      /received.*etb.*from/i,
+      /credited with.*etb.*from/i,
+      /account.*credited.*with/i,
+      /you have received.*birr.*from/i,
+      /your account.*has been credited with etb.*from/i // CBE specific
+    ];
+    
+    // Check for sender patterns
+    for (const pattern of senderPatterns) {
+      if (pattern.test(sms)) {
+        return { type: 'SENDER', confidence: 0.9 };
+      }
+    }
+    
+    // Check for receiver patterns
+    for (const pattern of receiverPatterns) {
+      if (pattern.test(sms)) {
+        return { type: 'RECEIVER', confidence: 0.9 };
+      }
+    }
+    
+    return { type: 'UNKNOWN', confidence: 0.5 };
+  }
+
+  // ENHANCED: Extract transaction identifiers from CBE SMS
+  static extractTransactionIdentifiers(smsText) {
+    const identifiers = {
+      amount: this.extractAmountFromSMS(smsText),
+      transactionId: null,
+      refNumber: null,
+      time: null,
+      senderName: null,
+      recipientName: null,
+      accountNumbers: [],
+      smsBank: this.detectBankFromSMS(smsText)
+    };
+    
+    // Extract transaction/ref number (FT253422RPRW format)
+    const refMatch = smsText.match(/Ref No\s*(\w+)/i) || 
+                     smsText.match(/FT\d+\w+/i) ||
+                     smsText.match(/Transaction.*?(\w+)/i) ||
+                     smsText.match(/Txn.*?(\w+)/i);
+    if (refMatch) {
+      identifiers.refNumber = refMatch[1];
+      identifiers.transactionId = refMatch[1];
+    }
+    
+    // Extract time/date - CBE format: "07/12/2025 at 21:58:15"
+    const timeMatch = smsText.match(/(\d{2}\/\d{2}\/\d{4})\s*(?:at)?\s*(\d{2}:\d{2}:\d{2})/i);
+    if (timeMatch) {
+      identifiers.time = `${timeMatch[1]} ${timeMatch[2]}`;
+    }
+    
+    // Extract names for CBE format
+    // "from Defar Gobeze" or "to Defar Gobeze"
+    const fromMatch = smsText.match(/from\s+([A-Za-z\s]+?)(?:,|\.|on|with|Your)/i);
+    if (fromMatch) {
+      identifiers.senderName = fromMatch[1].trim();
+    }
+    
+    const toMatch = smsText.match(/to\s+([A-Za-z\s]+?)(?:,|\.|on|with|from)/i);
+    if (toMatch) {
+      identifiers.recipientName = toMatch[1].trim();
+    }
+    
+    // Extract masked account numbers (1*****5743)
+    const accountMatches = smsText.match(/\d\*{5,}\d+/g);
+    if (accountMatches) {
+      identifiers.accountNumbers = accountMatches;
+    }
+    
+    return identifiers;
+  }
+
+  // NEW: Detect bank from SMS
+  static detectBankFromSMS(smsText) {
+    const sms = smsText.toLowerCase();
+    if (sms.includes('cbe')) return 'CBE';
+    if (sms.includes('awash')) return 'Awash';
+    if (sms.includes('dashen')) return 'Dashen';
+    if (sms.includes('telebirr')) return 'Telebirr';
+    return 'UNKNOWN';
+  }
+
+  // ENHANCED: Try to auto-match SMS with existing ones
+  static async tryAutoMatchSMS(newSMSDeposit, smsText) {
+    try {
+      const newAnalysis = this.analyzeSMSType(smsText);
+      const newIdentifiers = this.extractTransactionIdentifiers(smsText);
+      
+      console.log('🔍 Attempting to match SMS:', newSMSDeposit._id);
+      console.log('📊 New SMS type:', newAnalysis.type);
+      console.log('📊 New SMS identifiers:', newIdentifiers);
+      
+      if (!newIdentifiers.amount || newIdentifiers.amount <= 0) {
+        console.log('⚠️ No valid amount, cannot match');
+        return null;
+      }
+      
+      // Find potential matches based on opposite type
+      const oppositeType = newAnalysis.type === 'SENDER' ? 'RECEIVER' : 'SENDER';
+      
+      const query = {
+        _id: { $ne: newSMSDeposit._id },
+        status: 'RECEIVED_WAITING_MATCH',
+        'metadata.smsType': oppositeType,
+        extractedAmount: newIdentifiers.amount,
+        createdAt: { 
+          $gte: new Date(Date.now() - 60 * 60 * 1000) // Last 1 hour
+        }
+      };
+      
+      console.log('🔍 Query for matches:', JSON.stringify(query, null, 2));
+      
+      const potentialMatches = await SMSDeposit.find(query)
+        .populate('userId', 'firstName username telegramId')
+        .sort({ createdAt: -1 })
+        .limit(10);
+      
+      console.log(`🔍 Found ${potentialMatches.length} potential matches`);
+      
+      for (const potentialMatch of potentialMatches) {
+        const matchScore = this.calculateSMSMatchScore(newIdentifiers, potentialMatch);
+        console.log(`📊 Match score with ${potentialMatch._id}: ${matchScore}`);
+        
+        if (matchScore >= 0.85) { // 85% match confidence
+          console.log(`✅ High confidence match found! (${matchScore})`);
+          
+          // APPROVE THE MATCHED TRANSACTION
+          await this.approveMatchedSMS(newSMSDeposit, potentialMatch);
+          return potentialMatch;
+        }
+      }
+      
+      console.log('❌ No strong matches found');
+      return null;
+      
+    } catch (error) {
+      console.error('❌ Error in auto-matching:', error);
+      return null;
     }
   }
 
@@ -567,76 +1435,87 @@ static async approveReceivedSMS(smsDepositId, adminUserId) {
   }
 
   // NEW: Auto-process all received SMS
-   static async autoProcessReceivedSMS() {
+    static async autoProcessReceivedSMS() {
     try {
-      const receivedSMS = await SMSDeposit.find({ status: 'RECEIVED' })
-        .populate('userId')
-        .sort({ createdAt: 1 })
-        .limit(50);
+      const receivedSMS = await SMSDeposit.find({ 
+        status: 'RECEIVED_WAITING_MATCH',
+        'metadata.smsType': { $in: ['SENDER', 'RECEIVER'] }
+      })
+      .populate('userId', 'firstName username telegramId')
+      .sort({ createdAt: 1 })
+      .limit(50);
 
-      let processedCount = 0;
-      let approvedCount = 0;
-      let failedCount = 0;
+      console.log(`🔄 Found ${receivedSMS.length} SMS waiting for match`);
 
-      console.log(`🔄 Found ${receivedSMS.length} received SMS to process`);
+      let matchedCount = 0;
+      let processingErrors = 0;
 
       for (const sms of receivedSMS) {
         try {
-          // Mark as processing
-          sms.status = 'PROCESSING';
-          await sms.save();
-
-          let user = sms.userId;
+          // Try to find match for this SMS
+          const matchResult = await this.tryAutoMatchSMS(sms, sms.originalSMS);
           
-          // If user population failed, try to find user by telegramId
-          if (!user && sms.telegramId) {
-            user = await User.findOne({ telegramId: sms.telegramId });
-            if (user) {
-              sms.userId = user._id;
-              await sms.save();
-            }
+          if (matchResult) {
+            matchedCount++;
+            console.log(`✅ Matched SMS ${sms._id} with ${matchResult._id}`);
           }
-
-          if (!user) {
-            throw new Error(`User not found for SMS deposit ${sms._id}`);
-          }
-
-          const result = await this.processSMSDeposit(
-            user.telegramId || user._id,
-            sms.paymentMethod,
-            sms.originalSMS,
-            true // Auto-approve
-          );
-
-          processedCount++;
-          if (result.autoApproved) {
-            approvedCount++;
-          }
-
-          console.log(`✅ Processed SMS ${sms._id}: ${result.autoApproved ? 'Auto-approved' : 'Needs review'}`);
         } catch (error) {
-          console.error(`❌ Failed to process SMS ${sms._id}:`, error.message);
-          failedCount++;
-          
-          // Reset status to RECEIVED if processing failed
-          await SMSDeposit.findByIdAndUpdate(sms._id, { 
-            status: 'RECEIVED',
-            'metadata.processError': error.message,
-            'metadata.lastProcessAttempt': new Date()
-          });
+          console.error(`❌ Error processing SMS ${sms._id}:`, error.message);
+          processingErrors++;
         }
       }
 
       return { 
         total: receivedSMS.length, 
-        processed: processedCount, 
-        approved: approvedCount,
-        failed: failedCount
+        matched: matchedCount,
+        errors: processingErrors
       };
     } catch (error) {
       console.error('❌ Error in auto-process SMS:', error);
       throw error;
     }
+  }
+
+  // ENHANCED: Analyze SMS type for CBE format
+  static analyzeSMSType(smsText) {
+    const sms = smsText.toLowerCase();
+    
+    // Sender SMS patterns (user sent money to admin)
+    const senderPatterns = [
+      /you have transfered.*etb.*to/i,
+      /your account has been debited/i,
+      /sent.*etb.*to/i,
+      /transfer.*to.*account/i,
+      /you have sent.*birr.*to/i,
+      /you have transfered etb.*to.*on.*from your account/i, // CBE specific
+      /your account has been debited with a s.charge/i // CBE specific
+    ];
+    
+    // Receiver SMS patterns (admin received money from user)
+    const receiverPatterns = [
+      /your account.*has been credited/i,
+      /received.*etb.*from/i,
+      /credited with.*etb.*from/i,
+      /account.*credited.*with/i,
+      /you have received.*birr.*from/i,
+      /your account.*has been credited with etb.*from/i // CBE specific
+    ];
+    
+    // Check for sender patterns
+    for (const pattern of senderPatterns) {
+      if (pattern.test(sms)) {
+        return { type: 'SENDER', confidence: 0.9 };
+      }
+    }
+    
+    // Check for receiver patterns
+    for (const pattern of receiverPatterns) {
+      if (pattern.test(sms)) {
+        return { type: 'RECEIVER', confidence: 0.9 };
+      }
+    }
+    
+    return { type: 'UNKNOWN', confidence: 0.5 };
   }
   static async initializeWallet(userId) {
     try {
