@@ -521,44 +521,59 @@ static NUMBER_CALL_INTERVAL = 8000; // 8 seconds between calls
       }
     }
   }
-   static async setNextGameCountdown(gameId) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+  static async setNextGameCountdown(gameId) {
+  // Wait a moment to ensure all previous transactions are complete
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-    try {
-      const game = await Game.findById(gameId).session(session);
-      
-      if (!game) {
-        throw new Error('Game not found');
-      }
-
-      const now = new Date();
-      
-      // Set game to COOLDOWN state with 30 second timer
-      game.status = 'COOLDOWN';
-      game.cooldownEndTime = new Date(now.getTime() + this.NEXT_GAME_COUNTDOWN);
-       game.autoStartEndTime = new Date(now.getTime() + this.NEXT_GAME_COUNTDOWN);
-      await game.save({ session });
-      await session.commitTransaction();
-      
-      console.log(`⏰ Next game countdown set for game ${game.code}. Next game starts in 30 seconds at: ${game.cooldownEndTime}`);
-      
-      // Schedule automatic reset after countdown
-      setTimeout(async () => {
-        try {
-          await this.resetGameForNewSession(gameId);
-        } catch (error) {
-          console.error('❌ Failed to reset game after countdown:', error);
-        }
-      }, this.NEXT_GAME_COUNTDOWN);
-      
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Error setting next game countdown:', error);
-    } finally {
-      session.endSession();
+  try {
+    const game = await Game.findById(gameId).session(session);
+    
+    if (!game) {
+      throw new Error('Game not found');
     }
+
+    // Only proceed if game is in FINISHED state (not already reset)
+    if (game.status !== 'FINISHED') {
+      console.log(`⚠️ Game ${game.code} is not in FINISHED state (${game.status}), skipping countdown`);
+      await session.abortTransaction();
+      return;
+    }
+
+    const now = new Date();
+    
+    // Set game to COOLDOWN state with 30 second timer
+    game.status = 'COOLDOWN';
+    game.cooldownEndTime = new Date(now.getTime() + this.NEXT_GAME_COUNTDOWN);
+    game.autoStartEndTime = new Date(now.getTime() + this.NEXT_GAME_COUNTDOWN);
+    
+    // Keep other game data for reference (don't clear winnerId if there is one)
+    await game.save({ session });
+    
+    await session.commitTransaction();
+    
+    console.log(`⏰ Next game countdown set for game ${game.code}. Next game starts in 30 seconds at: ${game.cooldownEndTime}`);
+    
+    // Schedule automatic reset after countdown
+    setTimeout(async () => {
+      try {
+        await this.resetGameForNewSession(gameId);
+      } catch (error) {
+        console.error('❌ Failed to reset game after countdown:', error);
+      }
+    }, this.NEXT_GAME_COUNTDOWN);
+    
+  } catch (error) {
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
+    console.error('❌ Error setting next game countdown:', error);
+  } finally {
+    session.endSession();
   }
+}
 
   static checkEnhancedWinCondition(cardNumbers, markedPositions) {
     if (!cardNumbers || !markedPositions) {
@@ -610,7 +625,7 @@ static NUMBER_CALL_INTERVAL = 8000; // 8 seconds between calls
     return { isWinner: false, patternType: null, winningPositions: [] };
   }
 
-  static async endGameDueToNoWinner(gameId) {
+static async endGameDueToNoWinner(gameId) {
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -623,26 +638,21 @@ static NUMBER_CALL_INTERVAL = 8000; // 8 seconds between calls
 
     console.log(`🏁 Ending game ${game.code} - no winner after 75 numbers`);
     
-    // Get all players with cards before ending the game
+    // Get all players with cards BEFORE changing game state
     const bingoCards = await BingoCard.find({ gameId }).session(session);
     
-    // First mark as FINISHED
-    game.status = 'FINISHED';
-    game.endedAt = new Date();
-    game.winnerId = null;
-    await game.save({ session });
-
-    // REFUND ALL PLAYERS
+    // First, refund all players
     console.log(`💰 Refunding ${bingoCards.length} players due to no winner...`);
     
     const entryFee = 10;
-    for (const card of bingoCards) {
+    const WalletService = require('./walletService');
+    
+    const refundPromises = bingoCards.map(async (card) => {
       try {
         const user = await User.findById(card.userId).session(session);
         
         if (user && user.telegramId) {
           // Refund the entry fee
-          const WalletService = require('./walletService');
           await WalletService.addWinning(
             user.telegramId,
             gameId,
@@ -650,25 +660,52 @@ static NUMBER_CALL_INTERVAL = 8000; // 8 seconds between calls
             `Refund - No winner in game ${game.code}`
           );
           console.log(`✅ Refunded $${entryFee} to ${user.telegramId}`);
+          return true;
         }
       } catch (error) {
-        console.error(`❌ Failed to refund user:`, error.message);
+        console.error(`❌ Failed to refund user ${card.userId}:`, error.message);
       }
-    }
+      return false;
+    });
+    
+    // Wait for all refunds to complete
+    await Promise.all(refundPromises);
+    
+    // Now mark game as FINISHED
+    const now = new Date();
+    game.status = 'FINISHED';
+    game.endedAt = now;
+    game.winnerId = null;
+    // Clear cooldown timer - we'll set it after committing
+    game.cooldownEndTime = null;
+    
+    await game.save({ session });
 
+    // Commit the transaction (refunds + game state change)
     await session.commitTransaction();
     
+    console.log(`✅ All refunds processed for game ${game.code}`);
+
     this.winnerDeclared.add(gameId.toString());
     this.processingGames.delete(gameId.toString());
     
     this.stopAutoNumberCalling(gameId);
     
-    // Set 30 second countdown for next game
+    // NOW set the countdown for next game (AFTER transaction is committed)
     await this.setNextGameCountdown(gameId);
 
   } catch (error) {
-    await session.abortTransaction();
     console.error('❌ Error ending game due to no winner:', error);
+    
+    // Try to abort transaction if still in progress
+    if (session.inTransaction()) {
+      try {
+        await session.abortTransaction();
+      } catch (abortError) {
+        console.warn('⚠️ Error aborting transaction:', abortError.message);
+      }
+    }
+    
     throw error;
   } finally {
     session.endSession();
