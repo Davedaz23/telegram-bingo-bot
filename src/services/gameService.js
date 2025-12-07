@@ -610,31 +610,70 @@ static NUMBER_CALL_INTERVAL = 8000; // 8 seconds between calls
     return { isWinner: false, patternType: null, winningPositions: [] };
   }
 
-     static async endGameDueToNoWinner(gameId) {
-    try {
-      const game = await Game.findById(gameId);
-      if (!game || game.status !== 'ACTIVE') return;
+  static async endGameDueToNoWinner(gameId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-      console.log(`🏁 Ending game ${game.code} - no winner after 75 numbers`);
-      
-      // First mark as FINISHED
-      game.status = 'FINISHED';
-      game.endedAt = new Date();
-      game.winnerId = null;
-      await game.save();
-
-      this.winnerDeclared.add(gameId.toString());
-      this.processingGames.delete(gameId.toString());
-      
-      this.stopAutoNumberCalling(gameId);
-      
-      // Set 30 second countdown for next game
-      await this.setNextGameCountdown(gameId);
-
-    } catch (error) {
-      console.error('❌ Error ending game due to no winner:', error);
+  try {
+    const game = await Game.findById(gameId).session(session);
+    if (!game || game.status !== 'ACTIVE') {
+      await session.abortTransaction();
+      return;
     }
+
+    console.log(`🏁 Ending game ${game.code} - no winner after 75 numbers`);
+    
+    // Get all players with cards before ending the game
+    const bingoCards = await BingoCard.find({ gameId }).session(session);
+    
+    // First mark as FINISHED
+    game.status = 'FINISHED';
+    game.endedAt = new Date();
+    game.winnerId = null;
+    await game.save({ session });
+
+    // REFUND ALL PLAYERS
+    console.log(`💰 Refunding ${bingoCards.length} players due to no winner...`);
+    
+    const entryFee = 10;
+    for (const card of bingoCards) {
+      try {
+        const user = await User.findById(card.userId).session(session);
+        
+        if (user && user.telegramId) {
+          // Refund the entry fee
+          const WalletService = require('./walletService');
+          await WalletService.addWinning(
+            user.telegramId,
+            gameId,
+            entryFee,
+            `Refund - No winner in game ${game.code}`
+          );
+          console.log(`✅ Refunded $${entryFee} to ${user.telegramId}`);
+        }
+      } catch (error) {
+        console.error(`❌ Failed to refund user:`, error.message);
+      }
+    }
+
+    await session.commitTransaction();
+    
+    this.winnerDeclared.add(gameId.toString());
+    this.processingGames.delete(gameId.toString());
+    
+    this.stopAutoNumberCalling(gameId);
+    
+    // Set 30 second countdown for next game
+    await this.setNextGameCountdown(gameId);
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Error ending game due to no winner:', error);
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
 
 
     // GAME MANAGEMENT METHODS
@@ -1570,49 +1609,75 @@ static NUMBER_CALL_INTERVAL = 8000; // 8 seconds between calls
   }
 
     static async endGame(gameId) {
-      const session = await mongoose.startSession();
-      session.startTransaction();
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
+  try {
+    this.stopAutoNumberCalling(gameId);
+
+    const game = await Game.findById(gameId).session(session);
+    
+    if (!game || game.status !== 'ACTIVE') {
+      throw new Error('Game not active');
+    }
+
+    // Get all players with cards
+    const bingoCards = await BingoCard.find({ gameId }).session(session);
+    
+    const now = new Date();
+    const cooldownEndTime = new Date(now.getTime() + this.GAME_RESTART_COOLDOWN);
+    
+    game.status = 'COOLDOWN';
+    game.endedAt = now;
+    game.cooldownEndTime = cooldownEndTime;
+    await game.save({ session });
+
+    // REFUND ALL PLAYERS
+    console.log(`💰 Refunding ${bingoCards.length} players due to game cancellation...`);
+    
+    const entryFee = 10;
+    for (const card of bingoCards) {
       try {
-        this.stopAutoNumberCalling(gameId);
-
-        const game = await Game.findById(gameId).session(session);
+        const user = await User.findById(card.userId).session(session);
         
-        if (!game || game.status !== 'ACTIVE') {
-          throw new Error('Game not active');
+        if (user && user.telegramId) {
+          const WalletService = require('./walletService');
+          await WalletService.addWinning(
+            user.telegramId,
+            gameId,
+            entryFee,
+            `Refund - Game ${game.code} cancelled`
+          );
+          console.log(`✅ Refunded $${entryFee} to ${user.telegramId}`);
         }
-
-        const now = new Date();
-        const cooldownEndTime = new Date(now.getTime() + this.GAME_RESTART_COOLDOWN);
-        
-        game.status = 'COOLDOWN';
-        game.endedAt = now;
-        game.cooldownEndTime = cooldownEndTime;
-        await game.save({ session });
-
-        await session.commitTransaction();
-
-        console.log(`🏁 Game ${game.code} ended. Cooldown until: ${cooldownEndTime}`);
-
-        // Schedule game reset after cooldown
-        setTimeout(async () => {
-          try {
-            await this.resetGameForNewSession(gameId);
-          } catch (error) {
-            console.error('❌ Failed to reset game after cooldown:', error);
-          }
-        }, this.GAME_RESTART_COOLDOWN);
-
-        return this.getGameWithDetails(gameId);
-        
       } catch (error) {
-        await session.abortTransaction();
-        console.error('❌ End game error:', error);
-        throw error;
-      } finally {
-        session.endSession();
+        console.error(`❌ Failed to refund user:`, error.message);
       }
     }
+
+    await session.commitTransaction();
+
+    console.log(`🏁 Game ${game.code} ended. Cooldown until: ${cooldownEndTime}`);
+
+    // Schedule game reset after cooldown
+    setTimeout(async () => {
+      try {
+        await this.resetGameForNewSession(gameId);
+      } catch (error) {
+        console.error('❌ Failed to reset game after cooldown:', error);
+      }
+    }, this.GAME_RESTART_COOLDOWN);
+
+    return this.getGameWithDetails(gameId);
+    
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ End game error:', error);
+    throw error;
+  } finally {
+    session.endSession();
+  }
+}
 
     
       static async resetGameForNewSession(gameId) {
