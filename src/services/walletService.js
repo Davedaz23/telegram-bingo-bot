@@ -400,54 +400,138 @@ static async tryAutoMatchSMS(newSMSDeposit, smsText) {
   }
 }
 // NEW: Extract transaction identifiers from SMS
- static extractTransactionIdentifiers(smsText) {
-    const identifiers = {
-      amount: this.extractAmountFromSMS(smsText),
-      transactionId: null,
-      refNumber: null,
-      time: null,
-      senderName: null,
-      recipientName: null,
-      accountNumbers: [],
-      smsBank: this.detectBankFromSMS(smsText)
-    };
-    
-    // Extract transaction/ref number (FT253422RPRW format)
-    const refMatch = smsText.match(/Ref No\s*(\w+)/i) || 
-                     smsText.match(/FT\d+\w+/i) ||
-                     smsText.match(/Transaction.*?(\w+)/i) ||
+static extractTransactionIdentifiers(smsText) {
+  const identifiers = {
+    amount: this.extractAmountFromSMS(smsText),
+    transactionId: null,
+    refNumber: null,
+    time: null,
+    senderName: null,
+    recipientName: null,
+    accountNumbers: [],
+    smsBank: this.detectBankFromSMS(smsText),
+    rawRefNumber: null, // Store raw reference for debugging
+    isCredit: false,
+    isDebit: false
+  };
+
+  const sms = smsText.toLowerCase();
+  identifiers.isCredit = /credited|received/i.test(sms);
+  identifiers.isDebit = /debited|transfered|sent/i.test(sms);
+
+  // Extract EXACT amount for CBE transfers
+  const amountMatch = smsText.match(/ETB\s*([\d,]+\.?\d*)/i);
+  if (amountMatch) {
+    const cleanAmount = amountMatch[1].replace(/,/g, '');
+    identifiers.exactAmount = parseFloat(cleanAmount);
+  }
+
+  // ENHANCED: Extract transaction reference number with multiple patterns
+  // Pattern 1: Standard "Ref No FT253422RPRW" format
+  let refMatch = smsText.match(/Ref\s*No\s*(\w+)/i);
+  
+  // Pattern 2: URL format "id=FT253422RPRW11206342" - extract common part
+  if (!refMatch) {
+    const urlMatch = smsText.match(/id=([A-Z0-9]+)/i);
+    if (urlMatch) {
+      const fullId = urlMatch[1];
+      identifiers.rawRefNumber = fullId;
+      
+      // CBE format: FT253422RPRW11206342
+      // First 12-13 characters are the transaction reference
+      // Last 7-8 characters are account suffix
+      if (fullId.length > 12) {
+        // Try to extract the common FT253422RPRW part
+        // Look for pattern starting with FT followed by digits
+        const refPattern = /(FT\d+[A-Z]+)/i;
+        const refExtracted = fullId.match(refPattern);
+        
+        if (refExtracted) {
+          // Found pattern like FT253422RPRW
+          identifiers.refNumber = refExtracted[1];
+        } else {
+          // Fallback: take first 12 characters
+          identifiers.refNumber = fullId.substring(0, 12);
+        }
+      } else {
+        identifiers.refNumber = fullId;
+      }
+    }
+  } else {
+    identifiers.refNumber = refMatch[1];
+  }
+
+  // Pattern 3: Direct FT pattern in text
+  if (!identifiers.refNumber) {
+    const ftMatch = smsText.match(/(FT\d+[A-Z]+)/i);
+    if (ftMatch) {
+      identifiers.refNumber = ftMatch[1];
+    }
+  }
+
+  // Pattern 4: Transaction ID pattern
+  if (!identifiers.refNumber) {
+    const txnMatch = smsText.match(/Transaction.*?(\w+)/i) ||
                      smsText.match(/Txn.*?(\w+)/i);
-    if (refMatch) {
-      identifiers.refNumber = refMatch[1];
-      identifiers.transactionId = refMatch[1];
+    if (txnMatch) {
+      identifiers.refNumber = txnMatch[1];
     }
-    
-    // Extract time/date - CBE format: "07/12/2025 at 21:58:15"
-    const timeMatch = smsText.match(/(\d{2}\/\d{2}\/\d{4})\s*(?:at)?\s*(\d{2}:\d{2}:\d{2})/i);
-    if (timeMatch) {
-      identifiers.time = `${timeMatch[1]} ${timeMatch[2]}`;
+  }
+
+  // Clean up the reference number if needed
+  if (identifiers.refNumber) {
+    // Remove any trailing numbers that might be account suffix
+    // Example: FT253422RPRW11206342 → FT253422RPRW
+    const cleanedRef = identifiers.refNumber.replace(/\d{7,8}$/, '');
+    if (cleanedRef.length >= 8) { // Ensure we have a valid reference
+      identifiers.refNumber = cleanedRef;
     }
-    
-    // Extract names for CBE format
-    // "from Defar Gobeze" or "to Defar Gobeze"
+    identifiers.transactionId = identifiers.refNumber;
+  }
+
+  // Extract time/date - CBE format: "07/12/2025 at 21:58:15"
+  const timeMatch = smsText.match(/(\d{2}\/\d{2}\/\d{4})\s*(?:at)?\s*(\d{2}:\d{2}:\d{2})/i);
+  if (timeMatch) {
+    identifiers.time = `${timeMatch[1]} ${timeMatch[2]}`;
+  }
+
+  // Extract names for CBE format
+  if (identifiers.isDebit) {
+    // For debit SMS: "to Defar Gobeze" (recipient = admin)
+    const toMatch = smsText.match(/to\s+([A-Za-z\s]+?)(?:,|\.|on|with|from|Your)/i);
+    if (toMatch) {
+      identifiers.recipientName = toMatch[1].trim(); // This is the admin/receiver
+    }
+  }
+
+  if (identifiers.isCredit) {
+    // For credit SMS: "from Defar Gobeze" (sender = user)
     const fromMatch = smsText.match(/from\s+([A-Za-z\s]+?)(?:,|\.|on|with|Your)/i);
     if (fromMatch) {
-      identifiers.senderName = fromMatch[1].trim();
+      identifiers.senderName = fromMatch[1].trim(); // This is the user/sender
     }
-    
-    const toMatch = smsText.match(/to\s+([A-Za-z\s]+?)(?:,|\.|on|with|from)/i);
-    if (toMatch) {
-      identifiers.recipientName = toMatch[1].trim();
-    }
-    
-    // Extract masked account numbers (1*****5743)
-    const accountMatches = smsText.match(/\d\*{5,}\d+/g);
-    if (accountMatches) {
-      identifiers.accountNumbers = accountMatches;
-    }
-    
-    return identifiers;
   }
+
+  // Extract masked account numbers (1*****5743)
+  const accountMatches = smsText.match(/\d\*{5,}\d+/g);
+  if (accountMatches) {
+    identifiers.accountNumbers = accountMatches;
+  }
+
+  // Debug log
+  console.log('🔍 Extracted identifiers:', {
+    refNumber: identifiers.refNumber,
+    rawRef: identifiers.rawRefNumber,
+    exactAmount: identifiers.exactAmount,
+    isCredit: identifiers.isCredit,
+    isDebit: identifiers.isDebit,
+    senderName: identifiers.senderName,
+    recipientName: identifiers.recipientName,
+    time: identifiers.time
+  });
+
+  return identifiers;
+}
   static detectBankFromSMS(smsText) {
     const sms = smsText.toLowerCase();
     if (sms.includes('cbe')) return 'CBE';
@@ -459,72 +543,132 @@ static async tryAutoMatchSMS(newSMSDeposit, smsText) {
 // NEW: Try to auto-match SMS with existing ones
 
 // NEW: Calculate match score between two SMS
- static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
-    let score = 0;
-    const maxScore = 100;
-    
-    // Get second SMS identifiers
-    const sms2Text = sms2Deposit.originalSMS;
-    const sms2Identifiers = this.extractTransactionIdentifiers(sms2Text);
-    
-    console.log('📊 Comparing SMS identifiers:');
-    console.log('SMS1 Amount:', sms1Identifiers.amount);
-    console.log('SMS2 Amount:', sms2Identifiers.amount);
-    console.log('SMS1 Ref:', sms1Identifiers.refNumber);
-    console.log('SMS2 Ref:', sms2Identifiers.refNumber);
-    
-    // 1. Amount match (40 points) - Must be exact for CBE
-    if (sms1Identifiers.amount && sms2Identifiers.amount) {
-      if (sms1Identifiers.amount === sms2Identifiers.amount) {
-        score += 40;
-      } else {
-        // CBE transfers should have exact same amount
-        console.log('⚠️ Amount mismatch');
-        return 0; // Early exit for amount mismatch
-      }
-    }
-    
-    // 2. Transaction/Ref number match (40 points) - Most important for CBE
-    if (sms1Identifiers.refNumber && sms2Identifiers.refNumber) {
-      if (sms1Identifiers.refNumber === sms2Identifiers.refNumber) {
-        score += 40;
-      } else if (sms1Identifiers.refNumber && sms2Identifiers.refNumber) {
-        // Partial match (some CBE SMS might have different formats)
-        if (sms1Identifiers.refNumber.includes(sms2Identifiers.refNumber) || 
-            sms2Identifiers.refNumber.includes(sms1Identifiers.refNumber)) {
-          score += 30;
-        }
-      }
-    }
-    
-    // 3. Time match (15 points) - within 2 minutes for CBE
-    if (sms1Identifiers.time && sms2Identifiers.time) {
-      const time1 = this.parseSMSTime(sms1Identifiers.time);
-      const time2 = this.parseSMSTime(sms2Identifiers.time);
-      
-      if (time1 && time2) {
-        const timeDiff = Math.abs(time1.getTime() - time2.getTime());
-        if (timeDiff <= 2 * 60 * 1000) { // 2 minutes
-          score += 15;
-        } else if (timeDiff <= 10 * 60 * 1000) { // 10 minutes
-          score += 10;
-        }
-      }
-    }
-    
-    // 4. Bank match (5 points)
-    if (sms1Identifiers.smsBank && sms2Identifiers.smsBank) {
-      if (sms1Identifiers.smsBank === sms2Identifiers.smsBank) {
-        score += 5;
-      }
-    }
-    
-    // Convert to percentage
-    const percentage = (score / maxScore) * 100;
-    console.log(`📈 Match percentage: ${percentage}% (${score}/${maxScore})`);
-    
-    return percentage / 100; // Return as decimal
+static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
+  let score = 0;
+  const maxScore = 100;
+  
+  // Get second SMS identifiers
+  const sms2Text = sms2Deposit.originalSMS;
+  const sms2Identifiers = this.extractTransactionIdentifiers(sms2Text);
+  
+  console.log('📊 Comparing SMS identifiers:');
+  console.log('SMS1 Type:', sms1Identifiers.isCredit ? 'CREDIT' : sms1Identifiers.isDebit ? 'DEBIT' : 'UNKNOWN');
+  console.log('SMS2 Type:', sms2Identifiers.isCredit ? 'CREDIT' : sms2Identifiers.isDebit ? 'DEBIT' : 'UNKNOWN');
+  console.log('SMS1 Amount:', sms1Identifiers.amount, 'Exact:', sms1Identifiers.exactAmount);
+  console.log('SMS2 Amount:', sms2Identifiers.amount, 'Exact:', sms2Identifiers.exactAmount);
+  console.log('SMS1 Ref:', sms1Identifiers.refNumber, 'Raw:', sms1Identifiers.rawRefNumber);
+  console.log('SMS2 Ref:', sms2Identifiers.refNumber, 'Raw:', sms2Identifiers.rawRefNumber);
+  
+  // 1. Check if they're opposite types (one debit, one credit) - 20 points
+  if ((sms1Identifiers.isDebit && sms2Identifiers.isCredit) || 
+      (sms1Identifiers.isCredit && sms2Identifiers.isDebit)) {
+    score += 20;
+    console.log('✅ Opposite transaction types');
+  } else {
+    console.log('❌ Same transaction type - not a match');
+    return 0; // Early exit if both are same type
   }
+  
+  // 2. Amount match (30 points) - Must be exact for CBE
+  if (sms1Identifiers.exactAmount && sms2Identifiers.exactAmount) {
+    if (sms1Identifiers.exactAmount === sms2Identifiers.exactAmount) {
+      score += 30;
+      console.log('✅ Exact amount match');
+    } else {
+      console.log('⚠️ Amount mismatch');
+      return 0; // Early exit for amount mismatch
+    }
+  } else if (sms1Identifiers.amount && sms2Identifiers.amount) {
+    // Fallback to regular amount extraction
+    if (Math.abs(sms1Identifiers.amount - sms2Identifiers.amount) < 0.01) {
+      score += 30;
+      console.log('✅ Amount match');
+    } else {
+      console.log('⚠️ Amount mismatch');
+      return 0;
+    }
+  }
+  
+  // 3. Transaction/Ref number match (30 points) - Handle partial matches
+  if (sms1Identifiers.refNumber && sms2Identifiers.refNumber) {
+    const ref1 = sms1Identifiers.refNumber.toUpperCase();
+    const ref2 = sms2Identifiers.refNumber.toUpperCase();
+    
+    // Exact match
+    if (ref1 === ref2) {
+      score += 30;
+      console.log('✅ Exact reference number match');
+    } 
+    // Partial match - one contains the other
+    else if (ref1.includes(ref2) || ref2.includes(ref1)) {
+      score += 25;
+      console.log('✅ Partial reference match (one contains other)');
+    }
+    // Match first part (FT253422RPRW vs FT253422RPRW11206342)
+    else if (sms1Identifiers.rawRefNumber && sms2Identifiers.rawRefNumber) {
+      const raw1 = sms1Identifiers.rawRefNumber.toUpperCase();
+      const raw2 = sms2Identifiers.rawRefNumber.toUpperCase();
+      
+      if (raw1.includes(ref2) || raw2.includes(ref1)) {
+        score += 25;
+        console.log('✅ Raw reference match');
+      } else {
+        // Try to extract common base reference
+        const baseRef1 = ref1.replace(/\d{7,8}$/, '');
+        const baseRef2 = ref2.replace(/\d{7,8}$/, '');
+        
+        if (baseRef1 && baseRef2 && baseRef1 === baseRef2) {
+          score += 28;
+          console.log('✅ Base reference match (after cleanup)');
+        } else {
+          console.log('⚠️ Reference number mismatch');
+          return 0;
+        }
+      }
+    } else {
+      console.log('⚠️ Reference number mismatch');
+      return 0;
+    }
+  }
+  
+  // 4. Time match (10 points) - within 5 minutes
+  if (sms1Identifiers.time && sms2Identifiers.time) {
+    const time1 = this.parseSMSTime(sms1Identifiers.time);
+    const time2 = this.parseSMSTime(sms2Identifiers.time);
+    
+    if (time1 && time2) {
+      const timeDiff = Math.abs(time1.getTime() - time2.getTime());
+      if (timeDiff <= 5 * 60 * 1000) { // 5 minutes
+        score += 10;
+        console.log('✅ Time match within 5 minutes');
+      } else if (timeDiff <= 10 * 60 * 1000) { // 10 minutes
+        score += 5;
+        console.log('⏰ Time within 10 minutes');
+      }
+    }
+  }
+  
+  // 5. Bank match (5 points)
+  if (sms1Identifiers.smsBank && sms2Identifiers.smsBank) {
+    if (sms1Identifiers.smsBank === sms2Identifiers.smsBank) {
+      score += 5;
+      console.log('✅ Bank match');
+    }
+  }
+  
+  // 6. Name correlation (5 points)
+  if (sms1Identifiers.senderName && sms2Identifiers.recipientName) {
+    if (this.namesAreSimilar(sms1Identifiers.senderName, sms2Identifiers.recipientName)) {
+      score += 5;
+      console.log('✅ Names correlate');
+    }
+  }
+  
+  const percentage = (score / maxScore) * 100;
+  console.log(`📈 Match percentage: ${percentage}% (${score}/${maxScore})`);
+  
+  return percentage / 100;
+}
 
   // ENHANCED: Approve matched SMS
   static async approveMatchedSMS(senderSMS, receiverSMS) {
