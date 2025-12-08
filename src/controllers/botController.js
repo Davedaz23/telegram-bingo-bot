@@ -1291,54 +1291,69 @@ Keep playing to improve your stats! 🎯
     const paymentMethod = ctx.session.pendingDepositMethod;
 
     console.log('📱 Processing SMS deposit for method:', paymentMethod);
-    
+
     // Show processing message
     const processingMsg = await ctx.reply('🔄 Processing your SMS...');
 
     try {
       await UserService.findOrCreateUser(ctx.from);
       
-      // Use new matching system with retry
-      const result = await WalletService.matchAndAutoApproveSMS(
-        smsText,
-        ctx.from.id.toString(),
-        paymentMethod
-      );
+      // Use new matching system with error handling
+      let result;
+      try {
+        result = await WalletService.matchAndAutoApproveSMS(
+          smsText,
+          ctx.from.id.toString(),
+          paymentMethod
+        );
+      } catch (matchError) {
+        console.error('Match error:', matchError);
+        // Even if matching fails, store the SMS
+        result = await WalletService.storeSMSMessage(
+          ctx.from.id.toString(),
+          smsText,
+          paymentMethod
+        );
+      }
 
       delete ctx.session.pendingDepositMethod;
       
       // Delete processing message
-      await ctx.deleteMessage(processingMsg.message_id);
+      try {
+        await ctx.deleteMessage(processingMsg.message_id);
+      } catch (e) {
+        console.warn('Could not delete processing message:', e.message);
+      }
 
       // Analyze the SMS type for better messaging
       const smsAnalysis = WalletService.analyzeSMSType(smsText);
       const identifiers = WalletService.extractTransactionIdentifiers(smsText);
       
-      if (result.status === 'APPROVED' || result.status === 'AUTO_APPROVED') {
-        await ctx.replyWithMarkdown(
-          `✅ *Deposit Approved!*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour deposit has been approved! 🎉`,
-          Markup.inlineKeyboard([
-            [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
-            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
-          ])
-        );
+      let message = '';
+      let keyboard = [];
+      
+      if (result.status === 'APPROVED') {
+        message = `✅ *Deposit Approved!*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour deposit has been automatically matched and approved! 🎉`;
+        keyboard = [
+          [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
+          [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+        ];
       } else if (result.status === 'RECEIVED_WAITING_MATCH') {
-        await ctx.replyWithMarkdown(
-          `⏳ *SMS Received, Waiting for Match*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour SMS has been received and is waiting for matching transaction.`,
-          Markup.inlineKeyboard([
-            [Markup.button.callback('💼 Check Status', 'show_wallet')],
-            [Markup.button.callback('🎮 Play Bingo', 'back_to_start')]
-          ])
-        );
+        const typeText = smsAnalysis.type === 'SENDER' ? 'You sent money' : 'We received money';
+        message = `⏳ *SMS Received - Waiting for Match*\n\n*Amount:* $${result.extractedAmount}\n*Type:* ${typeText}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour SMS has been received. We'll match it with the corresponding transaction shortly.`;
+        keyboard = [
+          [Markup.button.callback('💼 Check Status', 'show_wallet')],
+          [Markup.button.callback('💰 New Deposit', 'show_deposit')]
+        ];
       } else {
-        await ctx.replyWithMarkdown(
-          `📱 *SMS Received*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Status:* ${result.status}\n\nYour deposit is being processed.`,
-          Markup.inlineKeyboard([
-            [Markup.button.callback('💼 Check Status', 'show_wallet')],
-            [Markup.button.callback('💰 New Deposit', 'show_deposit')]
-          ])
-        );
+        message = `📱 *SMS Received*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Status:* ${result.status}\n\nYour deposit is being processed.`;
+        keyboard = [
+          [Markup.button.callback('💼 Check Status', 'show_wallet')],
+          [Markup.button.callback('💰 New Deposit', 'show_deposit')]
+        ];
       }
+
+      await ctx.replyWithMarkdown(message, Markup.inlineKeyboard(keyboard));
 
     } catch (error) {
       console.error('❌ SMS deposit error:', error);
