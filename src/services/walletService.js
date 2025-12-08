@@ -549,17 +549,17 @@ static extractTransactionIdentifiers(smsText) {
   // FIXED: Better URL pattern that handles different formats
   // Pattern for: https://apps.cbe.com.et:100/?id=FT253422RPRW11206342
   // Also handles: apps.cbe.com.et?id=FT253422RPRW11206342
-  const cbeUrlPattern = /(?:https?:\/\/)?apps\.cbe\.com\.et(?::\d+)?\/\?id=([A-Z0-9]+)/i;
-  const cbeUrlMatch = smsText.match(cbeUrlPattern);
+  // const cbeUrlPattern = /(?:https?:\/\/)?apps\.cbe\.com\.et(?::\d+)?\/\?id=([A-Z0-9]+)/i;
+  // const cbeUrlMatch = smsText.match(cbeUrlPattern);
   
-  if (cbeUrlMatch && cbeUrlMatch[1]) {
-    rawRef = cbeUrlMatch[1];
-    console.log('🎯 Found CBE URL reference via URL pattern:', rawRef);
+  // if (cbeUrlMatch && cbeUrlMatch[1]) {
+  //   rawRef = cbeUrlMatch[1];
+  //   console.log('🎯 Found CBE URL reference via URL pattern:', rawRef);
     
-    // Clean the reference by removing account suffix
-    foundRef = this.cleanCBEReference(rawRef);
-    console.log('🧹 Cleaned reference:', foundRef);
-  }
+  //   // Clean the reference by removing account suffix
+  //   foundRef = this.cleanCBEReference(rawRef);
+  //   console.log('🧹 Cleaned reference:', foundRef);
+  // }
   
   // Method 2: Standard Ref No pattern (mainly for RECEIVER SMS)
   if (!foundRef) {
@@ -573,18 +573,6 @@ static extractTransactionIdentifiers(smsText) {
     }
   }
   
-  // Method 3: Direct id= pattern (fallback for URLs without full domain)
-  if (!foundRef) {
-    console.log('🔎 Looking for direct id= pattern...');
-    // Pattern for: id=FT253422RPRW11206342 (anywhere in text)
-    const idPattern = /id=([A-Z0-9]{12,})/i;
-    const idMatch = smsText.match(idPattern);
-    if (idMatch && idMatch[1]) {
-      rawRef = idMatch[1];
-      console.log('🎯 Found direct id= reference:', rawRef);
-      foundRef = this.cleanCBEReference(rawRef);
-    }
-  }
   
   // Method 4: FT pattern anywhere in text (final fallback)
   if (!foundRef) {
@@ -595,6 +583,19 @@ static extractTransactionIdentifiers(smsText) {
     if (ftMatch && ftMatch[1]) {
       foundRef = ftMatch[1];
       console.log('✅ Found FT pattern:', foundRef);
+    }
+  }
+  
+  // Method 3: Direct id= pattern (fallback for URLs without full domain)
+  if (!foundRef) {
+    console.log('🔎 Looking for direct id= pattern...');
+    // Pattern for: id=FT253422RPRW11206342 (anywhere in text)
+    const idPattern = /id=([A-Z0-9]{12,})/i;
+    const idMatch = smsText.match(idPattern);
+    if (idMatch && idMatch[1]) {
+      rawRef = idMatch[1];
+      console.log('🎯 Found direct id= reference:', rawRef);
+      foundRef = this.cleanCBEReference(rawRef);
     }
   }
   
