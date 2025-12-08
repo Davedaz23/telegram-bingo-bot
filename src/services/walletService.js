@@ -3055,6 +3055,38 @@ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
       throw error;
     }
   }
+
+  //sms
+  static async getSMSDeposits(page = 1, limit = 20, status = null) {
+    try {
+      const skip = (page - 1) * limit;
+      const query = status ? { status } : {};
+      
+      const [deposits, total] = await Promise.all([
+        SMSDeposit.find(query)
+          .populate('userId', 'firstName username telegramId')
+          .populate('processedBy', 'firstName username')
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit),
+        SMSDeposit.countDocuments(query)
+      ]);
+
+      return {
+        deposits,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      console.error('❌ Error getting SMS deposits:', error);
+      throw error;
+    }
+  }
+
    // NEW: Get SMS deposits by reference
   static async getSMSDepositsByReference(reference, limit = 10) {
     try {
