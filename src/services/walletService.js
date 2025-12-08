@@ -508,7 +508,7 @@ static extractTransactionIdentifiers(smsText) {
   smsText = smsText.trim();
   
   console.log('🔍 EXTRACTING IDENTIFIERS - SMS LENGTH:', smsText.length);
-  console.log('📋 FULL SMS:', smsText);
+  console.log('📋 FULL SMS:', smsText); // ADD THIS to see the full message
   
   const identifiers = {
     amount: this.extractAmountFromSMS(smsText),
@@ -541,96 +541,78 @@ static extractTransactionIdentifiers(smsText) {
     console.log('💰 Exact amount:', identifiers.exactAmount);
   }
 
-  // ====================================================
-  // FOCUS ON FT REFERENCE EXTRACTION (ignore URLs)
-  // ====================================================
+  // ENHANCED: CBE-specific reference extraction
+  let foundRef = null;
+  let rawRef = null;
   
-  console.log('🔎 Looking for FT reference pattern...');
+  console.log('🔎 Looking for CBE URL pattern...');
   
-  // Method 1: Look for FT pattern followed by exactly 12 characters total
-  // Pattern: FT followed by 10 characters (letters or digits)
-  const ftPattern = /(FT\d{6}[A-Z]{4})/i;
-  const ftMatch = smsText.match(ftPattern);
+  // Method 1: Find CBE URL pattern (BOTH SENDER AND RECEIVER have this)
+  // Pattern: https://apps.cbe.com.et:100/?id=FT253422RPRW11206342
+  const cbeUrlPattern = /https?:\/\/apps\.cbe\.com\.et(?::\d+)?\/\?id=([A-Z0-9]+)/i;
+  const cbeUrlMatch = smsText.match(cbeUrlPattern);
   
-  if (ftMatch && ftMatch[1]) {
-    identifiers.refNumber = ftMatch[1].toUpperCase();
-    console.log('✅ Found FT reference (12 chars):', identifiers.refNumber);
-  }
-  
-  // Method 2: If not found, look for FT followed by variable length
-  if (!identifiers.refNumber) {
-    console.log('🔎 Looking for variable length FT pattern...');
-    // Pattern: FT followed by 6-8 digits then 4 letters
-    const ftVarPattern = /(FT\d{6,8}[A-Z]{2,5})/i;
-    const ftVarMatch = smsText.match(ftVarPattern);
+  if (cbeUrlMatch && cbeUrlMatch[1]) {
+    rawRef = cbeUrlMatch[1];
+    console.log('🎯 Found CBE URL reference:', rawRef);
     
-    if (ftVarMatch && ftVarMatch[1]) {
-      const foundRef = ftVarMatch[1].toUpperCase();
-      console.log('✅ Found variable FT reference:', foundRef);
-      
-      // Clean it by removing any trailing digits (account suffix)
-      identifiers.refNumber = this.extractCleanFTReference(foundRef);
-    }
+    // Clean the reference by removing account suffix
+    foundRef = this.cleanCBEReference(rawRef);
+    console.log('🧹 Cleaned reference:', foundRef);
   }
   
-  // Method 3: Look for FT pattern in URL (only as fallback)
-  if (!identifiers.refNumber) {
-    console.log('🔎 Looking for FT in URL as fallback...');
-    const urlPattern = /id=(FT\d+[A-Z]+)/i;
-    const urlMatch = smsText.match(urlPattern);
-    
-    if (urlMatch && urlMatch[1]) {
-      const rawRef = urlMatch[1].toUpperCase();
-      console.log('✅ Found FT in URL:', rawRef);
-      identifiers.refNumber = this.extractCleanFTReference(rawRef);
-    }
-  }
-  
-  // Method 4: Look for "Ref No" pattern (for receiver SMS)
-  if (!identifiers.refNumber) {
+  // Method 2: Standard Ref No pattern (mainly for RECEIVER SMS)
+  if (!foundRef) {
     console.log('🔎 Looking for Ref No pattern...');
-    const refNoPattern = /Ref\s*No\s*([A-Z0-9]+)/i;
-    const refNoMatch = smsText.match(refNoPattern);
-    
-    if (refNoMatch && refNoMatch[1]) {
-      const foundRef = refNoMatch[1].toUpperCase();
-      console.log('✅ Found Ref No reference:', foundRef);
-      
-      // Check if it's an FT reference and clean it
-      if (foundRef.startsWith('FT')) {
-        identifiers.refNumber = this.extractCleanFTReference(foundRef);
-      } else {
-        identifiers.refNumber = foundRef;
-      }
+    const refPattern = /Ref\s*No\s*([A-Z0-9]+)/i;
+    const refMatch = smsText.match(refPattern);
+    if (refMatch) {
+      foundRef = refMatch[1];
+      console.log('✅ Found Ref No:', foundRef);
     }
   }
   
-  // Set transactionId if we found a reference
-  if (identifiers.refNumber) {
+  // Method 3: FT pattern anywhere in text (fallback)
+  if (!foundRef) {
+    console.log('🔎 Looking for FT pattern anywhere...');
+    const ftPattern = /(FT\d+[A-Z]+)/i;
+    const ftMatch = smsText.match(ftPattern);
+    if (ftMatch) {
+      foundRef = ftMatch[1];
+      console.log('✅ Found FT pattern:', foundRef);
+    }
+  }
+  
+  // Method 4: Generic id= pattern (for any URL)
+  if (!foundRef) {
+    console.log('🔎 Looking for generic id= pattern...');
+    const genericIdPattern = /id=([A-Z0-9]{10,})/i;
+    const genericIdMatch = smsText.match(genericIdPattern);
+    if (genericIdMatch) {
+      rawRef = genericIdMatch[1];
+      console.log('🎯 Found generic id reference:', rawRef);
+      foundRef = this.cleanCBEReference(rawRef);
+    }
+  }
+  
+  if (foundRef) {
+    identifiers.refNumber = foundRef.toUpperCase();
     identifiers.transactionId = identifiers.refNumber;
+    identifiers.rawRefNumber = rawRef || foundRef;
+    
     console.log('🎯 FINAL Extracted reference:', identifiers.refNumber);
+    console.log('📝 Raw reference:', identifiers.rawRefNumber);
   } else {
     console.log('⚠️ No reference found in SMS');
     
-    // Debug: Show what we tried to match
-    console.log('🔍 DEBUG - Checking patterns in SMS:');
-    const testPatterns = [
-      /FT\d{6}[A-Z]{4}/i,
-      /FT\d{6,8}[A-Z]{2,5}/i,
-      /id=(FT\d+[A-Z]+)/i,
-      /Ref\s*No\s*[A-Z0-9]+/i
-    ];
-    
-    testPatterns.forEach((pattern, i) => {
-      const match = smsText.match(pattern);
-      console.log(`Pattern ${i+1}:`, pattern.toString(), 'Match:', match ? match[0] : 'No match');
-    });
+    // DEBUG: Show what patterns exist in the SMS
+    console.log('🔍 DEBUG - Checking SMS content:');
+    console.log('Has "id=":', smsText.includes('id='));
+    console.log('Has "FT":', smsText.includes('FT'));
+    console.log('Has "Ref":', smsText.includes('Ref'));
+    console.log('Has URL:', smsText.includes('http'));
   }
-  
-  // ====================================================
-  // REST OF THE EXTRACTION LOGIC
-  // ====================================================
-  
+
   // Extract time
   const timeMatch = smsText.match(/(\d{2}\/\d{2}\/\d{4})\s*(?:at)?\s*(\d{2}:\d{2}:\d{2})/i);
   if (timeMatch) {
@@ -676,64 +658,6 @@ static extractTransactionIdentifiers(smsText) {
   });
 
   return identifiers;
-}
-
-// NEW: Smart FT reference cleaner
-static extractCleanFTReference(foundRef) {
-  if (!foundRef) return null;
-  
-  const ref = foundRef.toUpperCase();
-  console.log(`🧹 Cleaning FT reference: ${ref}`);
-  
-  // If it's not an FT reference, return as-is
-  if (!ref.startsWith('FT')) {
-    console.log(`✅ Not an FT reference, returning as-is: ${ref}`);
-    return ref;
-  }
-  
-  // Check if it looks like FT + 6 digits + 4 letters (standard format)
-  const standardPattern = /^(FT\d{6}[A-Z]{4})/;
-  const standardMatch = ref.match(standardPattern);
-  
-  if (standardMatch) {
-    console.log(`✅ Standard FT reference found: ${standardMatch[1]}`);
-    return standardMatch[1];
-  }
-  
-  // If it's longer, try to extract the base reference
-  // Pattern: FT followed by digits, then letters, then potentially account suffix
-  const pattern = /^(FT\d+[A-Z]+)/;
-  const match = ref.match(pattern);
-  
-  if (match) {
-    const baseRef = match[1];
-    console.log(`✅ Extracted base FT reference: ${baseRef}`);
-    
-    // If base reference is too long (more than 15 chars), it might include account suffix
-    if (baseRef.length > 15) {
-      // Try to find the break between letters and account numbers
-      const letterBreak = baseRef.match(/^(FT\d+[A-Z]+)/);
-      if (letterBreak) {
-        console.log(`✅ Cleaned to letters only: ${letterBreak[1]}`);
-        return letterBreak[1];
-      }
-    }
-    
-    return baseRef;
-  }
-  
-  // If no pattern matches, try to remove trailing digits (account suffix)
-  const trailingDigitsPattern = /^(.*?)(\d{7,8})$/;
-  const trailingMatch = ref.match(trailingDigitsPattern);
-  
-  if (trailingMatch) {
-    const cleanRef = trailingMatch[1];
-    console.log(`✅ Removed trailing digits (account suffix): ${ref} -> ${cleanRef}`);
-    return cleanRef;
-  }
-  
-  console.log(`✅ Could not clean further, returning original: ${ref}`);
-  return ref;
 }
 
 // ENHANCED: Clean CBE reference by removing account suffix
@@ -1798,54 +1722,54 @@ static async adminForceMatchSMS(senderSMSId, receiverSMSId, adminUserId) {
   }
 
   // ENHANCED: Extract transaction identifiers from CBE SMS
-  static extractTransactionIdentifiers(smsText) {
-    const identifiers = {
-      amount: this.extractAmountFromSMS(smsText),
-      transactionId: null,
-      refNumber: null,
-      time: null,
-      senderName: null,
-      recipientName: null,
-      accountNumbers: [],
-      smsBank: this.detectBankFromSMS(smsText)
-    };
+  // static extractTransactionIdentifiers(smsText) {
+  //   const identifiers = {
+  //     amount: this.extractAmountFromSMS(smsText),
+  //     transactionId: null,
+  //     refNumber: null,
+  //     time: null,
+  //     senderName: null,
+  //     recipientName: null,
+  //     accountNumbers: [],
+  //     smsBank: this.detectBankFromSMS(smsText)
+  //   };
     
-    // Extract transaction/ref number (FT253422RPRW format)
-    const refMatch = smsText.match(/Ref No\s*(\w+)/i) || 
-                     smsText.match(/FT\d+\w+/i) ||
-                     smsText.match(/Transaction.*?(\w+)/i) ||
-                     smsText.match(/Txn.*?(\w+)/i);
-    if (refMatch) {
-      identifiers.refNumber = refMatch[1];
-      identifiers.transactionId = refMatch[1];
-    }
+  //   // Extract transaction/ref number (FT253422RPRW format)
+  //   const refMatch = smsText.match(/Ref No\s*(\w+)/i) || 
+  //                    smsText.match(/FT\d+\w+/i) ||
+  //                    smsText.match(/Transaction.*?(\w+)/i) ||
+  //                    smsText.match(/Txn.*?(\w+)/i);
+  //   if (refMatch) {
+  //     identifiers.refNumber = refMatch[1];
+  //     identifiers.transactionId = refMatch[1];
+  //   }
     
-    // Extract time/date - CBE format: "07/12/2025 at 21:58:15"
-    const timeMatch = smsText.match(/(\d{2}\/\d{2}\/\d{4})\s*(?:at)?\s*(\d{2}:\d{2}:\d{2})/i);
-    if (timeMatch) {
-      identifiers.time = `${timeMatch[1]} ${timeMatch[2]}`;
-    }
+  //   // Extract time/date - CBE format: "07/12/2025 at 21:58:15"
+  //   const timeMatch = smsText.match(/(\d{2}\/\d{2}\/\d{4})\s*(?:at)?\s*(\d{2}:\d{2}:\d{2})/i);
+  //   if (timeMatch) {
+  //     identifiers.time = `${timeMatch[1]} ${timeMatch[2]}`;
+  //   }
     
-    // Extract names for CBE format
-    // "from Defar Gobeze" or "to Defar Gobeze"
-    const fromMatch = smsText.match(/from\s+([A-Za-z\s]+?)(?:,|\.|on|with|Your)/i);
-    if (fromMatch) {
-      identifiers.senderName = fromMatch[1].trim();
-    }
+  //   // Extract names for CBE format
+  //   // "from Defar Gobeze" or "to Defar Gobeze"
+  //   const fromMatch = smsText.match(/from\s+([A-Za-z\s]+?)(?:,|\.|on|with|Your)/i);
+  //   if (fromMatch) {
+  //     identifiers.senderName = fromMatch[1].trim();
+  //   }
     
-    const toMatch = smsText.match(/to\s+([A-Za-z\s]+?)(?:,|\.|on|with|from)/i);
-    if (toMatch) {
-      identifiers.recipientName = toMatch[1].trim();
-    }
+  //   const toMatch = smsText.match(/to\s+([A-Za-z\s]+?)(?:,|\.|on|with|from)/i);
+  //   if (toMatch) {
+  //     identifiers.recipientName = toMatch[1].trim();
+  //   }
     
-    // Extract masked account numbers (1*****5743)
-    const accountMatches = smsText.match(/\d\*{5,}\d+/g);
-    if (accountMatches) {
-      identifiers.accountNumbers = accountMatches;
-    }
+  //   // Extract masked account numbers (1*****5743)
+  //   const accountMatches = smsText.match(/\d\*{5,}\d+/g);
+  //   if (accountMatches) {
+  //     identifiers.accountNumbers = accountMatches;
+  //   }
     
-    return identifiers;
-  }
+  //   return identifiers;
+  // }
 
   // NEW: Detect bank from SMS
   static detectBankFromSMS(smsText) {

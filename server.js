@@ -8,6 +8,7 @@ require('dotenv').config();
 const authRoutes = require('./src/routes/auth');
 const gameRoutes = require('./src/routes/games');
 const walletRoutes = require('./src/routes/wallet');
+const testRoutes = require('./src/routes/test');
 
 const BotController = require('./src/controllers/botController');
 // Import WalletService to initialize payment methods
@@ -57,9 +58,30 @@ app.use(express.static(path.join(__dirname, '../public')));
 app.use('/api/auth', authRoutes);
 app.use('/api/games', gameRoutes);
 app.use('/api/wallet', walletRoutes);
-
+app.use('/api', testRoutes);
 // ✅ ADD: Admin routes for wallet management
 app.use('/api/admin', require('./src/routes/admin'));
+
+app.get('/test-sms', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public/test-sms.html'));
+});
+
+// Quick test endpoint
+app.get('/test-quick', async (req, res) => {
+  const testSMS = req.query.sms || `Dear Defar, You have transfered ETB 50.00 to Defar Gobeze on 07/12/2025 at 21:58:15 from your account 1*****6342. Your account has been debited with a S.charge of ETB 0.50 and  15% VAT of ETB0.08, with a total of ETB50.58. Your Current Balance is ETB 285,823.10. Thank you for Banking with CBE! https://apps.cbe.com.et:100/?id=FT253422RPRW11206342 For feedback click the link https://forms.gle/R1s9nkJ6qZVCxRVu9`;
+  
+  try {
+    const result = {
+      originalSMS: testSMS,
+      extraction: WalletService.extractTransactionIdentifiers(testSMS),
+      cleaned: WalletService.cleanCBEReference(WalletService.extractTransactionIdentifiers(testSMS).refNumber)
+    };
+    
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ✅ MODIFIED: Initialize auto-game service AND wallet payment methods
 const initializeServices = async () => {
