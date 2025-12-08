@@ -402,6 +402,24 @@ static async tryAutoMatchSMS(newSMSDeposit, smsText) {
 // NEW: Extract transaction identifiers from SMS
 
 static extractTransactionIdentifiers(smsText) {
+  // TRIM any whitespace and ensure we have the full text
+  smsText = smsText.trim();
+  
+  console.log('🔍 EXTRACTING IDENTIFIERS - SMS LENGTH:', smsText.length);
+  console.log('📋 SMS FIRST 100 chars:', smsText.substring(0, 100));
+  console.log('📋 SMS LAST 100 chars:', smsText.substring(Math.max(0, smsText.length - 100)));
+  
+  // Check for URL patterns
+  const hasURL = smsText.includes('https://') || smsText.includes('http://');
+  const hasIDParam = smsText.includes('id=');
+  console.log('🔗 Has URL:', hasURL, 'Has id=:', hasIDParam);
+  
+  if (hasIDParam) {
+    // Find the id parameter
+    const idMatch = smsText.match(/id=([A-Z0-9]+)/gi);
+    console.log('🎯 Found id matches:', idMatch);
+  }
+
   const identifiers = {
     amount: this.extractAmountFromSMS(smsText),
     transactionId: null,
@@ -413,105 +431,101 @@ static extractTransactionIdentifiers(smsText) {
     smsBank: this.detectBankFromSMS(smsText),
     rawRefNumber: null,
     isCredit: false,
-    isDebit: false
+    isDebit: false,
+    exactAmount: null
   };
 
   const sms = smsText.toLowerCase();
-  identifiers.isCredit = /credited|received/i.test(sms);
-  identifiers.isDebit = /debited|transfered|sent/i.test(sms);
+  
+  // FIXED: Better transaction type detection
+  identifiers.isCredit = /credited|received/i.test(smsText);
+  identifiers.isDebit = /debited|transfered|sent/i.test(smsText);
+  
+  console.log('💳 Transaction type - isCredit:', identifiers.isCredit, 'isDebit:', identifiers.isDebit);
 
   // Extract EXACT amount
   const amountMatch = smsText.match(/ETB\s*([\d,]+\.?\d*)/i);
   if (amountMatch) {
     const cleanAmount = amountMatch[1].replace(/,/g, '');
     identifiers.exactAmount = parseFloat(cleanAmount);
+    console.log('💰 Exact amount:', identifiers.exactAmount);
   }
 
-  // FIXED: Enhanced reference extraction with better URL parsing
-  console.log('🔍 FULL SMS TEXT FOR DEBUGGING:', smsText);
+  // FIXED: IMPROVED REFERENCE EXTRACTION
+  let foundRef = null;
+  let rawRef = null;
   
-  // Pattern 1: Standard "Ref No FT253422RPRW" format
-  let refMatch = smsText.match(/Ref\s*No\s*([A-Z0-9]+)/i);
+  // Method 1: Standard Ref No pattern
+  const refMatch = smsText.match(/Ref\s*No\s*([A-Z0-9]+)/i);
+  if (refMatch) {
+    foundRef = refMatch[1];
+    console.log('✅ Found Ref No:', foundRef);
+  }
   
-  // Pattern 2: URL format - FIXED to handle truncated URLs better
-  if (!refMatch) {
-    // Look for any URL pattern with id parameter
+  // Method 2: URL id parameter - FIXED REGEX
+  if (!foundRef) {
+    // Look for id parameter in URL - more robust pattern
     const urlPatterns = [
-      /id=([A-Z0-9]+)/i,
-      /\?id=([A-Z0-9]+)/i,
-      /:100\/\?id=([A-Z0-9]+)/i,
-      /apps\.cbe\.com\.et.*id=([A-Z0-9]+)/i
+      /[?&]id=([A-Z0-9]{12,})/i,        // ?id= or &id=
+      /id=([A-Z0-9]{12,})(?:&|$| )/i,   // id= followed by &, end, or space
+      /:100\/\?id=([A-Z0-9]+)/i,        // CBE specific format
+      /\?id=([A-Z0-9]+)/i               // Generic ?id=
     ];
     
-    for (const pattern of urlPatterns) {
+    for (let i = 0; i < urlPatterns.length; i++) {
+      const pattern = urlPatterns[i];
       const urlMatch = smsText.match(pattern);
       if (urlMatch && urlMatch[1]) {
-        const fullId = urlMatch[1];
-        identifiers.rawRefNumber = fullId;
-        console.log('🔍 Found URL reference with pattern', pattern, ':', fullId);
+        rawRef = urlMatch[1];
+        console.log(`🎯 Found URL ID with pattern ${i}:`, rawRef);
         
-        // Clean up the reference - CBE format: FT253422RPRW11206342
-        // Remove last 8 digits (account suffix)
-        if (fullId.length >= 12) {
-          // Try to find the FT reference pattern
-          const ftMatch = fullId.match(/(FT\d+[A-Z]+)/i);
-          if (ftMatch) {
-            identifiers.refNumber = ftMatch[1];
-            console.log('✅ Extracted FT reference:', identifiers.refNumber);
-          } else {
-            // Fallback: take first part (remove last 8 digits if they're numbers)
-            const refLength = fullId.length - 8;
-            if (refLength >= 8) {
-              identifiers.refNumber = fullId.substring(0, refLength);
-              console.log('✅ Extracted by removing account suffix:', identifiers.refNumber);
-            } else {
-              identifiers.refNumber = fullId;
-            }
-          }
+        // Extract FT reference pattern
+        const ftPattern = /(FT\d+[A-Z]+)/i;
+        const ftMatch = rawRef.match(ftPattern);
+        
+        if (ftMatch) {
+          foundRef = ftMatch[1];
+          console.log('✅ Extracted FT reference:', foundRef);
         } else {
-          identifiers.refNumber = fullId;
+          // Remove account suffix (last 8 digits)
+          if (rawRef.length >= 12) {
+            // Check if last 8 characters are digits
+            const last8 = rawRef.slice(-8);
+            if (/^\d{8}$/.test(last8)) {
+              foundRef = rawRef.slice(0, -8);
+              console.log('✅ Removed account suffix:', foundRef);
+            } else {
+              foundRef = rawRef;
+            }
+          } else {
+            foundRef = rawRef;
+          }
         }
         break;
       }
     }
-  } else {
-    identifiers.refNumber = refMatch[1];
-    console.log('✅ Extracted standard Ref No:', identifiers.refNumber);
   }
-
-  // Pattern 3: Direct FT pattern in text
-  if (!identifiers.refNumber) {
-    const ftMatch = smsText.match(/(FT\d+[A-Z]+)/i);
+  
+  // Method 3: FT pattern anywhere
+  if (!foundRef) {
+    const ftPattern = /(FT\d+[A-Z]+)/i;
+    const ftMatch = smsText.match(ftPattern);
     if (ftMatch) {
-      identifiers.refNumber = ftMatch[1];
-      console.log('✅ Extracted FT pattern directly:', identifiers.refNumber);
+      foundRef = ftMatch[1];
+      console.log('✅ Found FT pattern in text:', foundRef);
     }
   }
-
-  // Pattern 4: Transaction ID pattern
-  if (!identifiers.refNumber) {
-    const txnMatch = smsText.match(/Transaction.*?([A-Z0-9]{8,})/i) ||
-                     smsText.match(/Txn.*?([A-Z0-9]{8,})/i);
-    if (txnMatch) {
-      identifiers.refNumber = txnMatch[1];
-      console.log('✅ Extracted from transaction text:', identifiers.refNumber);
-    }
-  }
-
-  // Clean up the reference number
-  if (identifiers.refNumber) {
-    identifiers.refNumber = identifiers.refNumber.toUpperCase();
-    
-    // Remove any trailing numbers (account suffix)
-    const cleanedRef = identifiers.refNumber.replace(/\d{8}$/, '');
-    if (cleanedRef.length >= 8) {
-      identifiers.refNumber = cleanedRef;
-    }
-    
+  
+  if (foundRef) {
+    identifiers.refNumber = foundRef.toUpperCase();
     identifiers.transactionId = identifiers.refNumber;
+    identifiers.rawRefNumber = rawRef || foundRef;
+    console.log('🎯 Final reference:', identifiers.refNumber, 'Raw:', identifiers.rawRefNumber);
+  } else {
+    console.log('⚠️ No reference found');
   }
 
-  // Extract time/date
+  // Extract time
   const timeMatch = smsText.match(/(\d{2}\/\d{2}\/\d{4})\s*(?:at)?\s*(\d{2}:\d{2}:\d{2})/i);
   if (timeMatch) {
     identifiers.time = `${timeMatch[1]} ${timeMatch[2]}`;
@@ -523,13 +537,6 @@ static extractTransactionIdentifiers(smsText) {
     if (toMatch) {
       identifiers.recipientName = toMatch[1].trim();
     }
-    
-    if (!identifiers.recipientName) {
-      const transferMatch = smsText.match(/transfered.*?to\s+([A-Za-z\s]+?)(?:,|\.|on|with)/i);
-      if (transferMatch) {
-        identifiers.recipientName = transferMatch[1].trim();
-      }
-    }
   }
 
   if (identifiers.isCredit) {
@@ -537,33 +544,16 @@ static extractTransactionIdentifiers(smsText) {
     if (fromMatch) {
       identifiers.senderName = fromMatch[1].trim();
     }
-    
-    if (!identifiers.senderName) {
-      const creditedMatch = smsText.match(/credited.*?from\s+([A-Za-z\s]+?)(?:,|\.|on|with)/i);
-      if (creditedMatch) {
-        identifiers.senderName = creditedMatch[1].trim();
-      }
-    }
   }
 
-  // Extract account numbers
-  const accountMatches = smsText.match(/\d\*{5,}\d+/g);
-  if (accountMatches) {
-    identifiers.accountNumbers = accountMatches;
-  }
-
-  // Enhanced debug log
-  console.log('🔍 FINAL EXTRACTED IDENTIFIERS:', {
+  console.log('✅ FINAL IDENTIFIERS:', {
     refNumber: identifiers.refNumber,
-    rawRefNumber: identifiers.rawRefNumber,
-    exactAmount: identifiers.exactAmount,
     isCredit: identifiers.isCredit,
     isDebit: identifiers.isDebit,
-    senderName: identifiers.senderName,
-    recipientName: identifiers.recipientName,
-    time: identifiers.time,
     amount: identifiers.amount,
-    transactionId: identifiers.transactionId
+    exactAmount: identifiers.exactAmount,
+    senderName: identifiers.senderName,
+    recipientName: identifiers.recipientName
   });
 
   return identifiers;
