@@ -503,10 +503,12 @@ static async tryAutoMatchSMS(newSMSDeposit, smsText) {
   }
 // NEW: Extract transaction identifiers from SMS
 
+// UPDATED: Enhanced reference extraction for both SENDER and RECEIVER SMS
 static extractTransactionIdentifiers(smsText) {
   smsText = smsText.trim();
   
   console.log('🔍 EXTRACTING IDENTIFIERS - SMS LENGTH:', smsText.length);
+  console.log('📋 FULL SMS:', smsText); // ADD THIS to see the full message
   
   const identifiers = {
     amount: this.extractAmountFromSMS(smsText),
@@ -543,43 +545,25 @@ static extractTransactionIdentifiers(smsText) {
   let foundRef = null;
   let rawRef = null;
   
-  // Method 1: Find FT pattern in URL (SENDER SMS pattern)
-  // Pattern: FT253422RPRW11206342
-  const urlPattern = /(?:https?:\/\/apps\.cbe\.com\.et(?::\d+)?\/\?id=|id=)([A-Z0-9]+)/i;
-  const urlMatch = smsText.match(urlPattern);
+  console.log('🔎 Looking for CBE URL pattern...');
   
-  if (urlMatch && urlMatch[1]) {
-    rawRef = urlMatch[1];
-    console.log('🎯 Found URL reference:', rawRef);
+  // Method 1: Find CBE URL pattern (BOTH SENDER AND RECEIVER have this)
+  // Pattern: https://apps.cbe.com.et:100/?id=FT253422RPRW11206342
+  const cbeUrlPattern = /https?:\/\/apps\.cbe\.com\.et(?::\d+)?\/\?id=([A-Z0-9]+)/i;
+  const cbeUrlMatch = smsText.match(cbeUrlPattern);
+  
+  if (cbeUrlMatch && cbeUrlMatch[1]) {
+    rawRef = cbeUrlMatch[1];
+    console.log('🎯 Found CBE URL reference:', rawRef);
     
-    // Check if it's an FT reference
-    if (rawRef.startsWith('FT')) {
-      // Check length to determine if it has account suffix
-      if (rawRef.length >= 12) {
-        // For SENDER SMS: FT253422RPRW11206342 (20 chars)
-        // For RECEIVER SMS: FT253422RPRW (12 chars) or FT253422RPRW73135743 (20 chars)
-        
-        // Remove last 8 digits if they're all numbers (account suffix)
-        const last8 = rawRef.slice(-8);
-        if (/^\d{8}$/.test(last8)) {
-          // This has account suffix, remove it
-          foundRef = rawRef.slice(0, -8);
-          console.log('✅ Removed 8-digit account suffix:', foundRef);
-        } else {
-          // No account suffix or not 8 digits
-          foundRef = rawRef;
-          console.log('✅ No account suffix found, using full reference');
-        }
-      } else {
-        foundRef = rawRef;
-      }
-    } else {
-      foundRef = rawRef;
-    }
+    // Clean the reference by removing account suffix
+    foundRef = this.cleanCBEReference(rawRef);
+    console.log('🧹 Cleaned reference:', foundRef);
   }
   
-  // Method 2: Standard Ref No pattern (RECEIVER SMS pattern)
+  // Method 2: Standard Ref No pattern (mainly for RECEIVER SMS)
   if (!foundRef) {
+    console.log('🔎 Looking for Ref No pattern...');
     const refPattern = /Ref\s*No\s*([A-Z0-9]+)/i;
     const refMatch = smsText.match(refPattern);
     if (refMatch) {
@@ -590,57 +574,55 @@ static extractTransactionIdentifiers(smsText) {
   
   // Method 3: FT pattern anywhere in text (fallback)
   if (!foundRef) {
+    console.log('🔎 Looking for FT pattern anywhere...');
     const ftPattern = /(FT\d+[A-Z]+)/i;
     const ftMatch = smsText.match(ftPattern);
     if (ftMatch) {
       foundRef = ftMatch[1];
-      console.log('✅ Found FT pattern in text:', foundRef);
+      console.log('✅ Found FT pattern:', foundRef);
     }
   }
   
-  // Method 4: Try to extract from any FTxxxxx pattern
+  // Method 4: Generic id= pattern (for any URL)
   if (!foundRef) {
-    const anyFtPattern = /(FT\d+\w+)/i;
-    const anyFtMatch = smsText.match(anyFtPattern);
-    if (anyFtMatch) {
-      foundRef = anyFtMatch[1];
-      
-      // Check if it has account suffix
-      if (foundRef.length >= 12) {
-        const last8 = foundRef.slice(-8);
-        if (/^\d{8}$/.test(last8)) {
-          foundRef = foundRef.slice(0, -8);
-          console.log('✅ Cleaned FT reference (removed suffix):', foundRef);
-        }
-      }
+    console.log('🔎 Looking for generic id= pattern...');
+    const genericIdPattern = /id=([A-Z0-9]{10,})/i;
+    const genericIdMatch = smsText.match(genericIdPattern);
+    if (genericIdMatch) {
+      rawRef = genericIdMatch[1];
+      console.log('🎯 Found generic id reference:', rawRef);
+      foundRef = this.cleanCBEReference(rawRef);
     }
   }
   
   if (foundRef) {
-    // Ensure we have the clean reference (without account suffix)
     identifiers.refNumber = foundRef.toUpperCase();
     identifiers.transactionId = identifiers.refNumber;
     identifiers.rawRefNumber = rawRef || foundRef;
     
-    // Log the extraction result
-    console.log('🎯 Extracted reference:', identifiers.refNumber);
-    if (rawRef && rawRef !== foundRef) {
-      console.log('📝 Raw reference (from URL):', rawRef);
-      console.log('🔧 Applied transformation: Removed 8-digit account suffix');
-    }
+    console.log('🎯 FINAL Extracted reference:', identifiers.refNumber);
+    console.log('📝 Raw reference:', identifiers.rawRefNumber);
   } else {
     console.log('⚠️ No reference found in SMS');
+    
+    // DEBUG: Show what patterns exist in the SMS
+    console.log('🔍 DEBUG - Checking SMS content:');
+    console.log('Has "id=":', smsText.includes('id='));
+    console.log('Has "FT":', smsText.includes('FT'));
+    console.log('Has "Ref":', smsText.includes('Ref'));
+    console.log('Has URL:', smsText.includes('http'));
   }
 
   // Extract time
   const timeMatch = smsText.match(/(\d{2}\/\d{2}\/\d{4})\s*(?:at)?\s*(\d{2}:\d{2}:\d{2})/i);
   if (timeMatch) {
     identifiers.time = `${timeMatch[1]} ${timeMatch[2]}`;
+    console.log('⏰ Extracted time:', identifiers.time);
   }
 
-  // Extract names - FIXED for CBE format
+  // Extract names
   if (identifiers.isDebit) {
-    // Pattern: "to Defar Gobeze"
+    // Pattern for SENDER: "to Defar Gobeze"
     const toMatch = smsText.match(/to\s+([A-Za-z\s]+?)(?:,|\.|on|with|from|Your|on)/i);
     if (toMatch) {
       identifiers.recipientName = toMatch[1].trim();
@@ -649,7 +631,7 @@ static extractTransactionIdentifiers(smsText) {
   }
 
   if (identifiers.isCredit) {
-    // Pattern: "from Defar Gobeze"
+    // Pattern for RECEIVER: "from Defar Gobeze"
     const fromMatch = smsText.match(/from\s+([A-Za-z\s]+?)(?:,|\.|on|with|Your|with)/i);
     if (fromMatch) {
       identifiers.senderName = fromMatch[1].trim();
@@ -657,8 +639,8 @@ static extractTransactionIdentifiers(smsText) {
     }
   }
 
-  // Extract masked account number (1*****6342)
-  const accountMatch = smsText.match(/(\d\*{5,}\d{4})/);
+  // Extract masked account number (1*****6342 or 1*6342)
+  const accountMatch = smsText.match(/(\d\*+?\d{4})/);
   if (accountMatch) {
     identifiers.accountNumbers = [accountMatch[1]];
     console.log('🏦 Account number:', accountMatch[1]);
@@ -671,10 +653,45 @@ static extractTransactionIdentifiers(smsText) {
     amount: identifiers.amount,
     exactAmount: identifiers.exactAmount,
     senderName: identifiers.senderName,
-    recipientName: identifiers.recipientName
+    recipientName: identifiers.recipientName,
+    time: identifiers.time
   });
 
   return identifiers;
+}
+
+// ENHANCED: Clean CBE reference by removing account suffix
+static cleanCBEReference(reference) {
+  if (!reference) return null;
+  
+  const ref = reference.toUpperCase();
+  
+  console.log(`🧹 Cleaning reference: ${ref}`);
+  
+  // Check if it's an FT reference
+  if (ref.startsWith('FT')) {
+    // Check if it's long enough to have an account suffix
+    if (ref.length >= 12) {
+      const last8 = ref.slice(-8);
+      
+      // If last 8 characters are all digits, remove them (account suffix)
+      if (/^\d{8}$/.test(last8)) {
+        const cleanRef = ref.slice(0, -8);
+        console.log(`✅ Removed 8-digit account suffix: ${ref} -> ${cleanRef}`);
+        return cleanRef;
+      } else {
+        console.log(`✅ No account suffix found: ${ref}`);
+        return ref;
+      }
+    } else {
+      console.log(`✅ Reference too short for suffix: ${ref}`);
+      return ref;
+    }
+  }
+  
+  // Not an FT reference, return as-is
+  console.log(`✅ Not an FT reference: ${ref}`);
+  return ref;
 }
 static async cleanupDuplicateReferences() {
     try {
