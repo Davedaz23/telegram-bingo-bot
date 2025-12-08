@@ -1,4 +1,4 @@
-// models/SMSDeposit.js - UPDATED
+// models/SMSDeposit.js - UPDATED with RECEIVED_WAITING_MATCH
 const mongoose = require('mongoose');
 
 const smsDepositSchema = new mongoose.Schema({
@@ -27,7 +27,17 @@ const smsDepositSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['RECEIVED', 'PENDING', 'APPROVED', 'REJECTED', 'AUTO_APPROVED', 'PROCESSING'],
+    enum: [
+      'RECEIVED', 
+      'RECEIVED_WAITING_MATCH',  // ADD THIS
+      'PENDING', 
+      'APPROVED', 
+      'REJECTED', 
+      'AUTO_APPROVED', 
+      'PROCESSING',
+      'CONFIRMED',               // ADD THIS for admin confirmation
+      'AUTO_MATCHED'             // ADD THIS for auto-matched deposits
+    ],
     default: 'RECEIVED'
   },
   transactionId: {
@@ -51,17 +61,19 @@ const smsDepositSchema = new mongoose.Schema({
   },
   smsType: {
     type: String,
-    enum: ['MANUAL_DEPOSIT', 'AUTO_DETECTED', 'BANK_SMS'],
+    enum: ['MANUAL_DEPOSIT', 'AUTO_DETECTED', 'BANK_SMS', 'SENDER', 'RECEIVER'], // ADD SENDER and RECEIVER
     default: 'BANK_SMS'
   }
 }, {
   timestamps: true
 });
 
-// Indexes
+// Indexes for better matching performance
 smsDepositSchema.index({ telegramId: 1, status: 1 });
 smsDepositSchema.index({ status: 1, createdAt: 1 });
 smsDepositSchema.index({ autoApproved: 1 });
 smsDepositSchema.index({ smsType: 1 });
+smsDepositSchema.index({ 'metadata.smsType': 1 }); // ADD THIS for metadata queries
+smsDepositSchema.index({ extractedAmount: 1, createdAt: 1 }); // ADD THIS for amount matching
 
 module.exports = mongoose.model('SMSDeposit', smsDepositSchema);

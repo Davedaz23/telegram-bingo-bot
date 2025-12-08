@@ -71,7 +71,7 @@ static async matchAndAutoApproveSMS(smsText, telegramId, paymentMethod) {
   try {
     console.log('🔄 Starting SMS matching and auto-approval...');
     
-    // First, store the SMS (this could be either sender or receiver SMS)
+    // First, store the SMS
     const smsDeposit = await this.storeSMSMessage(telegramId, smsText, paymentMethod);
     
     // Analyze SMS type
@@ -86,7 +86,7 @@ static async matchAndAutoApproveSMS(smsText, telegramId, paymentMethod) {
       console.log('🔑 Sender identifiers:', senderIdentifiers);
       
       // Store in metadata for future matching
-      smsDeposit.metadata.smsType = 'SENDER';
+      smsDeposit.smsType = 'SENDER'; // Use smsType field
       smsDeposit.metadata.transactionIdentifiers = senderIdentifiers;
       smsDeposit.metadata.recipientName = senderIdentifiers.recipientName;
       smsDeposit.status = 'RECEIVED_WAITING_MATCH';
@@ -103,7 +103,7 @@ static async matchAndAutoApproveSMS(smsText, telegramId, paymentMethod) {
       console.log('🔑 Receiver identifiers:', receiverIdentifiers);
       
       // Store in metadata
-      smsDeposit.metadata.smsType = 'RECEIVER';
+      smsDeposit.smsType = 'RECEIVER'; // Use smsType field
       smsDeposit.metadata.transactionIdentifiers = receiverIdentifiers;
       smsDeposit.metadata.senderName = receiverIdentifiers.senderName;
       smsDeposit.status = 'RECEIVED_WAITING_MATCH';
@@ -122,6 +122,26 @@ static async matchAndAutoApproveSMS(smsText, telegramId, paymentMethod) {
   } catch (error) {
     await session.abortTransaction();
     console.error('❌ Error in SMS matching:', error);
+    
+    // Handle validation errors gracefully
+    if (error.message.includes('validation failed') || error.message.includes('enum value')) {
+      // Try to save with default status
+      try {
+        const smsDeposit = await SMSDeposit.findOne({
+          originalSMS: smsText,
+          telegramId: telegramId.toString()
+        });
+        
+        if (smsDeposit) {
+          smsDeposit.status = 'RECEIVED';
+          await smsDeposit.save();
+          return smsDeposit;
+        }
+      } catch (saveError) {
+        console.error('❌ Could not save SMS deposit after error:', saveError);
+      }
+    }
+    
     throw error;
   } finally {
     session.endSession();
@@ -924,63 +944,88 @@ static async findMatchingSMS(smsDepositId) {
   }
 
   // ENHANCED: Try to auto-match SMS with existing ones
-  static async tryAutoMatchSMS(newSMSDeposit, smsText) {
-    try {
-      const newAnalysis = this.analyzeSMSType(smsText);
-      const newIdentifiers = this.extractTransactionIdentifiers(smsText);
-      
-      console.log('🔍 Attempting to match SMS:', newSMSDeposit._id);
-      console.log('📊 New SMS type:', newAnalysis.type);
-      console.log('📊 New SMS identifiers:', newIdentifiers);
-      
-      if (!newIdentifiers.amount || newIdentifiers.amount <= 0) {
-        console.log('⚠️ No valid amount, cannot match');
-        return null;
-      }
-      
-      // Find potential matches based on opposite type
-      const oppositeType = newAnalysis.type === 'SENDER' ? 'RECEIVER' : 'SENDER';
-      
-      const query = {
-        _id: { $ne: newSMSDeposit._id },
-        status: 'RECEIVED_WAITING_MATCH',
-        'metadata.smsType': oppositeType,
-        extractedAmount: newIdentifiers.amount,
-        createdAt: { 
-          $gte: new Date(Date.now() - 60 * 60 * 1000) // Last 1 hour
-        }
-      };
-      
-      console.log('🔍 Query for matches:', JSON.stringify(query, null, 2));
-      
-      const potentialMatches = await SMSDeposit.find(query)
-        .populate('userId', 'firstName username telegramId')
-        .sort({ createdAt: -1 })
-        .limit(10);
-      
-      console.log(`🔍 Found ${potentialMatches.length} potential matches`);
-      
-      for (const potentialMatch of potentialMatches) {
-        const matchScore = this.calculateSMSMatchScore(newIdentifiers, potentialMatch);
-        console.log(`📊 Match score with ${potentialMatch._id}: ${matchScore}`);
-        
-        if (matchScore >= 0.85) { // 85% match confidence
-          console.log(`✅ High confidence match found! (${matchScore})`);
-          
-          // APPROVE THE MATCHED TRANSACTION
-          await this.approveMatchedSMS(newSMSDeposit, potentialMatch);
-          return potentialMatch;
-        }
-      }
-      
-      console.log('❌ No strong matches found');
-      return null;
-      
-    } catch (error) {
-      console.error('❌ Error in auto-matching:', error);
+ static async tryAutoMatchSMS(newSMSDeposit, smsText) {
+  try {
+    const newAnalysis = this.analyzeSMSType(smsText);
+    const newIdentifiers = this.extractTransactionIdentifiers(smsText);
+    
+    console.log('🔍 Attempting to match SMS:', newSMSDeposit._id);
+    console.log('📊 New SMS type:', newAnalysis.type);
+    console.log('📊 New SMS identifiers:', newIdentifiers);
+    
+    if (!newIdentifiers.amount || newIdentifiers.amount <= 0) {
+      console.log('⚠️ No valid amount, cannot match');
       return null;
     }
+    
+    // Find potential matches based on opposite type
+    const oppositeType = newAnalysis.type === 'SENDER' ? 'RECEIVER' : 'SENDER';
+    
+    const query = {
+      _id: { $ne: newSMSDeposit._id },
+      status: { 
+        $in: ['RECEIVED', 'RECEIVED_WAITING_MATCH', 'PENDING'] 
+      },
+      smsType: oppositeType, // Use smsType field
+      extractedAmount: newIdentifiers.amount,
+      createdAt: { 
+        $gte: new Date(Date.now() - 60 * 60 * 1000) // Last 1 hour
+      }
+    };
+    
+    console.log('🔍 Query for matches:', JSON.stringify(query, null, 2));
+    
+    const potentialMatches = await SMSDeposit.find(query)
+      .populate('userId', 'firstName username telegramId')
+      .sort({ createdAt: -1 })
+      .limit(10);
+    
+    console.log(`🔍 Found ${potentialMatches.length} potential matches`);
+    
+    for (const potentialMatch of potentialMatches) {
+      const matchScore = this.calculateSMSMatchScore(newIdentifiers, potentialMatch);
+      console.log(`📊 Match score with ${potentialMatch._id}: ${matchScore}`);
+      
+      if (matchScore >= 0.85) { // 85% match confidence
+        console.log(`✅ High confidence match found! (${matchScore})`);
+        
+        // APPROVE THE MATCHED TRANSACTION
+        await this.approveMatchedSMS(newSMSDeposit, potentialMatch);
+        return potentialMatch;
+      }
+    }
+    
+    console.log('❌ No strong matches found');
+    
+    // If no match found, update status to waiting for match
+    newSMSDeposit.status = 'RECEIVED_WAITING_MATCH';
+    newSMSDeposit.smsType = newAnalysis.type; // Use smsType field
+    newSMSDeposit.metadata.transactionIdentifiers = newIdentifiers;
+    
+    if (newAnalysis.type === 'SENDER') {
+      newSMSDeposit.metadata.recipientName = newIdentifiers.recipientName;
+    } else if (newAnalysis.type === 'RECEIVER') {
+      newSMSDeposit.metadata.senderName = newIdentifiers.senderName;
+    }
+    
+    await newSMSDeposit.save();
+    return null;
+    
+  } catch (error) {
+    console.error('❌ Error in auto-matching:', error);
+    
+    // Fallback: Save with basic status if there's a validation error
+    try {
+      newSMSDeposit.status = 'RECEIVED';
+      newSMSDeposit.metadata.matchingError = error.message;
+      await newSMSDeposit.save();
+    } catch (saveError) {
+      console.error('❌ Could not save SMS deposit:', saveError);
+    }
+    
+    return null;
   }
+}
 
 
   // NEW: Detect payment method from SMS content
@@ -1783,7 +1828,7 @@ static async approveReceivedSMS(smsDepositId, adminUserId) {
       session.endSession();
     }
   }
- static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
+static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
     try {
       console.log('💾 Storing SMS message from user:', userId);
       
@@ -1797,6 +1842,9 @@ static async approveReceivedSMS(smsDepositId, adminUserId) {
       const amount = this.extractAmountFromSMS(smsText);
       const detectedMethod = this.detectPaymentMethodFromSMS(smsText);
       const finalMethod = paymentMethod === 'UNKNOWN' ? detectedMethod : paymentMethod;
+      
+      // Analyze SMS type for matching
+      const analysis = this.analyzeSMSType(smsText);
 
       const smsDeposit = new SMSDeposit({
         userId: mongoUserId,
@@ -1805,6 +1853,7 @@ static async approveReceivedSMS(smsDepositId, adminUserId) {
         paymentMethod: finalMethod,
         extractedAmount: amount || 0,
         status: 'RECEIVED',
+        smsType: analysis.type, // Use smsType field instead of metadata
         metadata: {
           smsLength: smsText.length,
           hasTransactionId: smsText.includes('Txn ID') || smsText.includes('Transaction'),
@@ -1812,13 +1861,13 @@ static async approveReceivedSMS(smsDepositId, adminUserId) {
           amountDetected: !!amount,
           detectedAmount: amount,
           storedAt: new Date(),
-          autoProcessAttempted: false
-        },
-        smsType: 'BANK_SMS'
+          autoProcessAttempted: false,
+          confidence: analysis.confidence
+        }
       });
 
       await smsDeposit.save();
-      console.log('✅ SMS stored successfully:', smsDeposit._id);
+      console.log('✅ SMS stored successfully:', smsDeposit._id, 'Type:', smsDeposit.smsType);
 
       return smsDeposit;
     } catch (error) {
