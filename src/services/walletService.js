@@ -63,133 +63,240 @@ static async resolveUserId(userId) {
   }
   // Add these new methods to your WalletService class:
 
-// NEW: Enhanced SMS matching system for automatic approval
-static async matchAndAutoApproveSMS(smsText, telegramId, paymentMethod) {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+ // NEW: Enhanced SMS matching system with reference storage
+  static async matchAndAutoApproveSMS(smsText, telegramId, paymentMethod) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-  try {
-    console.log('🔄 Starting SMS matching and auto-approval...');
-    
-    // First, store the SMS
-    const smsDeposit = await this.storeSMSMessage(telegramId, smsText, paymentMethod);
-    
-    // Analyze SMS type
-    const smsAnalysis = this.analyzeSMSType(smsText);
-    console.log('🔍 SMS Analysis:', smsAnalysis);
-    
-    if (smsAnalysis.type === 'SENDER') {
-      console.log('📤 This is a SENDER SMS (user sent money)');
+    try {
+      console.log('🔄 Starting SMS matching and auto-approval...');
       
-      // Extract key identifiers
-      const senderIdentifiers = this.extractTransactionIdentifiers(smsText);
-      console.log('🔑 Sender identifiers:', senderIdentifiers);
+      // First, store the SMS with extracted reference
+      const smsDeposit = await this.storeSMSMessage(telegramId, smsText, paymentMethod);
       
-      // Store in metadata for future matching
-      smsDeposit.smsType = 'SENDER'; // Use smsType field
-      smsDeposit.metadata.transactionIdentifiers = senderIdentifiers;
-      smsDeposit.metadata.recipientName = senderIdentifiers.recipientName;
-      smsDeposit.status = 'RECEIVED_WAITING_MATCH';
-      await smsDeposit.save({ session });
+      // Analyze SMS type
+      const smsAnalysis = this.analyzeSMSType(smsText);
+      console.log('🔍 SMS Analysis:', smsAnalysis);
       
-      // Try to match with existing RECEIVER SMS
-      await this.tryAutoMatchSMS(smsDeposit, smsText);
+      // Extract identifiers including reference
+      const identifiers = this.extractTransactionIdentifiers(smsText);
       
-    } else if (smsAnalysis.type === 'RECEIVER') {
-      console.log('📥 This is a RECEIVER SMS (admin received money)');
-      
-      // Extract key identifiers
-      const receiverIdentifiers = this.extractTransactionIdentifiers(smsText);
-      console.log('🔑 Receiver identifiers:', receiverIdentifiers);
-      
-      // Store in metadata
-      smsDeposit.smsType = 'RECEIVER'; // Use smsType field
-      smsDeposit.metadata.transactionIdentifiers = receiverIdentifiers;
-      smsDeposit.metadata.senderName = receiverIdentifiers.senderName;
-      smsDeposit.status = 'RECEIVED_WAITING_MATCH';
-      await smsDeposit.save({ session });
-      
-      // Try to match with existing SENDER SMS
-      await this.tryAutoMatchSMS(smsDeposit, smsText);
-      
-    } else {
-      console.log('❓ Unknown SMS type, storing as regular deposit');
-    }
-    
-    await session.commitTransaction();
-    return smsDeposit;
-    
-  } catch (error) {
-    await session.abortTransaction();
-    console.error('❌ Error in SMS matching:', error);
-    
-    // Handle validation errors gracefully
-    if (error.message.includes('validation failed') || error.message.includes('enum value')) {
-      // Try to save with default status
-      try {
-        const smsDeposit = await SMSDeposit.findOne({
-          originalSMS: smsText,
-          telegramId: telegramId.toString()
-        });
-        
-        if (smsDeposit) {
-          smsDeposit.status = 'RECEIVED';
-          await smsDeposit.save();
-          return smsDeposit;
-        }
-      } catch (saveError) {
-        console.error('❌ Could not save SMS deposit after error:', saveError);
+      // Store reference in the main field
+      if (identifiers.refNumber) {
+        smsDeposit.extractedReference = identifiers.refNumber;
+        console.log(`💾 Stored reference: ${smsDeposit.extractedReference}`);
       }
+      
+      if (smsAnalysis.type === 'SENDER') {
+        console.log('📤 This is a SENDER SMS (user sent money)');
+        
+        // Store in metadata for future matching
+        smsDeposit.smsType = 'SENDER';
+        smsDeposit.metadata.transactionIdentifiers = identifiers;
+        smsDeposit.metadata.recipientName = identifiers.recipientName;
+        smsDeposit.status = 'RECEIVED_WAITING_MATCH';
+        await smsDeposit.save({ session });
+        
+        // Try to match with existing RECEIVER SMS
+        await this.tryAutoMatchSMS(smsDeposit, smsText);
+        
+      } else if (smsAnalysis.type === 'RECEIVER') {
+        console.log('📥 This is a RECEIVER SMS (admin received money)');
+        
+        // Store in metadata
+        smsDeposit.smsType = 'RECEIVER';
+        smsDeposit.metadata.transactionIdentifiers = identifiers;
+        smsDeposit.metadata.senderName = identifiers.senderName;
+        smsDeposit.status = 'RECEIVED_WAITING_MATCH';
+        await smsDeposit.save({ session });
+        
+        // Try to match with existing SENDER SMS
+        await this.tryAutoMatchSMS(smsDeposit, smsText);
+        
+      } else {
+        console.log('❓ Unknown SMS type, storing as regular deposit');
+      }
+      
+      await session.commitTransaction();
+      return smsDeposit;
+      
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Error in SMS matching:', error);
+      
+      // Handle validation errors gracefully
+      if (error.message.includes('validation failed') || error.message.includes('enum value')) {
+        try {
+          const smsDeposit = await SMSDeposit.findOne({
+            originalSMS: smsText,
+            telegramId: telegramId.toString()
+          });
+          
+          if (smsDeposit) {
+            smsDeposit.status = 'RECEIVED';
+            await smsDeposit.save();
+            return smsDeposit;
+          }
+        } catch (saveError) {
+          console.error('❌ Could not save SMS deposit after error:', saveError);
+        }
+      }
+      
+      throw error;
+    } finally {
+      session.endSession();
     }
-    
-    throw error;
-  } finally {
-    session.endSession();
   }
-}
 
 // NEW: Analyze SMS type (sender vs receiver)
 // ENHANCED: Analyze SMS type for CBE format
-static analyzeSMSType(smsText) {
-  const sms = smsText.toLowerCase();
-  
-  // Sender SMS patterns (user sent money to admin)
-  const senderPatterns = [
-    /you have transfered.*etb.*to/i,
-    /your account has been debited/i,
-    /sent.*etb.*to/i,
-    /transfer.*to.*account/i,
-    /you have sent.*birr.*to/i,
-    /you have transfered etb.*to.*on.*from your account/i,
-    /your account has been debited with a s.charge/i
-  ];
-  
-  // Receiver SMS patterns (admin received money from user)
-  const receiverPatterns = [
-    /your account.*has been credited/i,
-    /account.*credited.*with/i,
-    /you have received.*birr.*from/i,
-    /your account.*has been credited with etb.*from/i,
-    /credited with etb.*from/i,
-    /account has been credited with etb/i
-  ];
-  
-  // Check for sender patterns first (USER perspective)
-  for (const pattern of senderPatterns) {
-    if (pattern.test(sms)) {
-      return { type: 'SENDER', confidence: 0.9 };
+  static analyzeSMSType(smsText) {
+    const sms = smsText.toLowerCase();
+    
+    const senderPatterns = [
+      /you have transfered.*etb.*to/i,
+      /your account has been debited/i,
+      /sent.*etb.*to/i,
+      /transfer.*to.*account/i,
+      /you have sent.*birr.*to/i,
+      /you have transfered etb.*to.*on.*from your account/i,
+      /your account has been debited with a s.charge/i
+    ];
+    
+    const receiverPatterns = [
+      /your account.*has been credited/i,
+      /received.*etb.*from/i,
+      /credited with.*etb.*from/i,
+      /account.*credited.*with/i,
+      /you have received.*birr.*from/i,
+      /your account.*has been credited with etb.*from/i
+    ];
+    
+    for (const pattern of senderPatterns) {
+      if (pattern.test(sms)) {
+        return { type: 'SENDER', confidence: 0.9 };
+      }
+    }
+    
+    for (const pattern of receiverPatterns) {
+      if (pattern.test(sms)) {
+        return { type: 'RECEIVER', confidence: 0.9 };
+      }
+    }
+    
+    return { type: 'UNKNOWN', confidence: 0.5 };
+  }
+
+  static detectBankFromSMS(smsText) {
+    const sms = smsText.toLowerCase();
+    if (sms.includes('cbe')) return 'CBE';
+    if (sms.includes('awash')) return 'Awash';
+    if (sms.includes('dashen')) return 'Dashen';
+    if (sms.includes('telebirr')) return 'Telebirr';
+    return 'UNKNOWN';
+  }
+
+  static detectPaymentMethodFromSMS(smsText) {
+    const sms = smsText.toLowerCase();
+    
+    if (sms.includes('cbe') && sms.includes('birr')) return 'CBE Birr';
+    if (sms.includes('cbe') && !sms.includes('birr')) return 'CBE Bank';
+    if (sms.includes('awash')) return 'Awash Bank';
+    if (sms.includes('dashen')) return 'Dashen Bank';
+    if (sms.includes('telebirr')) return 'Telebirr';
+    
+    return 'UNKNOWN';
+  }
+
+  static parseSMSTime(timeString) {
+    try {
+      const cleaned = timeString.replace(' at ', ' ');
+      return new Date(cleaned);
+    } catch (error) {
+      console.error('Error parsing time:', timeString, error);
+      return null;
     }
   }
-  
-  // Check for receiver patterns (ADMIN perspective)
-  for (const pattern of receiverPatterns) {
-    if (pattern.test(sms)) {
-      return { type: 'RECEIVER', confidence: 0.9 };
+
+  static namesAreSimilar(name1, name2) {
+    if (!name1 || !name2) return false;
+    
+    const clean1 = name1.toLowerCase().replace(/\s+/g, ' ').trim();
+    const clean2 = name2.toLowerCase().replace(/\s+/g, ' ').trim();
+    
+    if (clean1 === clean2) return true;
+    
+    if (clean1.includes(clean2) || clean2.includes(clean1)) {
+      return true;
+    }
+    
+    const name1Parts = clean1.split(' ');
+    const name2Parts = clean2.split(' ');
+    
+    if (name1Parts[0] === name2Parts[0]) {
+      return true;
+    }
+    
+    let matches = 0;
+    for (const word1 of name1Parts) {
+      for (const word2 of name2Parts) {
+        if (word1 === word2 || word1.includes(word2) || word2.includes(word1)) {
+          matches++;
+          break;
+        }
+      }
+    }
+    
+    const similarity = matches / Math.max(name1Parts.length, name2Parts.length);
+    return similarity >= 0.5;
+  }
+
+  static extractAmountFromSMS(smsText) {
+    try {
+      console.log('🔍 Extracting amount from SMS:', smsText.substring(0, 100));
+      
+      const patterns = [
+        /(\d+\.?\d*)\s*ETB/i,
+        /(\d+\.?\d*)\s*Br/i,
+        /(\d+\.?\d*)\s*birr/i,
+        /amount[:\s]*(\d+\.?\d*)/i,
+        /sent\s*(\d+\.?\d*)/i,
+        /received\s*(\d+\.?\d*)/i,
+        /transfer\s*(\d+\.?\d*)/i,
+        /you have sent\s*(\d+\.?\d*)/i,
+        /deposit\s*(\d+\.?\d*)/i,
+        /(\d+\.?\d*)\s*(?:ETB|Birr|Br)/i,
+        /(?:ETB|Birr|Br)\s*(\d+\.?\d*)/i
+      ];
+
+      let amount = null;
+      
+      for (const pattern of patterns) {
+        const match = smsText.match(pattern);
+        if (match && match[1]) {
+          amount = parseFloat(match[1]);
+          console.log('✅ Amount extracted with pattern:', pattern, amount);
+          if (amount > 0) break;
+        }
+      }
+
+      if (!amount || amount <= 0) {
+        const numbers = smsText.match(/\d+\.?\d*/g);
+        if (numbers) {
+          const possibleAmounts = numbers.map(n => parseFloat(n)).filter(n => n >= 1 && n <= 10000);
+          if (possibleAmounts.length > 0) {
+            amount = possibleAmounts[0];
+            console.log('✅ Amount extracted as first reasonable number:', amount);
+          }
+        }
+      }
+
+      return amount;
+    } catch (error) {
+      console.error('❌ Error extracting amount from SMS:', error);
+      return null;
     }
   }
-  
-  return { type: 'UNKNOWN', confidence: 0.5 };
-}
 static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
   let score = 0;
   const maxScore = 100;
@@ -295,110 +402,105 @@ static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
 }
 // NEW: Enhanced auto-match logic
 static async tryAutoMatchSMS(newSMSDeposit, smsText) {
-  try {
-    const newAnalysis = this.analyzeSMSType(smsText);
-    const newIdentifiers = this.extractTransactionIdentifiers(smsText);
-    
-    console.log('🔍 Attempting to match SMS:', newSMSDeposit._id);
-    console.log('📊 New SMS type:', newAnalysis.type, 
-                newIdentifiers.isCredit ? '(CREDIT)' : newIdentifiers.isDebit ? '(DEBIT)' : '');
-    
-    if (!newIdentifiers.amount || newIdentifiers.amount <= 0) {
-      console.log('⚠️ No valid amount, cannot match');
-      return null;
-    }
-    
-    // Find potential matches based on OPPOSITE transaction type
-    let query = {};
-    
-    if (newIdentifiers.isCredit) {
-      // If new SMS is credit (admin received), look for debit SMS (user sent)
-      query = {
-        _id: { $ne: newSMSDeposit._id },
-        status: 'RECEIVED_WAITING_MATCH',
-        'metadata.smsType': 'SENDER', // Looking for sender SMS
-        'metadata.transactionIdentifiers.isDebit': true,
-        extractedAmount: newIdentifiers.amount,
-        createdAt: { 
-          $gte: new Date(Date.now() - 15 * 60 * 1000) // Last 15 minutes
-        }
-      };
-    } else if (newIdentifiers.isDebit) {
-      // If new SMS is debit (user sent), look for credit SMS (admin received)
-      query = {
-        _id: { $ne: newSMSDeposit._id },
-        status: 'RECEIVED_WAITING_MATCH',
-        'metadata.smsType': 'RECEIVER', // Looking for receiver SMS
-        'metadata.transactionIdentifiers.isCredit': true,
-        extractedAmount: newIdentifiers.amount,
-        createdAt: { 
-          $gte: new Date(Date.now() - 15 * 60 * 1000) // Last 15 minutes
-        }
-      };
-    } else {
-      console.log('❌ Unknown transaction type');
-      return null;
-    }
-    
-    console.log('🔍 Query for matches:', JSON.stringify(query, null, 2));
-    
-    const potentialMatches = await SMSDeposit.find(query)
-      .populate('userId', 'firstName username telegramId')
-      .sort({ createdAt: -1 })
-      .limit(10);
-    
-    console.log(`🔍 Found ${potentialMatches.length} potential matches`);
-    
-    for (const potentialMatch of potentialMatches) {
-      const matchScore = this.calculateSMSMatchScore(newIdentifiers, potentialMatch);
-      console.log(`📊 Match score with ${potentialMatch._id}: ${matchScore}`);
-      
-      if (matchScore >= 0.90) { // 90% match confidence for CBE
-        console.log(`✅ High confidence match found! (${matchScore})`);
-        
-        // APPROVE THE MATCHED TRANSACTION
-        const result = await this.approveMatchedSMS(newSMSDeposit, potentialMatch);
-        return result;
-      }
-    }
-    
-    console.log('❌ No strong matches found');
-    
-    // If no match found, update status to waiting for match
-    newSMSDeposit.status = 'RECEIVED_WAITING_MATCH';
-    newSMSDeposit.smsType = newAnalysis.type;
-    newSMSDeposit.metadata = {
-      ...newSMSDeposit.metadata,
-      transactionIdentifiers: newIdentifiers,
-      smsType: newAnalysis.type,
-      isCredit: newIdentifiers.isCredit,
-      isDebit: newIdentifiers.isDebit,
-      transactionId: newIdentifiers.refNumber,
-      matchAttemptedAt: new Date()
-    };
-    
-    await newSMSDeposit.save();
-    return null;
-    
-  } catch (error) {
-    console.error('❌ Error in auto-matching:', error);
-    
-    // Fallback: Save with basic status
     try {
-      newSMSDeposit.status = 'RECEIVED';
-      newSMSDeposit.metadata = {
-        ...newSMSDeposit.metadata,
-        matchingError: error.message,
-        matchAttemptedAt: new Date()
+      const newAnalysis = this.analyzeSMSType(smsText);
+      const newIdentifiers = this.extractTransactionIdentifiers(smsText);
+      
+      console.log('🔍 Attempting to match SMS:', newSMSDeposit._id);
+      console.log('📊 New SMS type:', newAnalysis.type);
+      console.log('📊 New SMS amount:', newSMSDeposit.extractedAmount);
+      console.log('📊 New SMS reference:', newSMSDeposit.extractedReference);
+      
+      if (!newSMSDeposit.extractedAmount || newSMSDeposit.extractedAmount <= 0) {
+        console.log('⚠️ No valid amount, cannot match');
+        return null;
+      }
+      
+      // Find potential matches based on opposite type
+      const oppositeType = newAnalysis.type === 'SENDER' ? 'RECEIVER' : 'SENDER';
+      
+      // Build query using stored fields
+      const query = {
+        _id: { $ne: newSMSDeposit._id },
+        status: { 
+          $in: ['RECEIVED', 'RECEIVED_WAITING_MATCH', 'PENDING'] 
+        },
+        smsType: oppositeType,
+        extractedAmount: newSMSDeposit.extractedAmount,
+        createdAt: { 
+          $gte: new Date(Date.now() - 60 * 60 * 1000) // Last 1 hour
+        }
       };
+      
+      // If we have a reference, use it for more precise matching
+      if (newSMSDeposit.extractedReference) {
+        query.$or = [
+          { extractedReference: newSMSDeposit.extractedReference },
+          { 'metadata.refNumber': newSMSDeposit.extractedReference },
+          { 'metadata.rawRefNumber': newSMSDeposit.extractedReference }
+        ];
+        console.log('🔑 Using reference for matching:', newSMSDeposit.extractedReference);
+      }
+      
+      console.log('🔍 Query for matches:', JSON.stringify(query, null, 2));
+      
+      const potentialMatches = await SMSDeposit.find(query)
+        .populate('userId', 'firstName username telegramId')
+        .sort({ createdAt: -1 })
+        .limit(10);
+      
+      console.log(`🔍 Found ${potentialMatches.length} potential matches`);
+      
+      for (const potentialMatch of potentialMatches) {
+        const matchScore = this.calculateSMSMatchScore(newIdentifiers, potentialMatch);
+        console.log(`📊 Match score with ${potentialMatch._id}: ${matchScore}`);
+        
+        if (matchScore >= 0.85) { // 85% match confidence
+          console.log(`✅ High confidence match found! (${matchScore})`);
+          
+          // APPROVE THE MATCHED TRANSACTION
+          const result = await this.approveMatchedSMS(newSMSDeposit, potentialMatch);
+          return result;
+        }
+      }
+      
+      console.log('❌ No strong matches found');
+      
+      // If no match found, update status to waiting for match
+      newSMSDeposit.status = 'RECEIVED_WAITING_MATCH';
+      newSMSDeposit.smsType = newAnalysis.type;
+      
+      // Ensure reference is stored
+      if (newIdentifiers.refNumber && !newSMSDeposit.extractedReference) {
+        newSMSDeposit.extractedReference = newIdentifiers.refNumber;
+      }
+      
+      newSMSDeposit.metadata.transactionIdentifiers = newIdentifiers;
+      
+      if (newAnalysis.type === 'SENDER') {
+        newSMSDeposit.metadata.recipientName = newIdentifiers.recipientName;
+      } else if (newAnalysis.type === 'RECEIVER') {
+        newSMSDeposit.metadata.senderName = newIdentifiers.senderName;
+      }
+      
       await newSMSDeposit.save();
-    } catch (saveError) {
-      console.error('❌ Could not save SMS deposit:', saveError);
+      return null;
+      
+    } catch (error) {
+      console.error('❌ Error in auto-matching:', error);
+      
+      // Fallback: Save with basic status
+      try {
+        newSMSDeposit.status = 'RECEIVED';
+        newSMSDeposit.metadata.matchingError = error.message;
+        await newSMSDeposit.save();
+      } catch (saveError) {
+        console.error('❌ Could not save SMS deposit:', saveError);
+      }
+      
+      return null;
     }
-    
-    return null;
   }
-}
 // NEW: Extract transaction identifiers from SMS
 
 static extractTransactionIdentifiers(smsText) {
@@ -558,6 +660,72 @@ static extractTransactionIdentifiers(smsText) {
 
   return identifiers;
 }
+static async cleanupDuplicateReferences() {
+    try {
+      console.log('🧹 Cleaning up duplicate references...');
+      
+      const duplicates = await SMSDeposit.aggregate([
+        {
+          $match: {
+            extractedReference: { $exists: true, $ne: null }
+          }
+        },
+        {
+          $group: {
+            _id: '$extractedReference',
+            count: { $sum: 1 },
+            ids: { $push: '$_id' },
+            types: { $push: '$smsType' }
+          }
+        },
+        {
+          $match: {
+            count: { $gt: 2 } // More than 2 SMS with same reference
+          }
+        }
+      ]);
+      
+      console.log(`Found ${duplicates.length} duplicate reference groups`);
+      
+      const cleanupResults = [];
+      
+      for (const dup of duplicates) {
+        // Keep only one SENDER and one RECEIVER per reference
+        const smsList = await SMSDeposit.find({ _id: { $in: dup.ids } });
+        
+        const senders = smsList.filter(s => s.smsType === 'SENDER');
+        const receivers = smsList.filter(s => s.smsType === 'RECEIVER');
+        
+        // Mark extras for deletion
+        const toDelete = [];
+        
+        if (senders.length > 1) {
+          senders.slice(1).forEach(s => toDelete.push(s._id));
+        }
+        
+        if (receivers.length > 1) {
+          receivers.slice(1).forEach(s => toDelete.push(s._id));
+        }
+        
+        if (toDelete.length > 0) {
+          await SMSDeposit.deleteMany({ _id: { $in: toDelete } });
+          cleanupResults.push({
+            reference: dup._id,
+            deleted: toDelete.length,
+            kept: smsList.length - toDelete.length
+          });
+        }
+      }
+      
+      console.log(`✅ Cleanup completed. Results:`, cleanupResults);
+      return cleanupResults;
+      
+    } catch (error) {
+      console.error('❌ Error cleaning up duplicate references:', error);
+      throw error;
+    }
+  }
+
 // Add this helper method
 static extractCBEReferenceFromSMS(smsText) {
   console.log('🔍 Attempting CBE-specific reference extraction');
@@ -613,123 +781,282 @@ static extractCBEReferenceFromSMS(smsText) {
   return null;
 }
 // Also need to update the calculateSMSMatchScore method to handle partial matches better:
-static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
-  let score = 0;
-  const maxScore = 100;
-  
-  // Get second SMS identifiers
-  const sms2Text = sms2Deposit.originalSMS;
-  const sms2Identifiers = this.extractTransactionIdentifiers(sms2Text);
-  console.log('📊 COMPARING SMS IDENTIFIERS:');
-  console.log('SMS1 Type:', sms1Identifiers.isCredit ? 'CREDIT' : sms1Identifiers.isDebit ? 'DEBIT' : 'UNKNOWN');
-  console.log('SMS2 Type:', sms2Identifiers.isCredit ? 'CREDIT' : sms2Identifiers.isDebit ? 'DEBIT' : 'UNKNOWN');
-  console.log('SMS1 Amount:', sms1Identifiers.amount, 'Exact:', sms1Identifiers.exactAmount);
-  console.log('SMS2 Amount:', sms2Identifiers.amount, 'Exact:', sms2Identifiers.exactAmount);
-  console.log('SMS1 Ref:', sms1Identifiers.refNumber, 'Raw:', sms1Identifiers.rawRefNumber);
-  console.log('SMS2 Ref:', sms2Identifiers.refNumber, 'Raw:', sms2Identifiers.rawRefNumber);
-   // IMPORTANT FIX: Check if they're opposite types (one debit, one credit)
-  const isOppositeType = (sms1Identifiers.isDebit && sms2Identifiers.isCredit) || 
-                         (sms1Identifiers.isCredit && sms2Identifiers.isDebit);
-  
-  if (isOppositeType) {
-    score += 20;
-    console.log('✅ Opposite transaction types (debit vs credit)');
-  } else {
-    console.log('❌ Same transaction type - not a match');
-    return 0; // Early exit if both are same type
-  }
-
-  
-  // 2. Amount match (30 points) - Must be exact for CBE
-   if (sms1Identifiers.exactAmount && sms2Identifiers.exactAmount) {
-    if (sms1Identifiers.exactAmount === sms2Identifiers.exactAmount) {
-      score += 30;
-      console.log('✅ Exact amount match');
-    } else {
-      console.log('⚠️ Amount mismatch');
-      return 0;
-    }
-  } else if (sms1Identifiers.amount && sms2Identifiers.amount) {
-    if (Math.abs(sms1Identifiers.amount - sms2Identifiers.amount) < 0.01) {
-      score += 30;
-      console.log('✅ Amount match');
-    } else {
-      console.log('⚠️ Amount mismatch');
-      return 0;
-    }
-  }
-  
-  // 3. Transaction/Ref number match (30 points) - Handle CBE specific formats
-    if (sms1Identifiers.refNumber && sms2Identifiers.refNumber) {
-    const ref1 = sms1Identifiers.refNumber.toUpperCase();
-    const ref2 = sms2Identifiers.refNumber.toUpperCase();
+ static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
+    let score = 0;
+    const maxScore = 100;
     
-    // Exact match
-    if (ref1 === ref2) {
-      score += 30;
-      console.log('✅ Exact reference number match');
-    } 
-    // Check if one contains the other
-    else if (ref1.includes(ref2) || ref2.includes(ref1)) {
-      score += 28;
-      console.log('✅ Partial reference match');
+    // Get identifiers from second SMS (from database)
+    const sms2Text = sms2Deposit.originalSMS;
+    const sms2Identifiers = this.extractTransactionIdentifiers(sms2Text);
+    
+    console.log('📊 COMPARING SMS FOR MATCHING:');
+    console.log('SMS1 Type:', sms1Identifiers.isCredit ? 'CREDIT' : sms1Identifiers.isDebit ? 'DEBIT' : 'UNKNOWN');
+    console.log('SMS2 Type:', sms2Identifiers.isCredit ? 'CREDIT' : sms2Identifiers.isDebit ? 'DEBIT' : 'UNKNOWN');
+    console.log('SMS1 Amount:', sms1Identifiers.amount, 'Exact:', sms1Identifiers.exactAmount);
+    console.log('SMS2 Amount:', sms2Deposit.extractedAmount, 'DB Ref:', sms2Deposit.extractedReference);
+    console.log('SMS1 Ref:', sms1Identifiers.refNumber);
+    console.log('SMS2 Ref:', sms2Deposit.extractedReference);
+    
+    // 1. Check if they're opposite types (one debit, one credit) - 20 points
+    const isOppositeType = (sms1Identifiers.isDebit && sms2Identifiers.isCredit) || 
+                           (sms1Identifiers.isCredit && sms2Identifiers.isDebit);
+    
+    if (isOppositeType) {
+      score += 20;
+      console.log('✅ Opposite transaction types (debit vs credit)');
+    } else {
+      console.log('❌ Same transaction type - not a match');
+      return 0; // Early exit if both are same type
     }
-    // Check raw references
-    else if (sms1Identifiers.rawRefNumber && sms2Identifiers.rawRefNumber) {
-      const raw1 = sms1Identifiers.rawRefNumber.toUpperCase();
-      const raw2 = sms2Identifiers.rawRefNumber.toUpperCase();
+
+    // 2. Amount match (30 points) - Use stored extractedAmount
+    if (sms1Identifiers.exactAmount) {
+      if (sms1Identifiers.exactAmount === sms2Deposit.extractedAmount) {
+        score += 30;
+        console.log('✅ Exact amount match');
+      } else {
+        console.log('⚠️ Amount mismatch');
+        return 0;
+      }
+    } else if (sms1Identifiers.amount) {
+      if (Math.abs(sms1Identifiers.amount - sms2Deposit.extractedAmount) < 0.01) {
+        score += 30;
+        console.log('✅ Amount match');
+      } else {
+        console.log('⚠️ Amount mismatch');
+        return 0;
+      }
+    }
+    
+    // 3. Reference match (30 points) - Use stored extractedReference
+    if (sms1Identifiers.refNumber && sms2Deposit.extractedReference) {
+      const ref1 = sms1Identifiers.refNumber.toUpperCase();
+      const ref2 = sms2Deposit.extractedReference.toUpperCase();
       
-      if (raw1.includes(ref2) || raw2.includes(ref1)) {
+      // Exact match
+      if (ref1 === ref2) {
+        score += 30;
+        console.log('✅ Exact reference number match');
+      } 
+      // Check if one contains the other
+      else if (ref1.includes(ref2) || ref2.includes(ref1)) {
         score += 28;
-        console.log('✅ Raw reference match');
+        console.log('✅ Partial reference match');
+      }
+      // Check metadata references for backward compatibility
+      else if (sms2Deposit.metadata?.refNumber) {
+        const metaRef = sms2Deposit.metadata.refNumber.toUpperCase();
+        if (ref1.includes(metaRef) || metaRef.includes(ref1)) {
+          score += 28;
+          console.log('✅ Metadata reference match');
+        } else {
+          console.log('⚠️ Reference number mismatch');
+          return 0;
+        }
       } else {
         console.log('⚠️ Reference number mismatch');
         return 0;
       }
+    } else if (!sms1Identifiers.refNumber && !sms2Deposit.extractedReference) {
+      // No references, allow matching based on other factors (15 points)
+      score += 15;
+      console.log('ℹ️ No reference numbers, matching on other factors');
     } else {
-      console.log('⚠️ Reference number mismatch');
+      console.log('⚠️ Missing reference number');
       return 0;
     }
-  }
-  
-  // 4. Time match (10 points) - within 5 minutes
-  if (sms1Identifiers.time && sms2Identifiers.time) {
-    const time1 = this.parseSMSTime(sms1Identifiers.time);
-    const time2 = this.parseSMSTime(sms2Identifiers.time);
     
-    if (time1 && time2) {
-      const timeDiff = Math.abs(time1.getTime() - time2.getTime());
-      if (timeDiff <= 5 * 60 * 1000) { // 5 minutes
-        score += 10;
-        console.log('✅ Time match within 5 minutes');
-      } else if (timeDiff <= 10 * 60 * 1000) { // 10 minutes
-        score += 5;
-        console.log('⏰ Time within 10 minutes');
+    // 4. Time match (10 points) - within 5 minutes
+    if (sms1Identifiers.time && sms2Deposit.createdAt) {
+      const time1 = this.parseSMSTime(sms1Identifiers.time);
+      const time2 = sms2Deposit.createdAt;
+      
+      if (time1 && time2) {
+        const timeDiff = Math.abs(time1.getTime() - time2.getTime());
+        if (timeDiff <= 5 * 60 * 1000) { // 5 minutes
+          score += 10;
+          console.log('✅ Time match within 5 minutes');
+        } else if (timeDiff <= 10 * 60 * 1000) { // 10 minutes
+          score += 5;
+          console.log('⏰ Time within 10 minutes');
+        }
       }
     }
-  }
-  
-  // 5. Bank match (5 points)
-  if (sms1Identifiers.smsBank && sms2Identifiers.smsBank) {
-    if (sms1Identifiers.smsBank === sms2Identifiers.smsBank) {
-      score += 5;
-      console.log('✅ Bank match');
+    
+    // 5. Bank match (5 points)
+    if (sms1Identifiers.smsBank && sms2Deposit.paymentMethod) {
+      const bank1 = sms1Identifiers.smsBank.toLowerCase();
+      const bank2 = sms2Deposit.paymentMethod.toLowerCase();
+      
+      if (bank2.includes(bank1) || bank1.includes(bank2)) {
+        score += 5;
+        console.log('✅ Bank match');
+      }
     }
-  }
-  
-  // 6. Name correlation (5 points)
-  if (sms1Identifiers.senderName && sms2Identifiers.recipientName) {
-    if (this.namesAreSimilar(sms1Identifiers.senderName, sms2Identifiers.recipientName)) {
-      score += 5;
-      console.log('✅ Names correlate');
+    
+    // 6. Name correlation (5 points)
+    if (sms1Identifiers.senderName && sms2Deposit.metadata?.recipientName) {
+      if (this.namesAreSimilar(sms1Identifiers.senderName, sms2Deposit.metadata.recipientName)) {
+        score += 5;
+        console.log('✅ Names correlate');
+      }
     }
+    
+    const percentage = (score / maxScore) * 100;
+    console.log(`📈 Match percentage: ${percentage}% (${score}/${maxScore})`);
+    
+    return percentage / 100;
   }
-  
-  const percentage = (score / maxScore) * 100;
-  console.log(`📈 Match percentage: ${percentage}% (${score}/${maxScore})`);
-  
-  return percentage / 100;
-}
+
+  // ENHANCED: Extract transaction identifiers with improved reference extraction
+  static extractTransactionIdentifiers(smsText) {
+    smsText = smsText.trim();
+    
+    console.log('🔍 EXTRACTING IDENTIFIERS - SMS LENGTH:', smsText.length);
+    
+    const identifiers = {
+      amount: this.extractAmountFromSMS(smsText),
+      transactionId: null,
+      refNumber: null,
+      time: null,
+      senderName: null,
+      recipientName: null,
+      accountNumbers: [],
+      smsBank: this.detectBankFromSMS(smsText),
+      rawRefNumber: null,
+      isCredit: false,
+      isDebit: false,
+      exactAmount: null
+    };
+
+    const sms = smsText.toLowerCase();
+    
+    // Transaction type detection
+    identifiers.isCredit = /credited|received/i.test(smsText);
+    identifiers.isDebit = /debited|transfered|sent/i.test(smsText);
+    
+    console.log('💳 Transaction type - isCredit:', identifiers.isCredit, 'isDebit:', identifiers.isDebit);
+
+    // Extract EXACT amount
+    const amountMatch = smsText.match(/ETB\s*([\d,]+\.?\d*)/i);
+    if (amountMatch) {
+      const cleanAmount = amountMatch[1].replace(/,/g, '');
+      identifiers.exactAmount = parseFloat(cleanAmount);
+      console.log('💰 Exact amount:', identifiers.exactAmount);
+    }
+
+    // Enhanced reference extraction
+    let foundRef = null;
+    let rawRef = null;
+    
+    // Method 1: Standard Ref No pattern
+    const refMatch = smsText.match(/Ref\s*No\s*([A-Z0-9]+)/i);
+    if (refMatch) {
+      foundRef = refMatch[1];
+      console.log('✅ Found Ref No:', foundRef);
+    }
+    
+    // Method 2: URL id parameter
+    if (!foundRef) {
+      const urlPatterns = [
+        /[?&]id=([A-Z0-9]{12,})/i,
+        /id=([A-Z0-9]{12,})(?:&|$| )/i,
+        /:100\/\?id=([A-Z0-9]+)/i,
+        /\?id=([A-Z0-9]+)/i
+      ];
+      
+      for (const pattern of urlPatterns) {
+        const urlMatch = smsText.match(pattern);
+        if (urlMatch && urlMatch[1]) {
+          rawRef = urlMatch[1];
+          console.log('🎯 Found URL ID:', rawRef);
+          
+          // Extract FT reference pattern
+          const ftPattern = /(FT\d+[A-Z]+)/i;
+          const ftMatch = rawRef.match(ftPattern);
+          
+          if (ftMatch) {
+            foundRef = ftMatch[1];
+            console.log('✅ Extracted FT reference:', foundRef);
+          } else {
+            // Remove account suffix (last 8 digits)
+            if (rawRef.length >= 12) {
+              const last8 = rawRef.slice(-8);
+              if (/^\d{8}$/.test(last8)) {
+                foundRef = rawRef.slice(0, -8);
+                console.log('✅ Removed account suffix:', foundRef);
+              } else {
+                foundRef = rawRef;
+              }
+            } else {
+              foundRef = rawRef;
+            }
+          }
+          break;
+        }
+      }
+    }
+    
+    // Method 3: FT pattern anywhere
+    if (!foundRef) {
+      const ftPattern = /(FT\d+[A-Z]+)/i;
+      const ftMatch = smsText.match(ftPattern);
+      if (ftMatch) {
+        foundRef = ftMatch[1];
+        console.log('✅ Found FT pattern in text:', foundRef);
+      }
+    }
+    
+    // Method 4: Transaction ID pattern
+    if (!foundRef) {
+      const txnPattern = /(?:Txn|Transaction).*?([A-Z0-9]{8,})/i;
+      const txnMatch = smsText.match(txnPattern);
+      if (txnMatch) {
+        foundRef = txnMatch[1];
+        console.log('✅ Found Transaction ID:', foundRef);
+      }
+    }
+    
+    if (foundRef) {
+      identifiers.refNumber = foundRef.toUpperCase();
+      identifiers.transactionId = identifiers.refNumber;
+      identifiers.rawRefNumber = rawRef || foundRef;
+      console.log('🎯 Final reference:', identifiers.refNumber);
+    } else {
+      console.log('⚠️ No reference found');
+    }
+
+    // Extract time
+    const timeMatch = smsText.match(/(\d{2}\/\d{2}\/\d{4})\s*(?:at)?\s*(\d{2}:\d{2}:\d{2})/i);
+    if (timeMatch) {
+      identifiers.time = `${timeMatch[1]} ${timeMatch[2]}`;
+    }
+
+    // Extract names
+    if (identifiers.isDebit) {
+      const toMatch = smsText.match(/to\s+([A-Za-z\s]+?)(?:,|\.|on|with|from|Your)/i);
+      if (toMatch) {
+        identifiers.recipientName = toMatch[1].trim();
+      }
+    }
+
+    if (identifiers.isCredit) {
+      const fromMatch = smsText.match(/from\s+([A-Za-z\s]+?)(?:,|\.|on|with|Your)/i);
+      if (fromMatch) {
+        identifiers.senderName = fromMatch[1].trim();
+      }
+    }
+
+    console.log('✅ FINAL IDENTIFIERS:', {
+      refNumber: identifiers.refNumber,
+      isCredit: identifiers.isCredit,
+      isDebit: identifiers.isDebit,
+      amount: identifiers.amount,
+      exactAmount: identifiers.exactAmount
+    });
+
+    return identifiers;
+  }
 
 // Add a helper method to better parse CBE URL references:
 static extractCBEReferenceFromURL(urlPart) {
@@ -1312,100 +1639,136 @@ static async adminForceMatchSMS(senderSMSId, receiverSMSId, adminUserId) {
 }
 
 // NEW: Find matching SMS for admin
-static async findMatchingSMS(smsDepositId) {
-  try {
-    const smsDeposit = await SMSDeposit.findById(smsDepositId);
-    if (!smsDeposit) {
-      throw new Error('SMS deposit not found');
-    }
-    
-    const smsText = smsDeposit.originalSMS;
-    const analysis = this.analyzeSMSType(smsText);
-    const identifiers = this.extractTransactionIdentifiers(smsText);
-    
-    const oppositeType = analysis.type === 'SENDER' ? 'RECEIVER' : 'SENDER';
-    
-    const query = {
-      _id: { $ne: smsDepositId },
-      status: { $in: ['RECEIVED', 'RECEIVED_WAITING_MATCH', 'PENDING'] },
-      'metadata.smsType': oppositeType,
-      createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } // Last 7 days
-    };
-    
-    const potentialMatches = await SMSDeposit.find(query)
-      .populate('userId', 'firstName username telegramId')
-      .sort({ createdAt: -1 })
-      .limit(50);
-    
-    // Calculate match scores
-    const matchesWithScores = potentialMatches.map(match => {
-      const matchIdentifiers = this.extractTransactionIdentifiers(match.originalSMS);
-      const score = this.calculateSMSMatchScore(identifiers, match);
+ static async findMatchingSMS(smsDepositId) {
+    try {
+      const smsDeposit = await SMSDeposit.findById(smsDepositId);
+      if (!smsDeposit) {
+        throw new Error('SMS deposit not found');
+      }
+      
+      const smsText = smsDeposit.originalSMS;
+      const analysis = this.analyzeSMSType(smsText);
+      const identifiers = this.extractTransactionIdentifiers(smsText);
+      
+      const oppositeType = analysis.type === 'SENDER' ? 'RECEIVER' : 'SENDER';
+      
+      // Build query using stored references
+      const query = {
+        _id: { $ne: smsDepositId },
+        status: { $in: ['RECEIVED', 'RECEIVED_WAITING_MATCH', 'PENDING'] },
+        smsType: oppositeType,
+        extractedAmount: smsDeposit.extractedAmount,
+        createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
+      };
+      
+      // If we have a reference, use it for matching
+      if (smsDeposit.extractedReference) {
+        query.$or = [
+          { extractedReference: smsDeposit.extractedReference },
+          { 'metadata.refNumber': smsDeposit.extractedReference }
+        ];
+      }
+      
+      const potentialMatches = await SMSDeposit.find(query)
+        .populate('userId', 'firstName username telegramId')
+        .sort({ createdAt: -1 })
+        .limit(50);
+      
+      // Calculate match scores
+      const matchesWithScores = potentialMatches.map(match => {
+        const matchIdentifiers = this.extractTransactionIdentifiers(match.originalSMS);
+        const score = this.calculateSMSMatchScore(identifiers, match);
+        
+        return {
+          smsDeposit: match,
+          score: Math.round(score * 100), // Percentage
+          amount: match.extractedAmount,
+          reference: match.extractedReference,
+          time: match.createdAt,
+          identifiers: matchIdentifiers
+        };
+      });
+      
+      // Sort by score descending
+      matchesWithScores.sort((a, b) => b.score - a.score);
       
       return {
-        smsDeposit: match,
-        score: Math.round(score * 100), // Percentage
-        identifiers: matchIdentifiers
+        originalSMS: smsDeposit,
+        analysis,
+        identifiers,
+        matches: matchesWithScores.filter(m => m.score >= 50), // Only show 50%+ matches
+        totalFound: potentialMatches.length
       };
-    });
-    
-    // Sort by score descending
-    matchesWithScores.sort((a, b) => b.score - a.score);
-    
-    return {
-      originalSMS: smsDeposit,
-      analysis,
-      identifiers,
-      matches: matchesWithScores.filter(m => m.score >= 50), // Only show 50%+ matches
-      totalFound: potentialMatches.length
-    };
-    
-  } catch (error) {
-    console.error('❌ Error finding matching SMS:', error);
-    throw error;
+      
+    } catch (error) {
+      console.error('❌ Error finding matching SMS:', error);
+      throw error;
+    }
   }
-}
   // NEW: Auto-process received SMS immediately
-  static async autoProcessReceivedSMS() {
+ static async autoProcessReceivedSMS() {
     try {
       const receivedSMS = await SMSDeposit.find({ 
         status: 'RECEIVED_WAITING_MATCH',
-        'metadata.smsType': { $in: ['SENDER', 'RECEIVER'] }
+        extractedReference: { $exists: true, $ne: null }
       })
       .populate('userId', 'firstName username telegramId')
       .sort({ createdAt: 1 })
-      .limit(50);
+      .limit(100); // Increased limit for better matching
 
-      console.log(`🔄 Found ${receivedSMS.length} SMS waiting for match`);
+      console.log(`🔄 Found ${receivedSMS.length} SMS with references waiting for match`);
 
       let matchedCount = 0;
       let processingErrors = 0;
 
-      for (const sms of receivedSMS) {
-        try {
-          // Try to find match for this SMS
-          const matchResult = await this.tryAutoMatchSMS(sms, sms.originalSMS);
-          
-          if (matchResult) {
-            matchedCount++;
-            console.log(`✅ Matched SMS ${sms._id} with ${matchResult._id}`);
+      // Group by reference for more efficient matching
+      const smsByReference = {};
+      receivedSMS.forEach(sms => {
+        if (sms.extractedReference) {
+          if (!smsByReference[sms.extractedReference]) {
+            smsByReference[sms.extractedReference] = [];
           }
-        } catch (error) {
-          console.error(`❌ Error processing SMS ${sms._id}:`, error.message);
-          processingErrors++;
+          smsByReference[sms.extractedReference].push(sms);
+        }
+      });
+
+      // Process each reference group
+      for (const [reference, smsList] of Object.entries(smsByReference)) {
+        if (smsList.length >= 2) {
+          console.log(`🔍 Processing reference ${reference} with ${smsList.length} SMS`);
+          
+          // Find SENDER and RECEIVER SMS
+          const senders = smsList.filter(s => s.smsType === 'SENDER');
+          const receivers = smsList.filter(s => s.smsType === 'RECEIVER');
+          
+          if (senders.length > 0 && receivers.length > 0) {
+            // Try to match first sender with first receiver
+            try {
+              const result = await this.approveMatchedSMS(senders[0], receivers[0]);
+              if (result) {
+                matchedCount++;
+                console.log(`✅ Matched reference ${reference}: ${senders[0]._id} with ${receivers[0]._id}`);
+              }
+            } catch (error) {
+              console.error(`❌ Error matching reference ${reference}:`, error.message);
+              processingErrors++;
+            }
+          }
         }
       }
 
       return { 
         total: receivedSMS.length, 
         matched: matchedCount,
-        errors: processingErrors
+        errors: processingErrors,
+        referenceGroups: Object.keys(smsByReference).length
       };
     } catch (error) {
       console.error('❌ Error in auto-process SMS:', error);
       throw error;
     }
   }
+
 
   // ENHANCED: Analyze SMS type for CBE format
   static analyzeSMSType(smsText) {
@@ -2411,15 +2774,17 @@ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
       
       // Analyze SMS type for matching
       const analysis = this.analyzeSMSType(smsText);
-
+      const identifiers = this.extractTransactionIdentifiers(smsText);
+      
       const smsDeposit = new SMSDeposit({
         userId: mongoUserId,
         telegramId: user.telegramId,
         originalSMS: smsText,
         paymentMethod: finalMethod,
         extractedAmount: amount || 0,
+        extractedReference: identifiers.refNumber || null, // Store reference in dedicated field
         status: 'RECEIVED',
-        smsType: analysis.type, // Use smsType field instead of metadata
+        smsType: analysis.type,
         metadata: {
           smsLength: smsText.length,
           hasTransactionId: smsText.includes('Txn ID') || smsText.includes('Transaction'),
@@ -2428,12 +2793,21 @@ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
           detectedAmount: amount,
           storedAt: new Date(),
           autoProcessAttempted: false,
-          confidence: analysis.confidence
+          confidence: analysis.confidence,
+          // Keep identifiers in metadata for backward compatibility
+          transactionIdentifiers: identifiers,
+          refNumber: identifiers.refNumber, // Also store in metadata
+          rawRefNumber: identifiers.rawRefNumber
         }
       });
 
       await smsDeposit.save();
-      console.log('✅ SMS stored successfully:', smsDeposit._id, 'Type:', smsDeposit.smsType);
+      console.log('✅ SMS stored successfully:', {
+        id: smsDeposit._id,
+        type: smsDeposit.smsType,
+        amount: smsDeposit.extractedAmount,
+        reference: smsDeposit.extractedReference
+      });
 
       return smsDeposit;
     } catch (error) {
@@ -2441,6 +2815,7 @@ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
       throw error;
     }
   }
+
   // NEW: Determine if SMS should be auto-approved
   static shouldAutoApproveSMS(smsText, amount) {
     const sms = smsText.toLowerCase();
@@ -2758,33 +3133,66 @@ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
       throw error;
     }
   }
-
-  static async getSMSDeposits(page = 1, limit = 20, status = null) {
+   // NEW: Get SMS deposits by reference
+  static async getSMSDepositsByReference(reference, limit = 10) {
     try {
-      const skip = (page - 1) * limit;
-      const query = status ? { status } : {};
+      const deposits = await SMSDeposit.find({
+        $or: [
+          { extractedReference: reference },
+          { 'metadata.refNumber': reference },
+          { 'metadata.rawRefNumber': reference }
+        ]
+      })
+      .populate('userId', 'firstName username telegramId')
+      .sort({ createdAt: -1 })
+      .limit(limit);
       
-      const [deposits, total] = await Promise.all([
-        SMSDeposit.find(query)
-          .populate('userId', 'firstName username telegramId')
-          .populate('processedBy', 'firstName username')
-          .sort({ createdAt: -1 })
-          .skip(skip)
-          .limit(limit),
-        SMSDeposit.countDocuments(query)
-      ]);
-
-      return {
-        deposits,
-        pagination: {
-          page,
-          limit,
-          total,
-          pages: Math.ceil(total / limit)
-        }
-      };
+      return deposits;
     } catch (error) {
-      console.error('❌ Error getting SMS deposits:', error);
+      console.error('❌ Error getting SMS deposits by reference:', error);
+      throw error;
+    }
+  }
+
+  static async getSMSDepositStats() {
+    try {
+      const stats = await SMSDeposit.aggregate([
+        {
+          $facet: {
+            totalCount: [{ $count: 'count' }],
+            byStatus: [
+              { $group: { _id: '$status', count: { $sum: 1 } } }
+            ],
+            byType: [
+              { $group: { _id: '$smsType', count: { $sum: 1 } } }
+            ],
+            byPaymentMethod: [
+              { $group: { _id: '$paymentMethod', count: { $sum: 1 } } }
+            ],
+            withReference: [
+              { $match: { extractedReference: { $exists: true, $ne: null } } },
+              { $count: 'count' }
+            ],
+            dailyStats: [
+              {
+                $group: {
+                  _id: {
+                    $dateToString: { format: '%Y-%m-%d', date: '$createdAt' }
+                  },
+                  count: { $sum: 1 },
+                  totalAmount: { $sum: '$extractedAmount' }
+                }
+              },
+              { $sort: { _id: -1 } },
+              { $limit: 7 }
+            ]
+          }
+        }
+      ]);
+      
+      return stats[0];
+    } catch (error) {
+      console.error('❌ Error getting SMS deposit stats:', error);
       throw error;
     }
   }
@@ -2866,7 +3274,73 @@ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
     }
     console.log('✅ Payment methods initialized');
   }
+ // NEW: Update SMS deposit with reference
+  static async updateSMSDepositReference(smsDepositId, reference) {
+    try {
+      const smsDeposit = await SMSDeposit.findById(smsDepositId);
+      if (!smsDeposit) {
+        throw new Error('SMS deposit not found');
+      }
+      
+      smsDeposit.extractedReference = reference;
+      smsDeposit.metadata.refNumber = reference;
+      smsDeposit.metadata.refUpdatedAt = new Date();
+      
+      await smsDeposit.save();
+      
+      console.log(`✅ Updated reference for SMS ${smsDepositId}: ${reference}`);
+      
+      return smsDeposit;
+    } catch (error) {
+      console.error('❌ Error updating SMS deposit reference:', error);
+      throw error;
+    }
+  }
 
+  // NEW: Find unmatched SMS by reference
+  static async findUnmatchedByReference() {
+    try {
+      // Find SMS with references but no match
+      const unmatched = await SMSDeposit.aggregate([
+        {
+          $match: {
+            status: 'RECEIVED_WAITING_MATCH',
+            extractedReference: { $exists: true, $ne: null }
+          }
+        },
+        {
+          $group: {
+            _id: '$extractedReference',
+            count: { $sum: 1 },
+            deposits: { $push: '$$ROOT' },
+            totalAmount: { $sum: '$extractedAmount' }
+          }
+        },
+        {
+          $match: {
+            count: { $gte: 2 } // Find references with 2 or more deposits
+          }
+        },
+        {
+          $sort: { count: -1 }
+        }
+      ]);
+      
+      // Populate user info for each deposit
+      for (const group of unmatched) {
+        for (let i = 0; i < group.deposits.length; i++) {
+          const deposit = await SMSDeposit.findById(group.deposits[i]._id)
+            .populate('userId', 'firstName username telegramId');
+          group.deposits[i] = deposit;
+        }
+      }
+      
+      return unmatched;
+    } catch (error) {
+      console.error('❌ Error finding unmatched by reference:', error);
+      throw error;
+    }
+  }
   // Other existing methods...
   static async deductGameEntry(userId, gameId, entryFee, description = 'Game entry fee') {
     const session = await mongoose.startSession();
