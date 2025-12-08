@@ -104,7 +104,120 @@ class BotController {
         ])
       );
     });
+this.bot.command('matchsms', async (ctx) => {
+  if (ctx.from.id.toString() !== this.adminId) {
+    await ctx.reply('❌ Access denied');
+    return;
+  }
 
+  try {
+    const [unmatchedSMS, matchedPairs] = await Promise.all([
+      WalletService.getUnmatchedSMS(),
+      WalletService.findRecentlyMatchedSMS()
+    ]);
+
+    let message = `🤝 *SMS Matching Status*\n\n`;
+    message += `📤 *Sender SMS Waiting:* ${unmatchedSMS.SENDER?.length || 0}\n`;
+    message += `📥 *Receiver SMS Waiting:* ${unmatchedSMS.RECEIVER?.length || 0}\n`;
+    message += `✅ *Recently Matched:* ${matchedPairs.length}\n\n`;
+
+    if (unmatchedSMS.SENDER && unmatchedSMS.SENDER.length > 0) {
+      message += `*Recent Sender SMS:*\n`;
+      unmatchedSMS.SENDER.slice(0, 5).forEach((sms, index) => {
+        const userName = sms.userId?.firstName || sms.userId?.username || 'Unknown User';
+        message += `${index + 1}. $${sms.extractedAmount} - ${userName}\n`;
+        message += `   Ref: ${sms.metadata?.transactionIdentifiers?.refNumber || 'N/A'}\n`;
+        message += `   Time: ${new Date(sms.createdAt).toLocaleString()}\n`;
+        message += `   [View: /viewsms_${sms._id}] [Match: /findmatch_${sms._id}]\n\n`;
+      });
+    }
+
+    if (unmatchedSMS.RECEIVER && unmatchedSMS.RECEIVER.length > 0) {
+      message += `*Recent Receiver SMS:*\n`;
+      unmatchedSMS.RECEIVER.slice(0, 5).forEach((sms, index) => {
+        const userName = sms.userId?.firstName || sms.userId?.username || 'Unknown User';
+        message += `${index + 1}. $${sms.extractedAmount} - ${userName}\n`;
+        message += `   Ref: ${sms.metadata?.transactionIdentifiers?.refNumber || 'N/A'}\n`;
+        message += `   Time: ${new Date(sms.createdAt).toLocaleString()}\n`;
+        message += `   [View: /viewsms_${sms._id}] [Match: /findmatch_${sms._id}]\n\n`;
+      });
+    }
+
+    message += `\n*Commands:*\n`;
+    message += `/automatch - Auto-match all waiting SMS\n`;
+    message += `/cleansms - Clean up old unmatched SMS\n`;
+    message += `/smsstats - SMS matching statistics`;
+
+    await ctx.replyWithMarkdown(message);
+    
+  } catch (error) {
+    console.error('Match SMS error:', error);
+    await ctx.reply('❌ Error loading matching status: ' + error.message);
+  }
+});
+
+this.bot.command(/^findmatch_(.+)/, async (ctx) => {
+  if (ctx.from.id.toString() !== this.adminId) {
+    await ctx.reply('❌ Access denied');
+    return;
+  }
+
+  const smsId = ctx.match[1];
+
+  try {
+    const matchResult = await WalletService.findMatchingSMS(smsId);
+
+    let message = `🔍 *Finding Matches for SMS*\n\n`;
+    message += `*Original SMS:* ${matchResult.originalSMS._id}\n`;
+    message += `*Type:* ${matchResult.analysis.type}\n`;
+    message += `*Amount:* $${matchResult.identifiers.amount}\n`;
+    message += `*Ref:* ${matchResult.identifiers.refNumber || 'N/A'}\n\n`;
+
+    if (matchResult.matches.length > 0) {
+      message += `*Top Matches:*\n`;
+      matchResult.matches.slice(0, 5).forEach((match, index) => {
+        const userName = match.smsDeposit.userId?.firstName || match.smsDeposit.userId?.username || 'Unknown User';
+        message += `${index + 1}. $${match.smsDeposit.extractedAmount} - ${userName}\n`;
+        message += `   Score: ${match.score}%\n`;
+        message += `   Ref: ${match.identifiers.refNumber || 'N/A'}\n`;
+        message += `   [View: /viewsms_${match.smsDeposit._id}]\n`;
+        message += `   [Force Match: /forcematch_${smsId}_${match.smsDeposit._id}]\n\n`;
+      });
+    } else {
+      message += `*No matches found*\n\n`;
+    }
+
+    message += `Total searched: ${matchResult.totalFound} SMS\n`;
+
+    await ctx.replyWithMarkdown(message);
+    
+  } catch (error) {
+    console.error('Find match error:', error);
+    await ctx.reply('❌ Error finding matches: ' + error.message);
+  }
+});
+
+this.bot.command(/^forcematch_(.+)_(.+)/, async (ctx) => {
+  if (ctx.from.id.toString() !== this.adminId) {
+    await ctx.reply('❌ Access denied');
+    return;
+  }
+
+  const senderSMSId = ctx.match[1];
+  const receiverSMSId = ctx.match[2];
+
+  try {
+    const result = await WalletService.adminForceMatchSMS(senderSMSId, receiverSMSId, ctx.from.id);
+
+    await ctx.replyWithMarkdown(
+      `✅ *Force Match Successful!*\n\n*User:* ${result.senderSMS.userId.firstName}\n*Amount:* $${result.transaction.amount}\n*New Balance:* $${result.wallet.balance}\n\nBoth SMS have been matched and the deposit has been approved.`
+    );
+    
+  } catch (error) {
+    console.error('Force match error:', error);
+    await ctx.reply('❌ Error force matching: ' + error.message);
+  }
+});
     // Deposit command
     this.bot.command('deposit', async (ctx) => {
       try {
@@ -1169,7 +1282,7 @@ Keep playing to improve your stats! 🎯
 
     // ========== TEXT HANDLER (MUST BE LAST) ==========
 
-   this.bot.on('text', async (ctx) => {
+    this.bot.on('text', async (ctx) => {
   console.log('📝 Text received:', ctx.message.text.substring(0, 100));
 
   // Handle SMS deposits with payment method selected
@@ -1178,6 +1291,7 @@ Keep playing to improve your stats! 🎯
     const paymentMethod = ctx.session.pendingDepositMethod;
 
     console.log('📱 Processing SMS deposit for method:', paymentMethod);
+    console.log('📊 SMS content:', smsText.substring(0, 200));
 
     try {
       await UserService.findOrCreateUser(ctx.from);
@@ -1185,15 +1299,19 @@ Keep playing to improve your stats! 🎯
       // Use new matching system
       const result = await WalletService.matchAndAutoApproveSMS(
         smsText,
-        ctx.from.id,
+        ctx.from.id.toString(),
         paymentMethod
       );
 
       delete ctx.session.pendingDepositMethod;
 
+      // Analyze the SMS type for better messaging
+      const smsAnalysis = WalletService.analyzeSMSType(smsText);
+      const identifiers = WalletService.extractTransactionIdentifiers(smsText);
+      
       if (result.status === 'AUTO_APPROVED') {
         await ctx.replyWithMarkdown(
-          `✅ *Deposit Auto-Approved!*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n\nYour deposit was automatically matched and approved! 🎉`,
+          `✅ *Deposit Auto-Approved!*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour deposit was automatically matched and approved! 🎉`,
           Markup.inlineKeyboard([
             [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
             [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
@@ -1201,15 +1319,18 @@ Keep playing to improve your stats! 🎯
         );
       } else if (result.metadata?.matched) {
         await ctx.replyWithMarkdown(
-          `⏳ *Deposit Matched, Awaiting Confirmation*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n\nYour SMS has been matched with a corresponding transaction. Awaiting final confirmation.`,
+          `⏳ *Deposit Matched, Awaiting Confirmation*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour SMS has been matched with a corresponding transaction. Awaiting final confirmation.`,
           Markup.inlineKeyboard([
             [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
             [Markup.button.callback('🎮 Play Bingo', 'back_to_start')]
           ])
         );
       } else {
+        const messageType = smsAnalysis.type === 'SENDER' ? 'sender (you sent money)' : 
+                          smsAnalysis.type === 'RECEIVER' ? 'receiver (we received money)' : 'unknown';
+        
         await ctx.replyWithMarkdown(
-          `📱 *SMS Received & Stored*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n\nYour SMS has been received and will be processed when a matching transaction is found.`,
+          `📱 *SMS ${messageType.toUpperCase()} Received*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour ${messageType} SMS has been received. We'll match it with the corresponding transaction.`,
           Markup.inlineKeyboard([
             [Markup.button.callback('💼 Check Status', 'show_wallet')],
             [Markup.button.callback('💰 New Deposit', 'show_deposit')]
@@ -1219,8 +1340,13 @@ Keep playing to improve your stats! 🎯
 
     } catch (error) {
       console.error('❌ SMS deposit error:', error);
+      
+      const errorMessage = error.message.includes('User not found') 
+        ? 'Please use /start first to set up your account.'
+        : error.message;
+        
       await ctx.replyWithMarkdown(
-        `❌ *Deposit Failed*\n\nError: ${error.message}`,
+        `❌ *Deposit Failed*\n\nError: ${errorMessage}`,
         Markup.inlineKeyboard([
           [Markup.button.callback('🔄 Try Again', 'show_deposit')],
           [Markup.button.callback('📞 Contact Support', 'contact_support')]
@@ -1231,23 +1357,34 @@ Keep playing to improve your stats! 🎯
   }
 
       // Handle automatic SMS detection and storage
-      const text = ctx.message.text;
-        if (this.looksLikeBankSMS(text)) {
+     const text = ctx.message.text;
+  if (this.looksLikeBankSMS(text)) {
     console.log('🏦 Detected bank SMS, using matching system...');
+    console.log('📊 SMS content:', text.substring(0, 200));
     
     try {
       await UserService.findOrCreateUser(ctx.from);
       
+      // Analyze SMS first
+      const smsAnalysis = WalletService.analyzeSMSType(text);
+      const identifiers = WalletService.extractTransactionIdentifiers(text);
+      
+      console.log('🔍 SMS Analysis:', smsAnalysis);
+      console.log('🔑 SMS Identifiers:', identifiers);
+      
       // Use matching system
       const result = await WalletService.matchAndAutoApproveSMS(
         text,
-        ctx.from.id,
+        ctx.from.id.toString(),
         'UNKNOWN'
       );
       
+      const messageType = smsAnalysis.type === 'SENDER' ? 'sender (you sent money)' : 
+                         smsAnalysis.type === 'RECEIVER' ? 'receiver (we received money)' : 'unknown';
+      
       if (result.status === 'AUTO_APPROVED') {
         await ctx.replyWithMarkdown(
-          `✅ *SMS Auto-Matched & Approved!*\n\n*Amount:* $${result.extractedAmount}\n\nYour deposit was automatically matched and approved! 🎉`,
+          `✅ *SMS Auto-Matched & Approved!*\n\n*Amount:* $${result.extractedAmount}\n*Type:* ${messageType}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour deposit was automatically matched and approved! 🎉`,
           Markup.inlineKeyboard([
             [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
             [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
@@ -1255,22 +1392,29 @@ Keep playing to improve your stats! 🎯
         );
       } else {
         await ctx.replyWithMarkdown(
-          `📱 *SMS Received*\n\n*Amount:* $${result.extractedAmount}\n\nYour SMS has been received. ${
-            result.metadata?.smsType === 'SENDER' 
-              ? 'We\'ll match it when we receive the corresponding credit SMS.'
-              : 'We\'ll match it with existing sender SMS.'
+          `📱 *SMS ${messageType.toUpperCase()} Received*\n\n*Amount:* $${result.extractedAmount}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour ${messageType} SMS has been received. ${
+            smsAnalysis.type === 'SENDER' 
+              ? "We'll match it when we receive the corresponding credit SMS."
+              : smsAnalysis.type === 'RECEIVER'
+              ? "We'll match it with existing sender SMS."
+              : 'Please use the deposit menu for better processing.'
           }`,
           Markup.inlineKeyboard([
             [Markup.button.callback('💼 Check Status', 'show_wallet')],
-            [Markup.button.callback('💰 New Deposit', 'show_deposit')]
+            [Markup.button.callback('💰 Use Deposit Menu', 'show_deposit')]
           ])
         );
       }
       
     } catch (error) {
       console.error('❌ Error processing SMS:', error);
+      
+      const errorMessage = error.message.includes('User not found') 
+        ? 'Please use /start first to set up your account.'
+        : error.message;
+        
       await ctx.reply(
-        `❌ Failed to process your SMS. Please try the deposit menu.`,
+        `❌ Failed to process your SMS: ${errorMessage}`,
         Markup.inlineKeyboard([
           [Markup.button.callback('💰 Use Deposit Menu', 'show_deposit')]
         ])
