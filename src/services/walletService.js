@@ -503,12 +503,11 @@ static async tryAutoMatchSMS(newSMSDeposit, smsText) {
   }
 // NEW: Extract transaction identifiers from SMS
 
-// UPDATED: Enhanced reference extraction for both SENDER and RECEIVER SMS
 static extractTransactionIdentifiers(smsText) {
   smsText = smsText.trim();
   
   console.log('🔍 EXTRACTING IDENTIFIERS - SMS LENGTH:', smsText.length);
-  console.log('📋 FULL SMS:', smsText); // ADD THIS to see the full message
+  console.log('📋 SMS SAMPLE:', smsText.substring(0, 300)); // Show first 300 chars
   
   const identifiers = {
     amount: this.extractAmountFromSMS(smsText),
@@ -547,14 +546,15 @@ static extractTransactionIdentifiers(smsText) {
   
   console.log('🔎 Looking for CBE URL pattern...');
   
-  // Method 1: Find CBE URL pattern (BOTH SENDER AND RECEIVER have this)
-  // Pattern: https://apps.cbe.com.et:100/?id=FT253422RPRW11206342
-  const cbeUrlPattern = /https?:\/\/apps\.cbe\.com\.et(?::\d+)?\/\?id=([A-Z0-9]+)/i;
+  // FIXED: Better URL pattern that handles different formats
+  // Pattern for: https://apps.cbe.com.et:100/?id=FT253422RPRW11206342
+  // Also handles: apps.cbe.com.et?id=FT253422RPRW11206342
+  const cbeUrlPattern = /(?:https?:\/\/)?apps\.cbe\.com\.et(?::\d+)?\/\?id=([A-Z0-9]+)/i;
   const cbeUrlMatch = smsText.match(cbeUrlPattern);
   
   if (cbeUrlMatch && cbeUrlMatch[1]) {
     rawRef = cbeUrlMatch[1];
-    console.log('🎯 Found CBE URL reference:', rawRef);
+    console.log('🎯 Found CBE URL reference via URL pattern:', rawRef);
     
     // Clean the reference by removing account suffix
     foundRef = this.cleanCBEReference(rawRef);
@@ -564,34 +564,37 @@ static extractTransactionIdentifiers(smsText) {
   // Method 2: Standard Ref No pattern (mainly for RECEIVER SMS)
   if (!foundRef) {
     console.log('🔎 Looking for Ref No pattern...');
-    const refPattern = /Ref\s*No\s*([A-Z0-9]+)/i;
+    // Pattern for: "Ref No FT253422RPRW11206342" or "Ref No: FT253422RPRW11206342"
+    const refPattern = /Ref\s*No[\s:]*([A-Z0-9]+)/i;
     const refMatch = smsText.match(refPattern);
-    if (refMatch) {
+    if (refMatch && refMatch[1]) {
       foundRef = refMatch[1];
       console.log('✅ Found Ref No:', foundRef);
     }
   }
   
-  // Method 3: FT pattern anywhere in text (fallback)
+  // Method 3: Direct id= pattern (fallback for URLs without full domain)
   if (!foundRef) {
-    console.log('🔎 Looking for FT pattern anywhere...');
-    const ftPattern = /(FT\d+[A-Z]+)/i;
-    const ftMatch = smsText.match(ftPattern);
-    if (ftMatch) {
-      foundRef = ftMatch[1];
-      console.log('✅ Found FT pattern:', foundRef);
+    console.log('🔎 Looking for direct id= pattern...');
+    // Pattern for: id=FT253422RPRW11206342 (anywhere in text)
+    const idPattern = /id=([A-Z0-9]{12,})/i;
+    const idMatch = smsText.match(idPattern);
+    if (idMatch && idMatch[1]) {
+      rawRef = idMatch[1];
+      console.log('🎯 Found direct id= reference:', rawRef);
+      foundRef = this.cleanCBEReference(rawRef);
     }
   }
   
-  // Method 4: Generic id= pattern (for any URL)
+  // Method 4: FT pattern anywhere in text (final fallback)
   if (!foundRef) {
-    console.log('🔎 Looking for generic id= pattern...');
-    const genericIdPattern = /id=([A-Z0-9]{10,})/i;
-    const genericIdMatch = smsText.match(genericIdPattern);
-    if (genericIdMatch) {
-      rawRef = genericIdMatch[1];
-      console.log('🎯 Found generic id reference:', rawRef);
-      foundRef = this.cleanCBEReference(rawRef);
+    console.log('🔎 Looking for FT pattern anywhere...');
+    // Pattern for: FT253422RPRW (minimum 8 chars after FT)
+    const ftPattern = /(FT\d+[A-Z0-9]+)/i;
+    const ftMatch = smsText.match(ftPattern);
+    if (ftMatch && ftMatch[1]) {
+      foundRef = ftMatch[1];
+      console.log('✅ Found FT pattern:', foundRef);
     }
   }
   
@@ -606,11 +609,13 @@ static extractTransactionIdentifiers(smsText) {
     console.log('⚠️ No reference found in SMS');
     
     // DEBUG: Show what patterns exist in the SMS
-    console.log('🔍 DEBUG - Checking SMS content:');
-    console.log('Has "id=":', smsText.includes('id='));
-    console.log('Has "FT":', smsText.includes('FT'));
-    console.log('Has "Ref":', smsText.includes('Ref'));
-    console.log('Has URL:', smsText.includes('http'));
+    console.log('🔍 DEBUG - SMS contains:');
+    console.log('- "id=":', smsText.includes('id='));
+    console.log('- "FT":', smsText.includes('FT'));
+    console.log('- "Ref":', smsText.includes('Ref'));
+    console.log('- "Ref No":', smsText.includes('Ref No'));
+    console.log('- URL:', smsText.includes('http'));
+    console.log('- apps.cbe.com.et:', smsText.includes('apps.cbe.com.et'));
   }
 
   // Extract time
