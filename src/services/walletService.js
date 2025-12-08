@@ -400,8 +400,6 @@ static async tryAutoMatchSMS(newSMSDeposit, smsText) {
   }
 }
 // NEW: Extract transaction identifiers from SMS
-// services/walletService.js - FIXED SMS PROCESSING
-// Update the extractTransactionIdentifiers method:
 
 static extractTransactionIdentifiers(smsText) {
   const identifiers = {
@@ -413,7 +411,7 @@ static extractTransactionIdentifiers(smsText) {
     recipientName: null,
     accountNumbers: [],
     smsBank: this.detectBankFromSMS(smsText),
-    rawRefNumber: null, // Store raw reference for debugging
+    rawRefNumber: null,
     isCredit: false,
     isDebit: false
   };
@@ -422,94 +420,110 @@ static extractTransactionIdentifiers(smsText) {
   identifiers.isCredit = /credited|received/i.test(sms);
   identifiers.isDebit = /debited|transfered|sent/i.test(sms);
 
-  // Extract EXACT amount for CBE transfers
+  // Extract EXACT amount
   const amountMatch = smsText.match(/ETB\s*([\d,]+\.?\d*)/i);
   if (amountMatch) {
     const cleanAmount = amountMatch[1].replace(/,/g, '');
     identifiers.exactAmount = parseFloat(cleanAmount);
   }
 
-  // ENHANCED: Extract transaction reference number for CBE format
+  // FIXED: Enhanced reference extraction with better URL parsing
+  console.log('🔍 FULL SMS TEXT FOR DEBUGGING:', smsText);
+  
   // Pattern 1: Standard "Ref No FT253422RPRW" format
   let refMatch = smsText.match(/Ref\s*No\s*([A-Z0-9]+)/i);
   
-  // Pattern 2: URL format "id=FT253422RPRW11206342" - common for sender SMS
+  // Pattern 2: URL format - FIXED to handle truncated URLs better
   if (!refMatch) {
-    const urlMatch = smsText.match(/id=([A-Z0-9]+)/i);
-    if (urlMatch) {
-      const fullId = urlMatch[1];
-      identifiers.rawRefNumber = fullId;
-      
-      console.log('🔍 Found URL format reference:', fullId);
-      
-      // CBE URL format examples:
-      // - For sender: FT253422RPRW11206342 (last 8 digits = sender account suffix)
-      // - For receiver: FT253422RPRW73135743 (last 8 digits = receiver account suffix)
-      
-      // The transaction reference is everything BEFORE the last 8 digits
-      if (fullId.length >= 12) {
-        // Typically CBE ref is 12-13 characters, then 8 digit account suffix
-        const refLength = fullId.length - 8;
-        if (refLength >= 8) {
-          identifiers.refNumber = fullId.substring(0, refLength);
-          console.log('✅ Extracted reference from URL:', identifiers.refNumber);
+    // Look for any URL pattern with id parameter
+    const urlPatterns = [
+      /id=([A-Z0-9]+)/i,
+      /\?id=([A-Z0-9]+)/i,
+      /:100\/\?id=([A-Z0-9]+)/i,
+      /apps\.cbe\.com\.et.*id=([A-Z0-9]+)/i
+    ];
+    
+    for (const pattern of urlPatterns) {
+      const urlMatch = smsText.match(pattern);
+      if (urlMatch && urlMatch[1]) {
+        const fullId = urlMatch[1];
+        identifiers.rawRefNumber = fullId;
+        console.log('🔍 Found URL reference with pattern', pattern, ':', fullId);
+        
+        // Clean up the reference - CBE format: FT253422RPRW11206342
+        // Remove last 8 digits (account suffix)
+        if (fullId.length >= 12) {
+          // Try to find the FT reference pattern
+          const ftMatch = fullId.match(/(FT\d+[A-Z]+)/i);
+          if (ftMatch) {
+            identifiers.refNumber = ftMatch[1];
+            console.log('✅ Extracted FT reference:', identifiers.refNumber);
+          } else {
+            // Fallback: take first part (remove last 8 digits if they're numbers)
+            const refLength = fullId.length - 8;
+            if (refLength >= 8) {
+              identifiers.refNumber = fullId.substring(0, refLength);
+              console.log('✅ Extracted by removing account suffix:', identifiers.refNumber);
+            } else {
+              identifiers.refNumber = fullId;
+            }
+          }
         } else {
           identifiers.refNumber = fullId;
         }
-      } else {
-        identifiers.refNumber = fullId;
+        break;
       }
     }
   } else {
     identifiers.refNumber = refMatch[1];
+    console.log('✅ Extracted standard Ref No:', identifiers.refNumber);
   }
 
-  // Pattern 3: Direct FT pattern in text (fallback)
+  // Pattern 3: Direct FT pattern in text
   if (!identifiers.refNumber) {
     const ftMatch = smsText.match(/(FT\d+[A-Z]+)/i);
     if (ftMatch) {
       identifiers.refNumber = ftMatch[1];
+      console.log('✅ Extracted FT pattern directly:', identifiers.refNumber);
     }
   }
 
-  // Pattern 4: Transaction ID pattern (additional fallback)
+  // Pattern 4: Transaction ID pattern
   if (!identifiers.refNumber) {
     const txnMatch = smsText.match(/Transaction.*?([A-Z0-9]{8,})/i) ||
                      smsText.match(/Txn.*?([A-Z0-9]{8,})/i);
     if (txnMatch) {
       identifiers.refNumber = txnMatch[1];
+      console.log('✅ Extracted from transaction text:', identifiers.refNumber);
     }
   }
 
-  // Clean up the reference number if needed
+  // Clean up the reference number
   if (identifiers.refNumber) {
-    // Ensure it's all uppercase for consistency
     identifiers.refNumber = identifiers.refNumber.toUpperCase();
     
-    // Remove any trailing numbers that might be account suffix (8 digits)
+    // Remove any trailing numbers (account suffix)
     const cleanedRef = identifiers.refNumber.replace(/\d{8}$/, '');
-    if (cleanedRef.length >= 8) { // Ensure we have a valid reference
+    if (cleanedRef.length >= 8) {
       identifiers.refNumber = cleanedRef;
     }
     
     identifiers.transactionId = identifiers.refNumber;
   }
 
-  // Extract time/date - CBE format: "07/12/2025 at 21:58:15"
+  // Extract time/date
   const timeMatch = smsText.match(/(\d{2}\/\d{2}\/\d{4})\s*(?:at)?\s*(\d{2}:\d{2}:\d{2})/i);
   if (timeMatch) {
     identifiers.time = `${timeMatch[1]} ${timeMatch[2]}`;
   }
 
-  // Extract names for CBE format
+  // Extract names
   if (identifiers.isDebit) {
-    // For debit SMS (sender): "to Defar Gobeze" (recipient = admin)
     const toMatch = smsText.match(/to\s+([A-Za-z\s]+?)(?:,|\.|on|with|from|Your)/i);
     if (toMatch) {
-      identifiers.recipientName = toMatch[1].trim(); // This is the admin/receiver
+      identifiers.recipientName = toMatch[1].trim();
     }
     
-    // Also try pattern: "transfered ETB XXX to Defar Gobeze"
     if (!identifiers.recipientName) {
       const transferMatch = smsText.match(/transfered.*?to\s+([A-Za-z\s]+?)(?:,|\.|on|with)/i);
       if (transferMatch) {
@@ -519,13 +533,11 @@ static extractTransactionIdentifiers(smsText) {
   }
 
   if (identifiers.isCredit) {
-    // For credit SMS (receiver): "from Defar Gobeze" (sender = user)
     const fromMatch = smsText.match(/from\s+([A-Za-z\s]+?)(?:,|\.|on|with|Your)/i);
     if (fromMatch) {
-      identifiers.senderName = fromMatch[1].trim(); // This is the user/sender
+      identifiers.senderName = fromMatch[1].trim();
     }
     
-    // Also try pattern: "Credited with ETB XXX from Defar Gobeze"
     if (!identifiers.senderName) {
       const creditedMatch = smsText.match(/credited.*?from\s+([A-Za-z\s]+?)(?:,|\.|on|with)/i);
       if (creditedMatch) {
@@ -534,28 +546,82 @@ static extractTransactionIdentifiers(smsText) {
     }
   }
 
-  // Extract masked account numbers (1*****5743)
+  // Extract account numbers
   const accountMatches = smsText.match(/\d\*{5,}\d+/g);
   if (accountMatches) {
     identifiers.accountNumbers = accountMatches;
   }
 
-  // Debug log for testing
-  console.log('🔍 Extracted identifiers for debugging:', {
+  // Enhanced debug log
+  console.log('🔍 FINAL EXTRACTED IDENTIFIERS:', {
     refNumber: identifiers.refNumber,
-    rawRef: identifiers.rawRefNumber,
+    rawRefNumber: identifiers.rawRefNumber,
     exactAmount: identifiers.exactAmount,
     isCredit: identifiers.isCredit,
     isDebit: identifiers.isDebit,
     senderName: identifiers.senderName,
     recipientName: identifiers.recipientName,
     time: identifiers.time,
-    amount: identifiers.amount
+    amount: identifiers.amount,
+    transactionId: identifiers.transactionId
   });
 
   return identifiers;
 }
-
+// Add this helper method
+static extractCBEReferenceFromSMS(smsText) {
+  console.log('🔍 Attempting CBE-specific reference extraction');
+  
+  // Method 1: Direct URL pattern extraction
+  const urlPattern = /(?:https?:\/\/apps\.cbe\.com\.et(?::\d+)?\/\?id=|id=)([A-Z0-9]+)/i;
+  const urlMatch = smsText.match(urlPattern);
+  
+  if (urlMatch && urlMatch[1]) {
+    const fullId = urlMatch[1];
+    console.log('🔍 Found CBE URL reference:', fullId);
+    
+    // CBE typically has pattern: FT + digits + letters + 8 digit account suffix
+    // Example: FT253422RPRW11206342
+    
+    // Look for FT pattern
+    const ftPattern = /(FT\d+[A-Z]+)/i;
+    const ftMatch = fullId.match(ftPattern);
+    
+    if (ftMatch) {
+      console.log('✅ Extracted CBE FT reference:', ftMatch[1]);
+      return ftMatch[1];
+    }
+    
+    // If no FT pattern, remove last 8 digits (account suffix)
+    if (fullId.length >= 12) {
+      const baseRef = fullId.substring(0, fullId.length - 8);
+      if (baseRef.length >= 8) {
+        console.log('✅ Extracted by removing account suffix:', baseRef);
+        return baseRef;
+      }
+    }
+    
+    return fullId;
+  }
+  
+  // Method 2: Standard Ref No pattern
+  const refPattern = /Ref\s*No\s*([A-Z0-9]+)/i;
+  const refMatch = smsText.match(refPattern);
+  
+  if (refMatch && refMatch[1]) {
+    console.log('✅ Found standard Ref No:', refMatch[1]);
+    return refMatch[1];
+  }
+  
+  // Method 3: FT pattern anywhere in text
+  const ftAnywhere = smsText.match(/(FT\d+[A-Z]+)/i);
+  if (ftAnywhere && ftAnywhere[1]) {
+    console.log('✅ Found FT pattern in text:', ftAnywhere[1]);
+    return ftAnywhere[1];
+  }
+  
+  return null;
+}
 // Also need to update the calculateSMSMatchScore method to handle partial matches better:
 static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
   let score = 0;
@@ -564,36 +630,36 @@ static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
   // Get second SMS identifiers
   const sms2Text = sms2Deposit.originalSMS;
   const sms2Identifiers = this.extractTransactionIdentifiers(sms2Text);
-  
-  console.log('📊 Comparing SMS identifiers:');
+  console.log('📊 COMPARING SMS IDENTIFIERS:');
   console.log('SMS1 Type:', sms1Identifiers.isCredit ? 'CREDIT' : sms1Identifiers.isDebit ? 'DEBIT' : 'UNKNOWN');
   console.log('SMS2 Type:', sms2Identifiers.isCredit ? 'CREDIT' : sms2Identifiers.isDebit ? 'DEBIT' : 'UNKNOWN');
   console.log('SMS1 Amount:', sms1Identifiers.amount, 'Exact:', sms1Identifiers.exactAmount);
   console.log('SMS2 Amount:', sms2Identifiers.amount, 'Exact:', sms2Identifiers.exactAmount);
   console.log('SMS1 Ref:', sms1Identifiers.refNumber, 'Raw:', sms1Identifiers.rawRefNumber);
   console.log('SMS2 Ref:', sms2Identifiers.refNumber, 'Raw:', sms2Identifiers.rawRefNumber);
+   // IMPORTANT FIX: Check if they're opposite types (one debit, one credit)
+  const isOppositeType = (sms1Identifiers.isDebit && sms2Identifiers.isCredit) || 
+                         (sms1Identifiers.isCredit && sms2Identifiers.isDebit);
   
-  // 1. Check if they're opposite types (one debit, one credit) - 20 points
-  if ((sms1Identifiers.isDebit && sms2Identifiers.isCredit) || 
-      (sms1Identifiers.isCredit && sms2Identifiers.isDebit)) {
+  if (isOppositeType) {
     score += 20;
-    console.log('✅ Opposite transaction types');
+    console.log('✅ Opposite transaction types (debit vs credit)');
   } else {
     console.log('❌ Same transaction type - not a match');
     return 0; // Early exit if both are same type
   }
+
   
   // 2. Amount match (30 points) - Must be exact for CBE
-  if (sms1Identifiers.exactAmount && sms2Identifiers.exactAmount) {
+   if (sms1Identifiers.exactAmount && sms2Identifiers.exactAmount) {
     if (sms1Identifiers.exactAmount === sms2Identifiers.exactAmount) {
       score += 30;
       console.log('✅ Exact amount match');
     } else {
       console.log('⚠️ Amount mismatch');
-      return 0; // Early exit for amount mismatch
+      return 0;
     }
   } else if (sms1Identifiers.amount && sms2Identifiers.amount) {
-    // Fallback to regular amount extraction
     if (Math.abs(sms1Identifiers.amount - sms2Identifiers.amount) < 0.01) {
       score += 30;
       console.log('✅ Amount match');
@@ -604,7 +670,7 @@ static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
   }
   
   // 3. Transaction/Ref number match (30 points) - Handle CBE specific formats
-  if (sms1Identifiers.refNumber && sms2Identifiers.refNumber) {
+    if (sms1Identifiers.refNumber && sms2Identifiers.refNumber) {
     const ref1 = sms1Identifiers.refNumber.toUpperCase();
     const ref2 = sms2Identifiers.refNumber.toUpperCase();
     
@@ -613,35 +679,26 @@ static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
       score += 30;
       console.log('✅ Exact reference number match');
     } 
-    // Check if one is contained in the other (for URL vs standard format)
+    // Check if one contains the other
     else if (ref1.includes(ref2) || ref2.includes(ref1)) {
       score += 28;
-      console.log('✅ One reference contains the other');
+      console.log('✅ Partial reference match');
     }
-    // For CBE format: Check if base reference matches (without account suffix)
+    // Check raw references
     else if (sms1Identifiers.rawRefNumber && sms2Identifiers.rawRefNumber) {
       const raw1 = sms1Identifiers.rawRefNumber.toUpperCase();
       const raw2 = sms2Identifiers.rawRefNumber.toUpperCase();
       
-      // Check if raw references contain the extracted references
       if (raw1.includes(ref2) || raw2.includes(ref1)) {
         score += 28;
         console.log('✅ Raw reference match');
-      }
-    }
-    // Try to match base part (FT253422RPRW)
-    else {
-      // Extract base reference (remove trailing digits)
-      const baseRef1 = ref1.replace(/\d+$/, '');
-      const baseRef2 = ref2.replace(/\d+$/, '');
-      
-      if (baseRef1 && baseRef2 && baseRef1 === baseRef2) {
-        score += 25;
-        console.log('✅ Base reference match');
       } else {
         console.log('⚠️ Reference number mismatch');
         return 0;
       }
+    } else {
+      console.log('⚠️ Reference number mismatch');
+      return 0;
     }
   }
   
