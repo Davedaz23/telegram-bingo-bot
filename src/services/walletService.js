@@ -64,89 +64,111 @@ static async resolveUserId(userId) {
   // Add these new methods to your WalletService class:
 
  // NEW: Enhanced SMS matching system with reference storage
-  static async matchAndAutoApproveSMS(smsText, telegramId, paymentMethod) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+ static async matchAndAutoApproveSMS(smsText, telegramId, paymentMethod) {
+  const session = await mongoose.startSession();
+  let transactionCompleted = false;
 
-    try {
-      console.log('🔄 Starting SMS matching and auto-approval...');
+  try {
+    console.log('🔄 Starting SMS matching and auto-approval...');
+    
+    session.startTransaction({
+      readPreference: 'primary',
+      readConcern: { level: 'local' },
+      writeConcern: { w: 'majority' }
+    });
+    
+    // First, store the SMS with extracted reference
+    const smsDeposit = await this.storeSMSMessage(telegramId, smsText, paymentMethod);
+    
+    // Analyze SMS type
+    const smsAnalysis = this.analyzeSMSType(smsText);
+    console.log('🔍 SMS Analysis:', smsAnalysis);
+    
+    // Extract identifiers including reference
+    const identifiers = this.extractTransactionIdentifiers(smsText);
+    
+    // Store reference in the main field
+    if (identifiers.refNumber) {
+      smsDeposit.extractedReference = identifiers.refNumber;
+      console.log(`💾 Stored reference: ${smsDeposit.extractedReference}`);
+    }
+    
+    // Save the initial SMS deposit
+    await smsDeposit.save({ session });
+    
+    if (smsAnalysis.type === 'SENDER') {
+      console.log('📤 This is a SENDER SMS (user sent money)');
       
-      // First, store the SMS with extracted reference
-      const smsDeposit = await this.storeSMSMessage(telegramId, smsText, paymentMethod);
+      // Update with metadata
+      smsDeposit.smsType = 'SENDER';
+      smsDeposit.metadata.transactionIdentifiers = identifiers;
+      smsDeposit.metadata.recipientName = identifiers.recipientName;
+      smsDeposit.status = 'RECEIVED_WAITING_MATCH';
+      await smsDeposit.save({ session });
       
-      // Analyze SMS type
-      const smsAnalysis = this.analyzeSMSType(smsText);
-      console.log('🔍 SMS Analysis:', smsAnalysis);
+      // Try to match with existing RECEIVER SMS
+      const matchResult = await this.tryAutoMatchSMS(smsDeposit, smsText, session);
       
-      // Extract identifiers including reference
-      const identifiers = this.extractTransactionIdentifiers(smsText);
+    } else if (smsAnalysis.type === 'RECEIVER') {
+      console.log('📥 This is a RECEIVER SMS (admin received money)');
       
-      // Store reference in the main field
-      if (identifiers.refNumber) {
-        smsDeposit.extractedReference = identifiers.refNumber;
-        console.log(`💾 Stored reference: ${smsDeposit.extractedReference}`);
+      // Update with metadata
+      smsDeposit.smsType = 'RECEIVER';
+      smsDeposit.metadata.transactionIdentifiers = identifiers;
+      smsDeposit.metadata.senderName = identifiers.senderName;
+      smsDeposit.status = 'RECEIVED_WAITING_MATCH';
+      await smsDeposit.save({ session });
+      
+      // Try to match with existing SENDER SMS
+      const matchResult = await this.tryAutoMatchSMS(smsDeposit, smsText, session);
+      
+    } else {
+      console.log('❓ Unknown SMS type, storing as regular deposit');
+      smsDeposit.status = 'RECEIVED';
+      await smsDeposit.save({ session });
+    }
+    
+    await session.commitTransaction();
+    transactionCompleted = true;
+    
+    return smsDeposit;
+    
+  } catch (error) {
+    if (!transactionCompleted) {
+      try {
+        await session.abortTransaction();
+      } catch (abortError) {
+        console.warn('⚠️ Could not abort transaction:', abortError.message);
       }
-      
-      if (smsAnalysis.type === 'SENDER') {
-        console.log('📤 This is a SENDER SMS (user sent money)');
+    }
+    
+    console.error('❌ Error in SMS matching:', error);
+    
+    // Handle validation errors gracefully
+    if (error.message.includes('validation failed') || error.message.includes('enum value')) {
+      try {
+        const smsDeposit = await SMSDeposit.findOne({
+          originalSMS: smsText,
+          telegramId: telegramId.toString()
+        });
         
-        // Store in metadata for future matching
-        smsDeposit.smsType = 'SENDER';
-        smsDeposit.metadata.transactionIdentifiers = identifiers;
-        smsDeposit.metadata.recipientName = identifiers.recipientName;
-        smsDeposit.status = 'RECEIVED_WAITING_MATCH';
-        await smsDeposit.save({ session });
-        
-        // Try to match with existing RECEIVER SMS
-        await this.tryAutoMatchSMS(smsDeposit, smsText);
-        
-      } else if (smsAnalysis.type === 'RECEIVER') {
-        console.log('📥 This is a RECEIVER SMS (admin received money)');
-        
-        // Store in metadata
-        smsDeposit.smsType = 'RECEIVER';
-        smsDeposit.metadata.transactionIdentifiers = identifiers;
-        smsDeposit.metadata.senderName = identifiers.senderName;
-        smsDeposit.status = 'RECEIVED_WAITING_MATCH';
-        await smsDeposit.save({ session });
-        
-        // Try to match with existing SENDER SMS
-        await this.tryAutoMatchSMS(smsDeposit, smsText);
-        
-      } else {
-        console.log('❓ Unknown SMS type, storing as regular deposit');
-      }
-      
-      await session.commitTransaction();
-      return smsDeposit;
-      
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Error in SMS matching:', error);
-      
-      // Handle validation errors gracefully
-      if (error.message.includes('validation failed') || error.message.includes('enum value')) {
-        try {
-          const smsDeposit = await SMSDeposit.findOne({
-            originalSMS: smsText,
-            telegramId: telegramId.toString()
-          });
-          
-          if (smsDeposit) {
-            smsDeposit.status = 'RECEIVED';
-            await smsDeposit.save();
-            return smsDeposit;
-          }
-        } catch (saveError) {
-          console.error('❌ Could not save SMS deposit after error:', saveError);
+        if (smsDeposit) {
+          smsDeposit.status = 'RECEIVED';
+          await smsDeposit.save();
+          return smsDeposit;
         }
+      } catch (saveError) {
+        console.error('❌ Could not save SMS deposit after error:', saveError);
       }
-      
-      throw error;
-    } finally {
+    }
+    
+    throw error;
+  } finally {
+    if (session) {
       session.endSession();
     }
   }
+}
 
 // NEW: Analyze SMS type (sender vs receiver)
 // ENHANCED: Analyze SMS type for CBE format
@@ -401,106 +423,112 @@ static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
   return percentage / 100;
 }
 // NEW: Enhanced auto-match logic
-static async tryAutoMatchSMS(newSMSDeposit, smsText) {
-    try {
-      const newAnalysis = this.analyzeSMSType(smsText);
-      const newIdentifiers = this.extractTransactionIdentifiers(smsText);
-      
-      console.log('🔍 Attempting to match SMS:', newSMSDeposit._id);
-      console.log('📊 New SMS type:', newAnalysis.type);
-      console.log('📊 New SMS amount:', newSMSDeposit.extractedAmount);
-      console.log('📊 New SMS reference:', newSMSDeposit.extractedReference);
-      
-      if (!newSMSDeposit.extractedAmount || newSMSDeposit.extractedAmount <= 0) {
-        console.log('⚠️ No valid amount, cannot match');
-        return null;
-      }
-      
-      // Find potential matches based on opposite type
-      const oppositeType = newAnalysis.type === 'SENDER' ? 'RECEIVER' : 'SENDER';
-      
-      // Build query using stored fields
-      const query = {
-        _id: { $ne: newSMSDeposit._id },
-        status: { 
-          $in: ['RECEIVED', 'RECEIVED_WAITING_MATCH', 'PENDING'] 
-        },
-        smsType: oppositeType,
-        extractedAmount: newSMSDeposit.extractedAmount,
-        createdAt: { 
-          $gte: new Date(Date.now() - 60 * 60 * 1000) // Last 1 hour
-        }
-      };
-      
-      // If we have a reference, use it for more precise matching
-      if (newSMSDeposit.extractedReference) {
-        query.$or = [
-          { extractedReference: newSMSDeposit.extractedReference },
-          { 'metadata.refNumber': newSMSDeposit.extractedReference },
-          { 'metadata.rawRefNumber': newSMSDeposit.extractedReference }
-        ];
-        console.log('🔑 Using reference for matching:', newSMSDeposit.extractedReference);
-      }
-      
-      console.log('🔍 Query for matches:', JSON.stringify(query, null, 2));
-      
-      const potentialMatches = await SMSDeposit.find(query)
-        .populate('userId', 'firstName username telegramId')
-        .sort({ createdAt: -1 })
-        .limit(10);
-      
-      console.log(`🔍 Found ${potentialMatches.length} potential matches`);
-      
-      for (const potentialMatch of potentialMatches) {
-        const matchScore = this.calculateSMSMatchScore(newIdentifiers, potentialMatch);
-        console.log(`📊 Match score with ${potentialMatch._id}: ${matchScore}`);
-        
-        if (matchScore >= 0.85) { // 85% match confidence
-          console.log(`✅ High confidence match found! (${matchScore})`);
-          
-          // APPROVE THE MATCHED TRANSACTION
-          const result = await this.approveMatchedSMS(newSMSDeposit, potentialMatch);
-          return result;
-        }
-      }
-      
-      console.log('❌ No strong matches found');
-      
-      // If no match found, update status to waiting for match
-      newSMSDeposit.status = 'RECEIVED_WAITING_MATCH';
-      newSMSDeposit.smsType = newAnalysis.type;
-      
-      // Ensure reference is stored
-      if (newIdentifiers.refNumber && !newSMSDeposit.extractedReference) {
-        newSMSDeposit.extractedReference = newIdentifiers.refNumber;
-      }
-      
-      newSMSDeposit.metadata.transactionIdentifiers = newIdentifiers;
-      
-      if (newAnalysis.type === 'SENDER') {
-        newSMSDeposit.metadata.recipientName = newIdentifiers.recipientName;
-      } else if (newAnalysis.type === 'RECEIVER') {
-        newSMSDeposit.metadata.senderName = newIdentifiers.senderName;
-      }
-      
-      await newSMSDeposit.save();
-      return null;
-      
-    } catch (error) {
-      console.error('❌ Error in auto-matching:', error);
-      
-      // Fallback: Save with basic status
-      try {
-        newSMSDeposit.status = 'RECEIVED';
-        newSMSDeposit.metadata.matchingError = error.message;
-        await newSMSDeposit.save();
-      } catch (saveError) {
-        console.error('❌ Could not save SMS deposit:', saveError);
-      }
-      
+static async tryAutoMatchSMS(newSMSDeposit, smsText, session = null) {
+  try {
+    const newAnalysis = this.analyzeSMSType(smsText);
+    const newIdentifiers = this.extractTransactionIdentifiers(smsText);
+    
+    console.log('🔍 Attempting to match SMS:', newSMSDeposit._id);
+    console.log('📊 New SMS type:', newAnalysis.type);
+    console.log('📊 New SMS amount:', newSMSDeposit.extractedAmount);
+    console.log('📊 New SMS reference:', newSMSDeposit.extractedReference);
+    
+    if (!newSMSDeposit.extractedAmount || newSMSDeposit.extractedAmount <= 0) {
+      console.log('⚠️ No valid amount, cannot match');
       return null;
     }
+    
+    // Find potential matches based on opposite type
+    const oppositeType = newAnalysis.type === 'SENDER' ? 'RECEIVER' : 'SENDER';
+    
+    // Build query using stored fields
+    const query = {
+      _id: { $ne: newSMSDeposit._id },
+      status: { 
+        $in: ['RECEIVED', 'RECEIVED_WAITING_MATCH', 'PENDING'] 
+      },
+      smsType: oppositeType,
+      extractedAmount: newSMSDeposit.extractedAmount,
+      createdAt: { 
+        $gte: new Date(Date.now() - 60 * 60 * 1000) // Last 1 hour
+      }
+    };
+    
+    // If we have a reference, use it for more precise matching
+    if (newSMSDeposit.extractedReference) {
+      query.$or = [
+        { extractedReference: newSMSDeposit.extractedReference },
+        { 'metadata.refNumber': newSMSDeposit.extractedReference },
+        { 'metadata.rawRefNumber': newSMSDeposit.extractedReference }
+      ];
+      console.log('🔑 Using reference for matching:', newSMSDeposit.extractedReference);
+    }
+    
+    console.log('🔍 Query for matches:', JSON.stringify(query, null, 2));
+    
+    const potentialMatches = await SMSDeposit.find(query)
+      .populate('userId', 'firstName username telegramId')
+      .sort({ createdAt: -1 })
+      .limit(10);
+    
+    console.log(`🔍 Found ${potentialMatches.length} potential matches`);
+    
+    for (const potentialMatch of potentialMatches) {
+      const matchScore = this.calculateSMSMatchScore(newIdentifiers, potentialMatch);
+      console.log(`📊 Match score with ${potentialMatch._id}: ${matchScore}`);
+      
+      if (matchScore >= 0.85) { // 85% match confidence
+        console.log(`✅ High confidence match found! (${matchScore})`);
+        
+        // APPROVE THE MATCHED TRANSACTION with session
+        const result = await this.approveMatchedSMS(newSMSDeposit, potentialMatch, session);
+        return result;
+      }
+    }
+    
+    console.log('❌ No strong matches found');
+    
+    // If no match found, update status to waiting for match
+    newSMSDeposit.status = 'RECEIVED_WAITING_MATCH';
+    newSMSDeposit.smsType = newAnalysis.type;
+    
+    // Ensure reference is stored
+    if (newIdentifiers.refNumber && !newSMSDeposit.extractedReference) {
+      newSMSDeposit.extractedReference = newIdentifiers.refNumber;
+    }
+    
+    newSMSDeposit.metadata.transactionIdentifiers = newIdentifiers;
+    
+    if (newAnalysis.type === 'SENDER') {
+      newSMSDeposit.metadata.recipientName = newIdentifiers.recipientName;
+    } else if (newAnalysis.type === 'RECEIVER') {
+      newSMSDeposit.metadata.senderName = newIdentifiers.senderName;
+    }
+    
+    // Use session if provided, otherwise regular save
+    if (session) {
+      await newSMSDeposit.save({ session });
+    } else {
+      await newSMSDeposit.save();
+    }
+    
+    return null;
+    
+  } catch (error) {
+    console.error('❌ Error in auto-matching:', error);
+    
+    // Fallback: Save with basic status
+    try {
+      newSMSDeposit.status = 'RECEIVED';
+      newSMSDeposit.metadata.matchingError = error.message;
+      await newSMSDeposit.save();
+    } catch (saveError) {
+      console.error('❌ Could not save SMS deposit:', saveError);
+    }
+    
+    return null;
   }
+}
 // NEW: Extract transaction identifiers from SMS
 
 // UPDATED: Enhanced reference extraction for both SENDER and RECEIVER SMS
@@ -1126,106 +1154,158 @@ static calculateSMSMatchScore(sms1Identifiers, sms2Deposit) {
 }
 
   // ENHANCED: Approve matched SMS
-  static async approveMatchedSMS(senderSMS, receiverSMS) {
-    const session = await mongoose.startSession();
+  static async approveMatchedSMS(senderSMS, receiverSMS, externalSession = null) {
+  let session = externalSession;
+  let shouldEndSession = false;
+  
+  // If no session provided, create our own
+  if (!session) {
+    session = await mongoose.startSession();
     session.startTransaction();
+    shouldEndSession = true;
+  }
 
-    try {
-      console.log('🤖 Approving matched SMS pair...');
-      
-      // Determine which is sender (user) and which is receiver (admin)
-      let userSMS, adminSMS;
-      if (senderSMS.metadata?.smsType === 'SENDER') {
-        userSMS = senderSMS;
-        adminSMS = receiverSMS;
-      } else {
-        userSMS = receiverSMS;
-        adminSMS = senderSMS;
-      }
-      
-      // Get user from user SMS
-      const user = await User.findById(userSMS.userId);
-      if (!user) {
-        throw new Error('User not found for matched SMS');
-      }
-      
-      const amount = userSMS.extractedAmount;
-      
-      // Get or create wallet
-      let wallet = await Wallet.findOne({ userId: user._id }).session(session);
-      if (!wallet) {
-        wallet = new Wallet({
-          userId: user._id,
-          balance: 0,
-          currency: 'USD'
-        });
-      }
-      
-      const balanceBefore = wallet.balance;
-      wallet.balance += amount;
-      const balanceAfter = wallet.balance;
-      
-      // Create transaction
-      const transaction = new Transaction({
+  try {
+    console.log('🤖 Approving matched SMS pair...');
+    
+    // Determine which is sender (user) and which is receiver (admin)
+    let userSMS, adminSMS;
+    if (senderSMS.metadata?.smsType === 'SENDER') {
+      userSMS = senderSMS;
+      adminSMS = receiverSMS;
+    } else {
+      userSMS = receiverSMS;
+      adminSMS = senderSMS;
+    }
+    
+    // Get user from user SMS
+    const user = await User.findById(userSMS.userId);
+    if (!user) {
+      throw new Error('User not found for matched SMS');
+    }
+    
+    const amount = userSMS.extractedAmount;
+    
+    // Get or create wallet
+    let wallet = await Wallet.findOne({ userId: user._id }).session(session);
+    if (!wallet) {
+      wallet = new Wallet({
         userId: user._id,
-        type: 'DEPOSIT',
-        amount,
-        balanceBefore,
-        balanceAfter,
-        status: 'COMPLETED',
-        description: `Matched deposit via ${userSMS.paymentMethod} (CBE Transfer)`,
-        reference: `SMS-MATCHED-${userSMS.metadata?.transactionId || Date.now()}`,
-        metadata: {
-          paymentMethod: userSMS.paymentMethod,
-          autoMatched: true,
-          matchedPair: {
-            senderSMSId: userSMS._id,
-            receiverSMSId: adminSMS._id,
-            transactionId: userSMS.metadata?.transactionId,
-            matchedAt: new Date()
-          }
-        }
+        balance: 0,
+        currency: 'USD'
       });
-      
-      // Update both SMS deposits
-      userSMS.status = 'APPROVED';
-      userSMS.transactionId = transaction._id;
-      userSMS.autoApproved = true;
-      userSMS.processedAt = new Date();
-      userSMS.metadata.matched = true;
-      userSMS.metadata.matchedWith = adminSMS._id;
-      userSMS.metadata.approvedAt = new Date();
-      
-      adminSMS.status = 'CONFIRMED';
-      adminSMS.metadata.matched = true;
-      adminSMS.metadata.matchedWith = userSMS._id;
-      adminSMS.metadata.confirmedAmount = amount;
-      adminSMS.metadata.confirmedAt = new Date();
-      
-      await transaction.save({ session });
-      await wallet.save({ session });
-      await userSMS.save({ session });
-      await adminSMS.save({ session });
+    }
+    
+    const balanceBefore = wallet.balance;
+    wallet.balance += amount;
+    const balanceAfter = wallet.balance;
+    
+    // Create transaction
+    const transaction = new Transaction({
+      userId: user._id,
+      type: 'DEPOSIT',
+      amount,
+      balanceBefore,
+      balanceAfter,
+      status: 'COMPLETED',
+      description: `Matched deposit via ${userSMS.paymentMethod} (CBE Transfer)`,
+      reference: `SMS-MATCHED-${userSMS.metadata?.transactionId || Date.now()}`,
+      metadata: {
+        paymentMethod: userSMS.paymentMethod,
+        autoMatched: true,
+        matchedPair: {
+          senderSMSId: userSMS._id,
+          receiverSMSId: adminSMS._id,
+          transactionId: userSMS.metadata?.transactionId,
+          matchedAt: new Date()
+        }
+      }
+    });
+    
+    // Update both SMS deposits
+    userSMS.status = 'APPROVED';
+    userSMS.transactionId = transaction._id;
+    userSMS.autoApproved = true;
+    userSMS.processedAt = new Date();
+    userSMS.metadata.matched = true;
+    userSMS.metadata.matchedWith = adminSMS._id;
+    userSMS.metadata.approvedAt = new Date();
+    
+    adminSMS.status = 'CONFIRMED';
+    adminSMS.metadata.matched = true;
+    adminSMS.metadata.matchedWith = userSMS._id;
+    adminSMS.metadata.confirmedAmount = amount;
+    adminSMS.metadata.confirmedAt = new Date();
+    
+    await transaction.save({ session });
+    await wallet.save({ session });
+    await userSMS.save({ session });
+    await adminSMS.save({ session });
+    
+    // Only commit if we created the session
+    if (shouldEndSession) {
       await session.commitTransaction();
-      
-      console.log(`✅ Approved matched deposit: $${amount} for user ${user.telegramId}`);
-      
-      return {
-        transaction,
-        wallet,
-        userSMS,
-        adminSMS,
-        autoApproved: true
-      };
-      
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Error approving matched SMS:', error);
-      throw error;
-    } finally {
+    }
+    
+    console.log(`✅ Approved matched deposit: $${amount} for user ${user.telegramId}`);
+    
+    return {
+      transaction,
+      wallet,
+      userSMS,
+      adminSMS,
+      autoApproved: true
+    };
+    
+  } catch (error) {
+    // Only abort if we created the session
+    if (shouldEndSession && session) {
+      try {
+        await session.abortTransaction();
+      } catch (abortError) {
+        console.warn('⚠️ Error aborting transaction:', abortError.message);
+      }
+    }
+    
+    console.error('❌ Error approving matched SMS:', error);
+    throw error;
+  } finally {
+    // Only end session if we created it
+    if (shouldEndSession && session) {
       session.endSession();
     }
   }
+}
+
+
+
+
+
+///
+// NEW: Add retry logic for write conflicts
+static async withRetry(operation, maxRetries = 3, delay = 1000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      // Check if it's a write conflict error
+      if (error.code === 112 || error.codeName === 'WriteConflict') {
+        console.warn(`⚠️ Write conflict (attempt ${attempt}/${maxRetries}), retrying...`);
+        if (attempt < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, delay * attempt));
+          continue;
+        }
+      }
+      throw error;
+    }
+  }
+}
+
+// Use it in critical operations like:
+static async approveMatchedSMSWithRetry(senderSMS, receiverSMS, externalSession = null) {
+  return this.withRetry(() => this.approveMatchedSMS(senderSMS, receiverSMS, externalSession));
+}
+
  static async getUnmatchedSMS() {
     try {
       const unmatchedSMS = await SMSDeposit.find({ 
