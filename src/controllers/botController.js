@@ -113,7 +113,7 @@ this.bot.command('matchsms', async (ctx) => {
   try {
     const [unmatchedSMS, matchedPairs] = await Promise.all([
       WalletService.getUnmatchedSMS(),
-      WalletService.findRecentlyMatchedSMS()
+      //WalletService.findRecentlyMatchedSMS()
     ]);
 
     let message = `🤝 *SMS Matching Status*\n\n`;
