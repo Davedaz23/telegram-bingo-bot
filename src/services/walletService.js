@@ -502,12 +502,11 @@ static async tryAutoMatchSMS(newSMSDeposit, smsText) {
     }
   }
 // NEW: Extract transaction identifiers from SMS
-
 static extractTransactionIdentifiers(smsText) {
   smsText = smsText.trim();
   
-  console.log('🔍 EXTRACTING IDENTIFIERS - SMS LENGTH:', smsText.length);
-  console.log('📋 SMS SAMPLE:', smsText.substring(0, 300)); // Show first 300 chars
+  console.log('🔍 EXTRACTING IDENTIFIERS FROM SMS');
+  console.log('📋 SMS preview:', smsText.substring(0, 150));
   
   const identifiers = {
     amount: this.extractAmountFromSMS(smsText),
@@ -540,83 +539,12 @@ static extractTransactionIdentifiers(smsText) {
     console.log('💰 Exact amount:', identifiers.exactAmount);
   }
 
-  // ENHANCED: CBE-specific reference extraction
-  let foundRef = null;
-  let rawRef = null;
+  // USE UNIFIED REFERENCE EXTRACTION
+  identifiers.refNumber = this.extractReferenceFromSMS(smsText);
   
-  console.log('🔎 Looking for CBE URL pattern...');
-  
-  // FIXED: Better URL pattern that handles different formats
-  // Pattern for: https://apps.cbe.com.et:100/?id=FT253422RPRW11206342
-  // Also handles: apps.cbe.com.et?id=FT253422RPRW11206342
-  // const cbeUrlPattern = /(?:https?:\/\/)?apps\.cbe\.com\.et(?::\d+)?\/\?id=([A-Z0-9]+)/i;
-  // const cbeUrlMatch = smsText.match(cbeUrlPattern);
-  
-  // if (cbeUrlMatch && cbeUrlMatch[1]) {
-  //   rawRef = cbeUrlMatch[1];
-  //   console.log('🎯 Found CBE URL reference via URL pattern:', rawRef);
-    
-  //   // Clean the reference by removing account suffix
-  //   foundRef = this.cleanCBEReference(rawRef);
-  //   console.log('🧹 Cleaned reference:', foundRef);
-  // }
-  
-  // Method 2: Standard Ref No pattern (mainly for RECEIVER SMS)
-  if (!foundRef) {
-    console.log('🔎 Looking for Ref No pattern...');
-    // Pattern for: "Ref No FT253422RPRW11206342" or "Ref No: FT253422RPRW11206342"
-    const refPattern = /Ref\s*No[\s:]*([A-Z0-9]+)/i;
-    const refMatch = smsText.match(refPattern);
-    if (refMatch && refMatch[1]) {
-      foundRef = refMatch[1];
-      console.log('✅ Found Ref No:', foundRef);
-    }
-  }
-  
-  
-  // Method 4: FT pattern anywhere in text (final fallback)
-  if (!foundRef) {
-    console.log('🔎 Looking for FT pattern anywhere...');
-    // Pattern for: FT253422RPRW (minimum 8 chars after FT)
-    const ftPattern = /(FT\d+[A-Z0-9]+)/i;
-    const ftMatch = smsText.match(ftPattern);
-    if (ftMatch && ftMatch[1]) {
-      foundRef = ftMatch[1];
-      console.log('✅ Found FT pattern:', foundRef);
-    }
-  }
-  
-  // Method 3: Direct id= pattern (fallback for URLs without full domain)
-  if (!foundRef) {
-    console.log('🔎 Looking for direct id= pattern...');
-    // Pattern for: id=FT253422RPRW11206342 (anywhere in text)
-    const idPattern = /id=([A-Z0-9]{12,})/i;
-    const idMatch = smsText.match(idPattern);
-    if (idMatch && idMatch[1]) {
-      rawRef = idMatch[1];
-      console.log('🎯 Found direct id= reference:', rawRef);
-      foundRef = this.cleanCBEReference(rawRef);
-    }
-  }
-  
-  if (foundRef) {
-    identifiers.refNumber = foundRef.toUpperCase();
+  if (identifiers.refNumber) {
     identifiers.transactionId = identifiers.refNumber;
-    identifiers.rawRefNumber = rawRef || foundRef;
-    
-    console.log('🎯 FINAL Extracted reference:', identifiers.refNumber);
-    console.log('📝 Raw reference:', identifiers.rawRefNumber);
-  } else {
-    console.log('⚠️ No reference found in SMS');
-    
-    // DEBUG: Show what patterns exist in the SMS
-    console.log('🔍 DEBUG - SMS contains:');
-    console.log('- "id=":', smsText.includes('id='));
-    console.log('- "FT":', smsText.includes('FT'));
-    console.log('- "Ref":', smsText.includes('Ref'));
-    console.log('- "Ref No":', smsText.includes('Ref No'));
-    console.log('- URL:', smsText.includes('http'));
-    console.log('- apps.cbe.com.et:', smsText.includes('apps.cbe.com.et'));
+    console.log('🎯 Extracted reference:', identifiers.refNumber);
   }
 
   // Extract time
@@ -665,6 +593,59 @@ static extractTransactionIdentifiers(smsText) {
 
   return identifiers;
 }
+
+//new
+// NEW: Unified reference extraction method
+static extractReferenceFromSMS(smsText) {
+  console.log('🔍 Extracting reference from SMS...');
+  
+  // Try multiple patterns in order of preference
+  
+  // 1. URL pattern with id= (most common for both sender and receiver)
+  const urlPattern = /(?:https?:\/\/)?apps\.cbe\.com\.et(?::\d+)?\/\?id=([A-Z0-9]+)/i;
+  const urlMatch = smsText.match(urlPattern);
+  
+  if (urlMatch && urlMatch[1]) {
+    const fullId = urlMatch[1];
+    console.log('✅ Found URL reference:', fullId);
+    
+    // Clean it by removing account suffix if present
+    return this.cleanCBEReference(fullId);
+  }
+  
+  // 2. Ref No pattern (for receiver SMS)
+  const refNoPattern = /Ref\s*No\s*([A-Z0-9]+)/i;
+  const refNoMatch = smsText.match(refNoPattern);
+  
+  if (refNoMatch && refNoMatch[1]) {
+    console.log('✅ Found Ref No reference:', refNoMatch[1]);
+    return this.cleanCBEReference(refNoMatch[1]);
+  }
+  
+  // 3. FT pattern anywhere (fallback)
+  const ftPattern = /(FT\d+[A-Z0-9]+)/i;
+  const ftMatch = smsText.match(ftPattern);
+  
+  if (ftMatch && ftMatch[1]) {
+    console.log('✅ Found FT pattern reference:', ftMatch[1]);
+    return this.cleanCBEReference(ftMatch[1]);
+  }
+  
+  // 4. Direct id= pattern (without full URL)
+  const directIdPattern = /id=([A-Z0-9]+)/i;
+  const directIdMatch = smsText.match(directIdPattern);
+  
+  if (directIdMatch && directIdMatch[1]) {
+    console.log('✅ Found direct id= reference:', directIdMatch[1]);
+    return this.cleanCBEReference(directIdMatch[1]);
+  }
+  
+  console.log('❌ No reference found in SMS');
+  return null;
+}
+
+
+
 
 // ENHANCED: Clean CBE reference by removing account suffix
 static cleanCBEReference(reference) {
@@ -2691,35 +2672,21 @@ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
     const analysis = this.analyzeSMSType(smsText);
     const identifiers = this.extractTransactionIdentifiers(smsText);
     
-    // Clean the reference before storing
-    let cleanReference = identifiers.refNumber;
-    if (cleanReference) {
-      cleanReference = this.cleanCBEReference(cleanReference);
-    }
-    
+    // Store the SMS with extracted reference
     const smsDeposit = new SMSDeposit({
       userId: mongoUserId,
       telegramId: user.telegramId,
       originalSMS: smsText,
       paymentMethod: finalMethod,
       extractedAmount: amount || 0,
-      extractedReference: cleanReference || null, // Store CLEAN reference
+      extractedReference: identifiers.refNumber || null, // Store extracted reference
       status: 'RECEIVED',
       smsType: analysis.type,
       metadata: {
         smsLength: smsText.length,
-        hasTransactionId: smsText.includes('Txn ID') || smsText.includes('Transaction'),
-        hasBalance: smsText.includes('balance') || smsText.includes('Balance'),
-        amountDetected: !!amount,
-        detectedAmount: amount,
         storedAt: new Date(),
-        autoProcessAttempted: false,
-        confidence: analysis.confidence,
-        // Store both raw and cleaned references
         transactionIdentifiers: identifiers,
-        refNumber: cleanReference,
-        rawRefNumber: identifiers.rawRefNumber,
-        originalRefNumber: identifiers.refNumber // Store original before cleaning
+        refNumber: identifiers.refNumber // Also store in metadata for backup
       }
     });
 
@@ -2728,8 +2695,7 @@ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
       id: smsDeposit._id,
       type: smsDeposit.smsType,
       amount: smsDeposit.extractedAmount,
-      reference: smsDeposit.extractedReference,
-      rawReference: identifiers.rawRefNumber
+      reference: smsDeposit.extractedReference
     });
 
     return smsDeposit;
