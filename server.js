@@ -69,14 +69,14 @@ app.get('/test-sms', (req, res) => {
 // Quick test endpoint
 app.get('/test-quick', async (req, res) => {
   const testSMS = req.query.sms || `Dear Defar, You have transfered ETB 50.00 to Defar Gobeze on 07/12/2025 at 21:58:15 from your account 1*****6342. Your account has been debited with a S.charge of ETB 0.50 and  15% VAT of ETB0.08, with a total of ETB50.58. Your Current Balance is ETB 285,823.10. Thank you for Banking with CBE! https://apps.cbe.com.et:100/?id=FT253422RPRW11206342 For feedback click the link https://forms.gle/R1s9nkJ6qZVCxRVu9`;
-  
+
   try {
     const result = {
       originalSMS: testSMS,
       extraction: WalletService.extractTransactionIdentifiers(testSMS),
       cleaned: WalletService.cleanCBEReference(WalletService.extractTransactionIdentifiers(testSMS).refNumber)
     };
-    
+
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -110,18 +110,18 @@ app.get('/health', async (req, res) => {
   try {
     // MongoDB health check
     await mongoose.connection.db.admin().ping();
-    
+
     // Check wallet service status
     const Wallet = require('./src/models/Wallet');
     const Transaction = require('./src/models/Transaction');
-    
+
     const totalWallets = await Wallet.countDocuments();
-    const pendingDeposits = await Transaction.countDocuments({ 
-      type: 'DEPOSIT', 
-      status: 'PENDING' 
+    const pendingDeposits = await Transaction.countDocuments({
+      type: 'DEPOSIT',
+      status: 'PENDING'
     });
-    
-    res.json({ 
+
+    res.json({
       status: 'OK',
       timestamp: new Date().toISOString(),
       database: 'MongoDB Connected',
@@ -154,18 +154,18 @@ app.get('/admin/health', async (req, res) => {
     const Wallet = require('./src/models/Wallet');
     const Transaction = require('./src/models/Transaction');
     const User = require('./src/models/User');
-    
+
     const stats = {
       users: await User.countDocuments(),
       wallets: await Wallet.countDocuments(),
       totalTransactions: await Transaction.countDocuments(),
-      pendingDeposits: await Transaction.countDocuments({ 
-        type: 'DEPOSIT', 
-        status: 'PENDING' 
+      pendingDeposits: await Transaction.countDocuments({
+        type: 'DEPOSIT',
+        status: 'PENDING'
       }),
-      completedDeposits: await Transaction.countDocuments({ 
-        type: 'DEPOSIT', 
-        status: 'COMPLETED' 
+      completedDeposits: await Transaction.countDocuments({
+        type: 'DEPOSIT',
+        status: 'COMPLETED'
       }),
       totalBalance: await Wallet.aggregate([
         { $group: { _id: null, total: { $sum: '$balance' } } }
@@ -194,7 +194,7 @@ app.get('/', (req, res) => {
     timestamp: new Date().toISOString(),
     features: [
       'Telegram Authentication',
-      'Real-time Bingo Games', 
+      'Real-time Bingo Games',
       'Wallet System with Ethiopian Payments',
       'Admin Dashboard'
     ],
@@ -228,7 +228,7 @@ app.use('*', (req, res) => {
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Error Stack:', err.stack);
-  
+
   // MongoDB duplicate key error
   if (err.code === 11000) {
     return res.status(409).json({
@@ -236,7 +236,7 @@ app.use((err, req, res, next) => {
       error: 'Duplicate entry found'
     });
   }
-  
+
   // MongoDB validation error
   if (err.name === 'ValidationError') {
     const errors = Object.values(err.errors).map(e => e.message);
@@ -246,7 +246,7 @@ app.use((err, req, res, next) => {
       details: errors
     });
   }
-  
+
   // Wallet service errors
   if (err.message.includes('Wallet') || err.message.includes('balance')) {
     return res.status(400).json({
@@ -254,7 +254,7 @@ app.use((err, req, res, next) => {
       error: err.message
     });
   }
-  
+
   res.status(500).json({
     success: false,
     error: process.env.NODE_ENV === 'production' ? 'Something went wrong!' : err.message
@@ -273,7 +273,7 @@ const server = app.listen(PORT, () => {
   console.log(`   - https://bingominiapp.vercel.app (Production)`);
   console.log(`   - http://localhost:3001 (Development)`);
   console.log(`   - http://localhost:3000 (Development)`);
-  
+
   // Initialize services after server is running
   setTimeout(() => {
     console.log('🔄 Initializing services...');
@@ -284,22 +284,22 @@ const server = app.listen(PORT, () => {
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('🛑 Server shutting down gracefully...');
-  
+
   // Clean up game service intervals
   if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
     GameService.cleanupAllIntervals();
   }
-  
+
   // Stop bot if running
   if (botController && botController.bot) {
     botController.bot.stop();
     console.log('✅ Telegram bot stopped');
   }
-  
+
   // Close MongoDB connection
   await mongoose.connection.close();
   console.log('✅ MongoDB connection closed');
-  
+
   server.close(() => {
     console.log('✅ Server closed');
     process.exit(0);
@@ -308,22 +308,22 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
   console.log('🛑 Server terminating gracefully...');
-  
+
   // Clean up game service intervals
   if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
     GameService.cleanupAllIntervals();
   }
-  
+
   // Stop bot if running
   if (botController && botController.bot) {
     botController.bot.stop();
     console.log('✅ Telegram bot stopped');
   }
-  
+
   // Close MongoDB connection
   await mongoose.connection.close();
   console.log('✅ MongoDB connection closed');
-  
+
   server.close(() => {
     console.log('✅ Server closed');
     process.exit(0);

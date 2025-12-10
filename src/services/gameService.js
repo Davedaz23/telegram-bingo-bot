@@ -466,7 +466,7 @@ static NUMBER_CALL_INTERVAL = 8000; // 8 seconds between calls
         const totalPlayers = game.currentPlayers;
         const entryFee = 10;
         const totalPot = totalPlayers * entryFee;
-        const platformFee = totalPot * 0.1;
+        const platformFee = totalPot * 0.2;
         const winnerPrize = totalPot - platformFee;
 
         const WalletService = require('./walletService');
