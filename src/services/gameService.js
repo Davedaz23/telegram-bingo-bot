@@ -4,6 +4,8 @@
   const User = require('../models/User');
   const GamePlayer = require('../models/GamePlayer');
   const BingoCard = require('../models/BingoCard');
+  const Reconciliation = require('../models/Reconciliation'); // ADD THIS LINE
+
   const GameUtils = require('../utils/gameUtils');
 
   class GameService {
