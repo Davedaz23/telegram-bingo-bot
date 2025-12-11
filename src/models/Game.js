@@ -9,7 +9,7 @@ const gameSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['WAITING', 'WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE', 'FINISHED', 'CANCELLED', 'COOLDOWN'],
+    enum: ['WAITING', 'WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE', 'FINISHED', 'CANCELLED', 'COOLDOWN','NO_WINNER'],
     default: 'WAITING_FOR_PLAYERS'
   },
   maxPlayers: {
