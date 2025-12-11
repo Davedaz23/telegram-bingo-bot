@@ -9,7 +9,8 @@ const authRoutes = require('./src/routes/auth');
 const gameRoutes = require('./src/routes/games');
 const walletRoutes = require('./src/routes/wallet');
 const testRoutes = require('./src/routes/test');
-
+const cron = require('node-cron');
+const ReconciliationService = require('./src/services/reconciliationService');
 const BotController = require('./src/controllers/botController');
 // Import WalletService to initialize payment methods
 const WalletService = require('./src/services/walletService');
@@ -259,6 +260,26 @@ app.use((err, req, res, next) => {
     success: false,
     error: process.env.NODE_ENV === 'production' ? 'Something went wrong!' : err.message
   });
+});
+
+cron.schedule('0 * * * *', async () => {
+  console.log('🕐 Running hourly reconciliation check...');
+  try {
+    await ReconciliationService.runDailyReconciliation();
+  } catch (error) {
+    console.error('❌ Hourly reconciliation failed:', error);
+  }
+});
+
+// Run comprehensive reconciliation at midnight
+cron.schedule('0 0 * * *', async () => {
+  console.log('🌙 Running midnight comprehensive reconciliation...');
+  try {
+    const result = await ReconciliationService.runDailyReconciliation();
+    console.log('✅ Midnight reconciliation complete:', result);
+  } catch (error) {
+    console.error('❌ Midnight reconciliation failed:', error);
+  }
 });
 
 const PORT = process.env.PORT || 3000;

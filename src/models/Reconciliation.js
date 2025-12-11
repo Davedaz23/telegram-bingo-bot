@@ -73,7 +73,6 @@ const reconciliationSchema = new mongoose.Schema({
       ref: 'User'
     }
   }],
-  // For validation
   debitTotal: {
     type: Number,
     default: 0,
