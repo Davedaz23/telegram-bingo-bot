@@ -170,7 +170,7 @@ class UserService {
 
       return user.walletBalance;
     } catch (error) {
-      console.error('Error getting wallet balance:', error);
+      console.error('Error getting wallet balance: ', error);
       throw error;
     }
   }
