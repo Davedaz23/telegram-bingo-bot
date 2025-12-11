@@ -1675,6 +1675,7 @@ static async processEntryFees(gameId) {
       return;
     }
     
+    
     // Process entry fees
     const feeResult = await this.processEntryFees(gameId);
     
