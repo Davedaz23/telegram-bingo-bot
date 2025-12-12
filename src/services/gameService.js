@@ -981,106 +981,127 @@ static async processEntryFees(gameId) {
 }
 
   // NEW: Enhanced endGameDueToNoWinner with reconciliation
-  static async endGameDueToNoWinner(gameId) {
+static async endGameDueToNoWinner(gameId) {
+  try {
+    const game = await Game.findById(gameId);
+    
+    // First, check if game is already ended
+    if (!game || game.status !== 'ACTIVE') {
+      console.log(`⚠️ Game ${game?.code} is not active (${game?.status}), skipping no-winner end`);
+      return;
+    }
+
+    // CRITICAL: Only end if ALL 75 numbers have been called
+    if (game.numbersCalled.length < 75) {
+      console.log(`⏳ Game ${game.code} has ${game.numbersCalled.length}/75 numbers called. Not ending yet.`);
+      return;
+    }
+
+    console.log(`🏁 Ending game ${game.code} - no winner after ALL 75 numbers`);
+    
     const session = await mongoose.startSession();
     session.startTransaction();
-    
+
     try {
-      const game = await Game.findById(gameId).session(session);
-      if (!game || game.status !== 'ACTIVE') {
+      // Double-check game status within transaction
+      const gameInSession = await Game.findById(gameId).session(session);
+      if (!gameInSession || gameInSession.status !== 'ACTIVE') {
+        console.log(`🔄 Game ${game?.code} already ended during transaction, skipping`);
         await session.abortTransaction();
         return;
       }
-      
-      console.log(`🏁 Ending game ${game.code} - no winner after 75 numbers`);
-      
+
       // Get all players with cards
       const bingoCards = await BingoCard.find({ gameId }).session(session);
       
-      // Get or create reconciliation record
-      let reconciliation = await Reconciliation.findOne({ gameId }).session(session);
-      if (!reconciliation) {
-        reconciliation = await this.createReconciliation(gameId);
+      // Check if refunds have already been processed
+      const reconciliation = await Reconciliation.findOne({ gameId }).session(session);
+      
+      if (reconciliation && reconciliation.status === 'NO_WINNER_REFUNDED') {
+        console.log(`⚠️ Refunds already processed for game ${game.code}. Skipping.`);
+        await session.abortTransaction();
+        return;
       }
+
+      // Refund all players
+      console.log(`💰 Refunding ${bingoCards.length} players due to no winner...`);
       
       const entryFee = 10;
       const WalletService = require('./walletService');
       
-      console.log(`💰 Refunding ${bingoCards.length} players due to no winner...`);
-      
-      // Refund all players
       for (const card of bingoCards) {
         try {
           const user = await User.findById(card.userId).session(session);
           
           if (user && user.telegramId) {
-            // Add winning (refund)
-            const result = await WalletService.addWinning(
+            // Check if this player has already been refunded
+            if (reconciliation) {
+              const alreadyRefunded = reconciliation.transactions.some(tx => 
+                tx.userId.toString() === card.userId.toString() && 
+                tx.type === 'REFUND' && 
+                tx.status === 'COMPLETED'
+              );
+              
+              if (alreadyRefunded) {
+                console.log(`⚠️ User ${user.telegramId} already refunded. Skipping.`);
+                continue;
+              }
+            }
+            
+            // Refund the entry fee
+            await WalletService.addWinning(
               user.telegramId,
               gameId,
               entryFee,
               `Refund - No winner in game ${game.code}`
             );
             
-            // Update reconciliation
-            reconciliation.transactions.push({
-              userId: card.userId,
-              type: 'REFUND',
-              amount: entryFee,
-              transactionId: result.transaction._id,
-              status: 'COMPLETED'
-            });
-            
-            reconciliation.creditTotal += entryFee;
-            
             console.log(`✅ Refunded $${entryFee} to ${user.telegramId}`);
           }
         } catch (error) {
           console.error(`❌ Failed to refund user ${card.userId}:`, error.message);
-          reconciliation.transactions.push({
-            userId: card.userId,
-            type: 'REFUND',
-            amount: entryFee,
-            status: 'FAILED',
-            metadata: { error: error.message }
-          });
         }
       }
-      
-      // Update game status
+
+      // Update game status - THIS IS CRITICAL
       const now = new Date();
-      game.status = 'NO_WINNER';
-      game.endedAt = now;
-      game.winnerId = null;
-      game.cooldownEndTime = null;
-      game.noWinner = true;
-      game.refunded = true;
+      gameInSession.status = 'NO_WINNER';
+      gameInSession.endedAt = now;
+      gameInSession.winnerId = null;
+      gameInSession.cooldownEndTime = null;
+      gameInSession.noWinner = true;
+      gameInSession.refunded = true;
       
-      await game.save({ session });
+      await gameInSession.save({ session });
       
       // Update reconciliation
-      reconciliation.status = 'NO_WINNER_REFUNDED';
-      reconciliation.completedAt = now;
-      reconciliation.addAudit('GAME_ENDED_NO_WINNER', {
+      let finalReconciliation = reconciliation;
+      if (!finalReconciliation) {
+        finalReconciliation = await this.createReconciliation(gameId);
+      }
+      
+      finalReconciliation.status = 'NO_WINNER_REFUNDED';
+      finalReconciliation.completedAt = now;
+      finalReconciliation.addAudit('GAME_ENDED_NO_WINNER', {
         gameCode: game.code,
         totalPlayers: bingoCards.length,
         totalRefunded: bingoCards.length * entryFee,
         endedAt: now
       });
       
-      await reconciliation.save({ session });
+      await finalReconciliation.save({ session });
       
       await session.commitTransaction();
       
-      console.log(`✅ All refunds processed for game ${game.code}`);
+      console.log(`✅ All refunds processed for game ${game.code}. Status changed to NO_WINNER`);
       
       this.winnerDeclared.add(gameId.toString());
       this.processingGames.delete(gameId.toString());
       this.stopAutoNumberCalling(gameId);
       
-      // Create new game for next session
-      await this.createNewGameForNextSession(game._id);
-      
+      // Set next game countdown
+      await this.setNextGameCountdown(gameId);
+
     } catch (error) {
       console.error('❌ Error ending game due to no winner:', error);
       
@@ -1096,7 +1117,12 @@ static async processEntryFees(gameId) {
     } finally {
       session.endSession();
     }
+
+  } catch (error) {
+    console.error('❌ Error in endGameDueToNoWinner:', error);
+    throw error;
   }
+}
   
   // NEW: Create new game for next session (instead of reusing)
   static async createNewGameForNextSession(previousGameId) {
