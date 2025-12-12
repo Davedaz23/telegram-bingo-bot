@@ -32,7 +32,7 @@ static NUMBER_CALL_INTERVAL = 8000; // 8 seconds between calls
     try {
       // First, check if there's an active game
       let game = await Game.findOne({ 
-        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE', 'COOLDOWN'] },
+        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE', 'COOLDOWN','NO_WINNER'] },
         archived: { $ne: true }
       })
       .populate('winnerId', 'username firstName')
@@ -921,10 +921,29 @@ static async processEntryFees(gameId) {
     const deductionPromises = [];
     const successfulDeductions = [];
     
-    // Deduct entry fees from all players
+    // Deduct entry fees from all players WHO HAVEN'T PAID YET
     for (const card of bingoCards) {
       const user = await User.findById(card.userId);
       if (user && user.telegramId) {
+        // Check if payment was already made for this game
+        const existingPayment = await Transaction.findOne({
+          userId: card.userId,
+          gameId: gameId,
+          type: 'GAME_ENTRY',
+          status: 'COMPLETED'
+        });
+        
+        if (existingPayment) {
+          console.log(`✅ User ${user.telegramId} already paid for game ${game.code}`);
+          successfulDeductions.push({
+            userId: card.userId,
+            transactionId: existingPayment._id,
+            amount: entryFee,
+            alreadyPaid: true
+          });
+          continue;
+        }
+        
         try {
           const result = await WalletService.deductGameEntry(
             user.telegramId,
@@ -936,7 +955,8 @@ static async processEntryFees(gameId) {
           successfulDeductions.push({
             userId: card.userId,
             transactionId: result.transaction._id,
-            amount: entryFee
+            amount: entryFee,
+            alreadyPaid: false
           });
           
           console.log(`✅ Deducted $${entryFee} from ${user.telegramId}`);
@@ -956,10 +976,10 @@ static async processEntryFees(gameId) {
           reconciliation = new Reconciliation({
             gameId: game._id,
             status: 'DEDUCTED',
-            totalPot: bingoCards.length * entryFee,
+            totalPot: successfulDeductions.length * entryFee,
             platformFee: 0,
             winnerAmount: 0,
-            debitTotal: bingoCards.length * entryFee,
+            debitTotal: successfulDeductions.length * entryFee,
             creditTotal: 0
           });
           await reconciliation.save();
@@ -972,14 +992,14 @@ static async processEntryFees(gameId) {
     return {
       reconciliation,
       successfulDeductions,
-      totalPlayers: bingoCards.length
+      totalPlayers: bingoCards.length,
+      paidPlayers: successfulDeductions.length
     };
   } catch (error) {
     console.error('❌ Error processing entry fees:', error);
     throw error;
   }
 }
-
   // NEW: Enhanced endGameDueToNoWinner with reconciliation
 static async endGameDueToNoWinner(gameId) {
   try {
