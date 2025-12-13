@@ -590,7 +590,7 @@ static async setNextGameCountdown(gameId) {
     const now = new Date();
     
     // Set game to COOLDOWN state with 30 second timer
-    game.status = 'COOLDOWN';
+    game.status = 'NO_WINNER';
     game.cooldownEndTime = new Date(now.getTime() + this.NEXT_GAME_COUNTDOWN);
     await game.save({ session });
     
@@ -1263,7 +1263,10 @@ static async setNextGameCountdown(gameId) {
         break;
         
       case 'NO_WINNER':
-        gameObj.message = 'Game ended with no winner - All players refunded';
+         gameObj.message = 'Next game starting soon...';
+        if (gameObj.cooldownEndTime && gameObj.cooldownEndTime > now) {
+          gameObj.cooldownTimeRemaining = gameObj.cooldownEndTime - now;
+        }
         break;
         
       case 'COOLDOWN':
