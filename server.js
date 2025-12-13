@@ -25,18 +25,18 @@ mongoose.connect(process.env.MONGODB_URI)
   .catch(err => console.error('MongoDB connection error:', err));
 
 // ✅ ADD THIS: Initialize and launch the bot with admin ID
-let botController;
-try {
-  if (process.env.BOT_TOKEN) {
-    botController = new BotController(process.env.BOT_TOKEN, process.env.ADMIN_TELEGRAM_ID);
-    botController.launch();
-    console.log('🤖 Telegram Bot initialized successfully');
-  } else {
-    console.warn('⚠️ BOT_TOKEN not found - Telegram bot disabled');
-  }
-} catch (error) {
-  console.error('❌ Failed to initialize Telegram bot:', error);
-}
+// let botController;
+// try {
+//   if (process.env.BOT_TOKEN) {
+//     botController = new BotController(process.env.BOT_TOKEN, process.env.ADMIN_TELEGRAM_ID);
+//     botController.launch();
+//     console.log('🤖 Telegram Bot initialized successfully');
+//   } else {
+//     console.warn('⚠️ BOT_TOKEN not found - Telegram bot disabled');
+//   }
+// } catch (error) {
+//   console.error('❌ Failed to initialize Telegram bot:', error);
+// }
 
 // CORS configuration - UPDATED with your live frontend URL
 app.use(cors({
