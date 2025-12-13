@@ -56,7 +56,7 @@ class GameService {
     if (!game) {
       // Check for COOLDOWN games that have expired
       const cooldownGames = await Game.find({
-        status: 'COOLDOWN',
+        status: 'NO_WINNER',
         cooldownEndTime: { $lte: new Date() },
         archived: { $ne: true }
       }).sort({ createdAt: -1 });
@@ -71,7 +71,7 @@ class GameService {
       }
     } 
     // If game is in COOLDOWN state and time has expired, create new game
-    else if (game.status === 'COOLDOWN' && game.cooldownEndTime <= new Date()) {
+    else if (game.status === 'NO_WINNER' && game.cooldownEndTime <= new Date()) {
       console.log(`🔄 Cooldown expired for game ${game.code}, creating new game...`);
       game = await this.createNewGameAfterCooldown(game._id);
     }
