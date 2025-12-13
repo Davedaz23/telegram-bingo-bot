@@ -603,7 +603,7 @@ static async checkCardSelectionEnd(gameId) {
     }
 
     // Only proceed if game is in FINISHED state (not already reset)
-    if (game.status !== 'FINISHED') {
+    if (game.status !== 'FINISHED'||game.status!=='NO_WINNER') {
       console.log(`⚠️ Game ${game.code} is not in FINISHED state (${game.status}), skipping countdown`);
       await session.abortTransaction();
       return;
@@ -1500,7 +1500,6 @@ static async endGameDueToNoWinner(gameId) {
   }
 
     // CARD SELECTION METHODS
-  // CARD SELECTION METHODS - UPDATED VERSION
   static async selectCard(gameId, userId, cardNumbers, cardNumber) {
     const session = await mongoose.startSession();
     session.startTransaction();
