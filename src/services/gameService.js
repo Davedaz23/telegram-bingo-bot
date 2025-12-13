@@ -912,19 +912,58 @@ static async haveRefundsBeenProcessed(gameId) {
 }
   
   // NEW: Process entry fees with reconciliation
+// FIXED: Process entry fees with proper duplicate prevention
 static async processEntryFees(gameId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
-    const game = await Game.findById(gameId);
-    const bingoCards = await BingoCard.find({ gameId });
+    const game = await Game.findById(gameId).session(session);
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    // CRITICAL: Check if entry fees were already processed for this game
+    const existingReconciliation = await Reconciliation.findOne({ 
+      gameId, 
+      status: { $in: ['DEDUCTED', 'PENDING', 'WINNER_DECLARED'] } 
+    }).session(session);
+
+    if (existingReconciliation) {
+      console.log(`⚠️ Entry fees already processed for game ${game.code}. Skipping.`);
+      await session.abortTransaction();
+      return {
+        reconciliation: existingReconciliation,
+        successfulDeductions: [],
+        totalPlayers: 0,
+        paidPlayers: 0,
+        alreadyProcessed: true
+      };
+    }
+
+    const bingoCards = await BingoCard.find({ gameId }).session(session);
     const WalletService = require('./walletService');
     
     const entryFee = 10;
-    const deductionPromises = [];
     const successfulDeductions = [];
     
-    // Deduct entry fees from all players WHO HAVEN'T PAID YET
+    // Create reconciliation BEFORE processing any transactions
+    const reconciliation = new Reconciliation({
+      gameId: game._id,
+      status: 'DEDUCTED',
+      totalPot: bingoCards.length * entryFee,
+      platformFee: 0,
+      winnerAmount: 0,
+      winnerId: null,
+      debitTotal: bingoCards.length * entryFee,
+      creditTotal: 0,
+      transactions: []
+    });
+
+    // Deduct entry fees from all players
     for (const card of bingoCards) {
-      const user = await User.findById(card.userId);
+      const user = await User.findById(card.userId).session(session);
+      
       if (user && user.telegramId) {
         // Check if payment was already made for this game
         const existingPayment = await Transaction.findOne({
@@ -932,10 +971,21 @@ static async processEntryFees(gameId) {
           gameId: gameId,
           type: 'GAME_ENTRY',
           status: 'COMPLETED'
-        });
+        }).session(session);
         
         if (existingPayment) {
           console.log(`✅ User ${user.telegramId} already paid for game ${game.code}`);
+          
+          // Add to reconciliation as already paid
+          reconciliation.transactions.push({
+            userId: card.userId,
+            type: 'ENTRY_FEE',
+            amount: -entryFee,
+            status: 'COMPLETED',
+            transactionId: existingPayment._id,
+            alreadyPaid: true
+          });
+          
           successfulDeductions.push({
             userId: card.userId,
             transactionId: existingPayment._id,
@@ -953,6 +1003,15 @@ static async processEntryFees(gameId) {
             `Entry fee for game ${game.code}`
           );
           
+          reconciliation.transactions.push({
+            userId: card.userId,
+            type: 'ENTRY_FEE',
+            amount: -entryFee,
+            status: 'COMPLETED',
+            transactionId: result.transaction._id,
+            alreadyPaid: false
+          });
+          
           successfulDeductions.push({
             userId: card.userId,
             transactionId: result.transaction._id,
@@ -963,32 +1022,36 @@ static async processEntryFees(gameId) {
           console.log(`✅ Deducted $${entryFee} from ${user.telegramId}`);
         } catch (error) {
           console.error(`❌ Failed to deduct from user ${user.telegramId}:`, error.message);
-        }
-      }
-    }
-    
-    // Don't create reconciliation if model doesn't exist
-    let reconciliation = null;
-    try {
-      if (Reconciliation) {
-        reconciliation = await Reconciliation.findOne({ gameId });
-        if (!reconciliation) {
-          // Create simple reconciliation without transactions
-          reconciliation = new Reconciliation({
-            gameId: game._id,
-            status: 'DEDUCTED',
-            totalPot: successfulDeductions.length * entryFee,
-            platformFee: 0,
-            winnerAmount: 0,
-            debitTotal: successfulDeductions.length * entryFee,
-            creditTotal: 0
+          
+          // Add failed transaction to reconciliation
+          reconciliation.transactions.push({
+            userId: card.userId,
+            type: 'ENTRY_FEE',
+            amount: -entryFee,
+            status: 'FAILED',
+            error: error.message
           });
-          await reconciliation.save();
         }
       }
-    } catch (error) {
-      console.warn('⚠️ Reconciliation not available:', error.message);
     }
+
+    // Only save reconciliation if we have at least 2 successful deductions
+    if (successfulDeductions.length >= this.MIN_PLAYERS_TO_START) {
+      await reconciliation.save({ session });
+      console.log(`💰 Created reconciliation for game ${game.code} with ${successfulDeductions.length} paid players`);
+    } else {
+      console.log(`❌ Not enough successful deductions: ${successfulDeductions.length}/${this.MIN_PLAYERS_TO_START}`);
+      await session.abortTransaction();
+      return {
+        reconciliation: null,
+        successfulDeductions,
+        totalPlayers: bingoCards.length,
+        paidPlayers: successfulDeductions.length,
+        failed: true
+      };
+    }
+
+    await session.commitTransaction();
     
     return {
       reconciliation,
@@ -996,9 +1059,13 @@ static async processEntryFees(gameId) {
       totalPlayers: bingoCards.length,
       paidPlayers: successfulDeductions.length
     };
+    
   } catch (error) {
+    await session.abortTransaction();
     console.error('❌ Error processing entry fees:', error);
     throw error;
+  } finally {
+    session.endSession();
   }
 }
   // NEW: Enhanced endGameDueToNoWinner with reconciliation
@@ -2279,7 +2346,7 @@ static async endGameDueToNoWinner(gameId) {
     };
   }
 
-    static async endGame(gameId) {
+   static async endGame(gameId) {
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -2290,6 +2357,14 @@ static async endGameDueToNoWinner(gameId) {
     
     if (!game || game.status !== 'ACTIVE') {
       throw new Error('Game not active');
+    }
+
+    // Check if refunds were already processed
+    const reconciliation = await Reconciliation.findOne({ gameId }).session(session);
+    if (reconciliation && reconciliation.status === 'NO_WINNER_REFUNDED') {
+      console.log(`⚠️ Game ${game.code} already has refunds processed. Skipping.`);
+      await session.abortTransaction();
+      return this.getGameWithDetails(gameId);
     }
 
     // Get all players with cards
@@ -2303,10 +2378,11 @@ static async endGameDueToNoWinner(gameId) {
     game.cooldownEndTime = cooldownEndTime;
     await game.save({ session });
 
-    // REFUND ALL PLAYERS
+    // REFUND ALL PLAYERS (only once)
     console.log(`💰 Refunding ${bingoCards.length} players due to game cancellation...`);
     
     const entryFee = 10;
+    
     for (const card of bingoCards) {
       try {
         const user = await User.findById(card.userId).session(session);
@@ -2324,6 +2400,25 @@ static async endGameDueToNoWinner(gameId) {
       } catch (error) {
         console.error(`❌ Failed to refund user:`, error.message);
       }
+    }
+
+    // Update or create reconciliation
+    if (!reconciliation) {
+      const newReconciliation = new Reconciliation({
+        gameId: game._id,
+        status: 'NO_WINNER_REFUNDED',
+        totalPot: bingoCards.length * entryFee,
+        platformFee: 0,
+        winnerAmount: 0,
+        debitTotal: bingoCards.length * entryFee,
+        creditTotal: bingoCards.length * entryFee,
+        completedAt: now
+      });
+      await newReconciliation.save({ session });
+    } else {
+      reconciliation.status = 'NO_WINNER_REFUNDED';
+      reconciliation.completedAt = now;
+      await reconciliation.save({ session });
     }
 
     await session.commitTransaction();
@@ -2405,37 +2500,113 @@ static async endGameDueToNoWinner(gameId) {
 
 
   // NEW: Method to refund all players
- static async refundAllPlayers(gameId, session) {
-    try {
-      const WalletService = require('./walletService');
-      const entryFee = 10;
-      
-      const bingoCards = await BingoCard.find({ gameId }).session(session);
-      
-      console.log(`💰 Refunding ${bingoCards.length} players...`);
-      
-      for (const card of bingoCards) {
-        try {
-          const user = await User.findById(card.userId).session(session);
-          
-          if (user && user.telegramId) {
-            await WalletService.addWinning(
-              user.telegramId,
-              gameId,
-              entryFee,
-              `Refund - Game cancelled`
-            );
-            console.log(`✅ Refunded $${entryFee} to ${user.telegramId}`);
-          }
-        } catch (error) {
-          console.error(`❌ Failed to refund user ${card.userId}:`, error.message);
-        }
-      }
-    } catch (error) {
-      console.error('❌ Error in refundAllPlayers:', error);
-      throw error;
+// FIXED: Refund all players with duplicate prevention
+static async refundAllPlayers(gameId, session) {
+  try {
+    const game = await Game.findById(gameId).session(session);
+    if (!game) {
+      throw new Error('Game not found');
     }
+
+    // Check if refunds have already been processed
+    const reconciliation = await Reconciliation.findOne({ gameId }).session(session);
+    if (reconciliation && reconciliation.status === 'NO_WINNER_REFUNDED') {
+      console.log(`⚠️ Refunds already processed for game ${game.code}. Skipping.`);
+      return;
+    }
+
+    const WalletService = require('./walletService');
+    const entryFee = 10;
+    
+    const bingoCards = await BingoCard.find({ gameId }).session(session);
+    
+    console.log(`💰 Refunding ${bingoCards.length} players...`);
+    
+    // Update reconciliation status if it exists
+    if (reconciliation) {
+      reconciliation.status = 'NO_WINNER_REFUNDED';
+    } else {
+      // Create new reconciliation for refunds
+      reconciliation = new Reconciliation({
+        gameId: game._id,
+        status: 'NO_WINNER_REFUNDED',
+        totalPot: bingoCards.length * entryFee,
+        platformFee: 0,
+        winnerAmount: 0,
+        debitTotal: bingoCards.length * entryFee,
+        creditTotal: bingoCards.length * entryFee,
+        transactions: []
+      });
+    }
+
+    const refundedPlayers = new Set();
+    
+    for (const card of bingoCards) {
+      try {
+        const user = await User.findById(card.userId).session(session);
+        
+        if (user && user.telegramId) {
+          // Check if this player has already been refunded in this session
+          if (refundedPlayers.has(user._id.toString())) {
+            console.log(`⚠️ User ${user.telegramId} already refunded in this session. Skipping.`);
+            continue;
+          }
+
+          // Check if this player has already been refunded (in database)
+          if (reconciliation.transactions.some(tx => 
+            tx.userId.toString() === user._id.toString() && 
+            tx.type === 'REFUND' && 
+            tx.status === 'COMPLETED'
+          )) {
+            console.log(`⚠️ User ${user.telegramId} already refunded (in DB). Skipping.`);
+            refundedPlayers.add(user._id.toString());
+            continue;
+          }
+
+          // Perform refund
+          const refundResult = await WalletService.addWinning(
+            user.telegramId,
+            gameId,
+            entryFee,
+            `Refund - Game ${game.code} cancelled`
+          );
+          
+          // Add to reconciliation
+          reconciliation.transactions.push({
+            userId: user._id,
+            type: 'REFUND',
+            amount: entryFee,
+            status: 'COMPLETED',
+            transactionId: refundResult.transaction._id,
+            timestamp: new Date()
+          });
+          
+          refundedPlayers.add(user._id.toString());
+          console.log(`✅ Refunded $${entryFee} to ${user.telegramId}`);
+        }
+      } catch (error) {
+        console.error(`❌ Failed to refund user ${card.userId}:`, error.message);
+        
+        // Add failed refund to reconciliation
+        reconciliation.transactions.push({
+          userId: card.userId,
+          type: 'REFUND',
+          amount: entryFee,
+          status: 'FAILED',
+          error: error.message,
+          timestamp: new Date()
+        });
+      }
+    }
+
+    await reconciliation.save({ session });
+    console.log(`✅ All refunds recorded in reconciliation for game ${game.code}`);
+    
+  } catch (error) {
+    console.error('❌ Error in refundAllPlayers:', error);
+    throw error;
   }
+}
 
     static async getGameStats(gameId) {
       const game = await this.getGameWithDetails(gameId);
