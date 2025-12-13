@@ -1513,7 +1513,7 @@ static async endGameDueToNoWinner(gameId) {
 
       // Only allow card selection in waiting or card selection phase
       if (game.status !== 'WAITING_FOR_PLAYERS' && game.status !== 'CARD_SELECTION') {
-        throw new Error('Cannot select card - game is not accepting players');
+        throw new Error('Cannot select card - game is not accepting players'+game.id);
       }
 
       const existingCardWithNumber = await BingoCard.findOne({ 
