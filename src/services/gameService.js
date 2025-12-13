@@ -602,12 +602,12 @@ static async checkCardSelectionEnd(gameId) {
       throw new Error('Game not found');
     }
 
-    // Only proceed if game is in FINISHED state (not already reset)
-    if (game.status !== 'FINISHED'||game.status!=='NO_WINNER') {
-      console.log(`⚠️ Game ${game.code} is not in FINISHED state (${game.status}), skipping countdown`);
-      await session.abortTransaction();
-      return;
-    }
+  //Only proceed if game IS in FINISHED or NO_WINNER state
+if (game.status !== 'FINISHED' && game.status !== 'NO_WINNER') {
+    console.log(`⚠️ Game ${game.code} is not in FINISHED/NO_WINNER state (${game.status}), skipping countdown`);
+    await session.abortTransaction();
+    return;
+}
 
     const now = new Date();
     
