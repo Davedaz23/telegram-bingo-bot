@@ -1188,16 +1188,47 @@ static async setNextGameCountdown(gameId) {
   }
   
   // ==================== GAME QUERIES ====================
-  
-  static async getActiveGames() {
-    try {
-      const mainGame = await this.getMainGame();
-      return [mainGame].filter(game => game !== null);
-    } catch (error) {
-      console.error('❌ Error in getActiveGames:', error);
-      return [];
+  //
+ static async getActiveGames() {
+  try {
+    // Only fetch ACTIVE games (excluding archived)
+    const activeGames = await Game.find({
+      status: 'ACTIVE',
+      archived: { $ne: true }
+    })
+    .sort({ createdAt: -1 }) // Get most recent first
+    .populate('winnerId', 'username firstName')
+    .populate({
+      path: 'players',
+      populate: {
+        path: 'userId',
+        select: 'username firstName telegramId'
+      }
+    });
+
+    // Check if any active game has all 75 numbers but still ACTIVE
+    for (const game of activeGames) {
+      if (game.numbersCalled && game.numbersCalled.length >= 75) {
+        console.log(`⚠️ Game ${game.code} has all 75 numbers but still ACTIVE. Forcing end...`);
+        await this.endGameDueToNoWinner(game._id);
+      }
     }
+
+    // Filter out games that might have been ended by the check above
+    const validActiveGames = [];
+    for (const game of activeGames) {
+      const refreshedGame = await Game.findById(game._id);
+      if (refreshedGame && refreshedGame.status === 'ACTIVE') {
+        validActiveGames.push(this.formatGameForFrontend(refreshedGame));
+      }
+    }
+
+    return validActiveGames;
+  } catch (error) {
+    console.error('❌ Error in getActiveGames:', error);
+    return [];
   }
+}
 
   static async getWaitingGames() {
     try {
