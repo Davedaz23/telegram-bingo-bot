@@ -482,7 +482,7 @@ router.get('/active', async (req, res) => {
   try {
     console.log('🔍 GET /api/games/active called');
     const games = await GameService.getActiveGames();
-    console.log(`✅ Found ${games.length} active games alive`+games[0].id);
+    console.log(`✅ Found ${games.length} active games alive`+games[0]?.id);
     
     res.json({
       success: true,
