@@ -26,11 +26,11 @@ class GameService {
   
   // ==================== CORE GAME MANAGEMENT ====================
   
- static async getMainGame() {
+static async getMainGame() {
   try {
     // Get the current active game (excluding archived)
-       let game = await Game.findOne({
-      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE', 'COOLDOWN'] },
+    let game = await Game.findOne({
+      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
       archived: { $ne: true }
     })
     .sort({ createdAt: -1 }) // Get most recent
@@ -42,49 +42,56 @@ class GameService {
         select: 'username firstName telegramId'
       }
     });
-      if (game && game.status === 'ACTIVE' && game.numbersCalled && game.numbersCalled.length >= 75) {
-      console.log(`⚠️ Game ${game.code} has all 75 numbers but still ACTIVE. Forcing end...`);
-      await this.endGameDueToNoWinner(game._id);
-      
-      // Re-fetch the game
-      game = await Game.findById(game._id).populate('winnerId').populate({
-        path: 'players',
-        populate: { path: 'userId' }
-      });
-    }
-    // If no active game, check for COOLDOWN games that need new game creation
-    if (!game) {
-      // Check for COOLDOWN games that have expired
-      const cooldownGames = await Game.find({
-        status: 'NO_WINNER',
-        cooldownEndTime: { $lte: new Date() },
-        archived: { $ne: true }
-      }).sort({ createdAt: -1 });
-      
-      if (cooldownGames.length > 0) {
-        // Create new game from the most recent cooldown game
-        game = await this.createNewGameAfterCooldown(cooldownGames[0]._id);
-      } else {
-        // Create a brand new game
-        console.log('🎮 No active games found. Creating new game...');
-        game = await this.createNewGame();
+    
+    // If we found a game in active, waiting, or card selection state
+    if (game) {
+      // Check if active game has all 75 numbers but still ACTIVE
+      if (game.status === 'ACTIVE' && game.numbersCalled && game.numbersCalled.length >= 75) {
+        console.log(`⚠️ Game ${game.code} has all 75 numbers but still ACTIVE. Forcing end...`);
+        await this.endGameDueToNoWinner(game._id);
+        
+        // Re-fetch the game
+        game = await Game.findById(game._id).populate('winnerId').populate({
+          path: 'players',
+          populate: { path: 'userId' }
+        });
       }
-    } 
-    // If game is in COOLDOWN state and time has expired, create new game
-    else if (game.status === 'NO_WINNER' && game.cooldownEndTime <= new Date()) {
-      console.log(`🔄 Cooldown expired for game ${game.code}, creating new game...`);
-      game = await this.createNewGameAfterCooldown(game._id);
-    }
-    // If game is ACTIVE but no auto-calling, restart it
-    else if (game.status === 'ACTIVE' && !this.activeIntervals.has(game._id.toString())) {
-      console.log(`🔄 Restarting auto-calling for active game ${game.code}`);
-      this.startAutoNumberCalling(game._id);
+      
+      // If game is ACTIVE but no auto-calling, restart it
+      if (game.status === 'ACTIVE' && !this.activeIntervals.has(game._id.toString())) {
+        console.log(`🔄 Restarting auto-calling for active game ${game.code}`);
+        this.startAutoNumberCalling(game._id);
+      }
+      
+      // Manage game lifecycle
+      await this.manageGameLifecycle();
+      
+      return this.formatGameForFrontend(game);
     }
     
-    // Manage game lifecycle
+    // ==================== NO ACTIVE/WAITING/CARD_SELECTION GAME FOUND ====================
+    // Check for COOLDOWN games that need new game creation
+    const cooldownGames = await Game.find({
+      status: 'NO_WINNER',
+      cooldownEndTime: { $lte: new Date() },
+      archived: { $ne: true }
+    }).sort({ createdAt: -1 });
+    
+    if (cooldownGames.length > 0) {
+      // Create new game from the most recent cooldown game
+      console.log(`🔄 Creating new game from expired cooldown game`);
+      game = await this.createNewGameAfterCooldown(cooldownGames[0]._id);
+    } else {
+      // Create a brand new game ONLY if no active/waiting/card selection game exists
+      console.log('🎮 No active, waiting, or card selection games found. Creating new game...');
+      game = await this.createNewGame();
+    }
+    
+    // Manage game lifecycle for the new game
     await this.manageGameLifecycle();
     
     return this.formatGameForFrontend(game);
+    
   } catch (error) {
     console.error('❌ Error in getMainGame:', error);
     throw error;
@@ -127,8 +134,16 @@ class GameService {
     });
     
     for (const game of finishedGames) {
-      console.log(`🏁 Setting countdown for finished game ${game.code}`);
-      await this.setNextGameCountdown(game._id);
+      // Check if there's already an active/waiting game before setting countdown
+      const activeGameExists = await Game.findOne({
+        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+        archived: { $ne: true }
+      });
+      
+      if (!activeGameExists) {
+        console.log(`🏁 Setting countdown for finished game ${game.code}`);
+        await this.setNextGameCountdown(game._id);
+      }
     }
     
   } catch (error) {
@@ -570,6 +585,18 @@ static async setNextGameCountdown(gameId) {
   // Wait a moment to ensure all previous transactions are complete
   await new Promise(resolve => setTimeout(resolve, 1000));
   
+  // Check if there's already an active/waiting/card selection game
+  const activeGameExists = await Game.findOne({
+    status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+    archived: { $ne: true },
+    _id: { $ne: gameId } // Exclude current game
+  });
+  
+  if (activeGameExists) {
+    console.log(`⚠️ Active game already exists (${activeGameExists.code}), skipping countdown for game ${gameId}`);
+    return;
+  }
+  
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -616,6 +643,7 @@ static async setNextGameCountdown(gameId) {
     session.endSession();
   }
 }
+
   static async createNewGameAfterCooldown(previousGameId) {
   const session = await mongoose.startSession();
   session.startTransaction();
