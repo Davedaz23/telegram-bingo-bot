@@ -1300,68 +1300,87 @@ static async getActiveGames() {
     return this.formatGameForFrontend(game);
   }
   
-  static async formatGameForFrontend(game) {
-    if (!game) return null;
-    
-    const gameObj = game.toObject ? game.toObject() : { ...game };
-    const now = new Date();
-    
-    // Add status-specific information
-    switch (gameObj.status) {
-      case 'WAITING_FOR_PLAYERS':
-        gameObj.message = 'Waiting for players to join...';
-        if (gameObj.autoStartEndTime && gameObj.autoStartEndTime > now) {
-          gameObj.autoStartTimeRemaining = gameObj.autoStartEndTime - now;
-          gameObj.hasAutoStartTimer = true;
-        }
-        break;
-        
-      case 'CARD_SELECTION':
-        gameObj.message = 'Select your bingo card!';
-        if (gameObj.cardSelectionEndTime && gameObj.cardSelectionEndTime > now) {
-          gameObj.cardSelectionTimeRemaining = gameObj.cardSelectionEndTime - now;
-        }
-        break;
-        
-      case 'ACTIVE':
-        gameObj.message = 'Game in progress!';
-        break;
-        
-      case 'FINISHED':
-        gameObj.message = gameObj.noWinner ? 'Game ended - No winner (All refunded)' : 'Game finished!';
-        break;
-        
-      case 'NO_WINNER':
-         gameObj.message = 'Next game starting soon...';
-        if (gameObj.cooldownEndTime && gameObj.cooldownEndTime > now) {
-          gameObj.cooldownTimeRemaining = gameObj.cooldownEndTime - now;
-        }
-        break;
-        
-      case 'COOLDOWN':
-        gameObj.message = 'Next game starting soon...';
-        if (gameObj.cooldownEndTime && gameObj.cooldownEndTime > now) {
-          gameObj.cooldownTimeRemaining = gameObj.cooldownEndTime - now;
-        }
-        break;
-    }
-    
-    // Get players with cards
-    const bingoCards = await BingoCard.find({ gameId: gameObj._id }).populate('userId');
-    const playersWithCards = bingoCards.length;
-    
-    gameObj.playersWithCards = playersWithCards;
-    gameObj.cardsNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - playersWithCards);
-    
-    // Can select card during waiting or card selection phases
-    gameObj.canSelectCard = gameObj.status === 'WAITING_FOR_PLAYERS' || 
-                          gameObj.status === 'CARD_SELECTION';
-    
-    // Can join only during waiting phase
-    gameObj.canJoin = gameObj.status === 'WAITING_FOR_PLAYERS';
-    
-    return gameObj;
+static async formatGameForFrontend(game) {
+  if (!game) return null;
+  
+  const gameObj = game.toObject ? game.toObject() : { ...game };
+  const now = new Date();
+  
+  // Ensure status consistency
+  if (gameObj.status === 'WAITING') {
+    gameObj.status = 'WAITING_FOR_PLAYERS';
   }
+  
+  // Add status-specific information
+  switch (gameObj.status) {
+    case 'WAITING_FOR_PLAYERS':
+      gameObj.message = 'Waiting for players to join...';
+      if (gameObj.autoStartEndTime && gameObj.autoStartEndTime > now) {
+        gameObj.autoStartTimeRemaining = gameObj.autoStartEndTime - now;
+        gameObj.hasAutoStartTimer = true;
+      } else {
+        // Set default auto-start timer if missing
+        gameObj.autoStartEndTime = new Date(now.getTime() + this.AUTO_START_DELAY);
+        gameObj.autoStartTimeRemaining = this.AUTO_START_DELAY;
+        gameObj.hasAutoStartTimer = true;
+      }
+      break;
+      
+    case 'CARD_SELECTION':
+      gameObj.message = 'Select your bingo card!';
+      if (gameObj.cardSelectionEndTime && gameObj.cardSelectionEndTime > now) {
+        gameObj.cardSelectionTimeRemaining = gameObj.cardSelectionEndTime - now;
+      }
+      break;
+      
+    case 'ACTIVE':
+      gameObj.message = 'Game in progress!';
+      // Ensure startedAt exists
+      if (!gameObj.startedAt) {
+        gameObj.startedAt = new Date();
+        console.log(`🕒 Set missing startedAt for game ${gameObj.code}`);
+      }
+      break;
+      
+    case 'FINISHED':
+      gameObj.message = gameObj.noWinner ? 'Game ended - No winner (All refunded)' : 'Game finished!';
+      break;
+      
+    case 'NO_WINNER':
+      gameObj.message = 'Next game starting soon...';
+      if (gameObj.cooldownEndTime && gameObj.cooldownEndTime > now) {
+        gameObj.cooldownTimeRemaining = gameObj.cooldownEndTime - now;
+      }
+      break;
+      
+    case 'COOLDOWN':
+      gameObj.message = 'Next game starting soon...';
+      if (gameObj.cooldownEndTime && gameObj.cooldownEndTime > now) {
+        gameObj.cooldownTimeRemaining = gameObj.cooldownEndTime - now;
+      }
+      break;
+  }
+  
+  // Get players with cards
+  const bingoCards = await BingoCard.find({ gameId: gameObj._id }).populate('userId');
+  const playersWithCards = bingoCards.length;
+  
+  gameObj.playersWithCards = playersWithCards;
+  gameObj.cardsNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - playersWithCards);
+  
+  // Can select card during waiting or card selection phases
+  gameObj.canSelectCard = gameObj.status === 'WAITING_FOR_PLAYERS' || 
+                        gameObj.status === 'CARD_SELECTION';
+  
+  // Can join only during waiting phase
+  gameObj.canJoin = gameObj.status === 'WAITING_FOR_PLAYERS';
+  
+  // Add timestamp info
+  gameObj.serverTime = now;
+  gameObj.isValidActiveGame = gameObj.status === 'ACTIVE' && gameObj.startedAt && gameObj.numbersCalled;
+  
+  return gameObj;
+}
   
   // ==================== OTHER METHODS ====================
   
