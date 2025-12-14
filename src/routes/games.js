@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const GameService = require('../services/gameService');
+const Game = require('../models/Game');
 
 // ==================== CARD SELECTION ROUTES ====================
 
@@ -77,7 +78,7 @@ router.post('/:gameId/check-auto-start', async (req, res) => {
   try {
     const { gameId } = req.params;
     
-    const game = await game.findById(gameId);
+    const game = await Game.findById(gameId);
     if (!game) {
       return res.status(404).json({ success: false, error: 'Game not found' });
     }
