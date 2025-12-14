@@ -1217,12 +1217,11 @@ static async setNextGameCountdown(gameId) {
   
   // ==================== GAME QUERIES ====================
   //
- static async getActiveGames() {
+static async getActiveGames() {
   try {
-    // Only fetch ACTIVE games (excluding archived)
+    // Only fetch ACTIVE games
     const activeGames = await Game.find({
-      status: 'ACTIVE',
-      archived: { $ne: true }
+      status: 'ACTIVE'
     })
     .sort({ createdAt: -1 }) // Get most recent first
     .populate('winnerId', 'username firstName')
@@ -1234,8 +1233,17 @@ static async setNextGameCountdown(gameId) {
       }
     });
 
+    console.log(`🔍 Found ${activeGames.length} ACTIVE games in database`);
+    
+    if (activeGames.length > 0) {
+      console.log(`📋 Active game IDs: ${activeGames.map(g => g._id.toString())}`);
+      console.log(`📋 Active game codes: ${activeGames.map(g => g.code)}`);
+    }
+
     // Check if any active game has all 75 numbers but still ACTIVE
     for (const game of activeGames) {
+      console.log(`📊 Game ${game.code} has ${game.numbersCalled?.length || 0} numbers called`);
+      
       if (game.numbersCalled && game.numbersCalled.length >= 75) {
         console.log(`⚠️ Game ${game.code} has all 75 numbers but still ACTIVE. Forcing end...`);
         await this.endGameDueToNoWinner(game._id);
@@ -1247,10 +1255,12 @@ static async setNextGameCountdown(gameId) {
     for (const game of activeGames) {
       const refreshedGame = await Game.findById(game._id);
       if (refreshedGame && refreshedGame.status === 'ACTIVE') {
+        console.log(`✅ Game ${refreshedGame.code} is still ACTIVE, adding to results`);
         validActiveGames.push(this.formatGameForFrontend(refreshedGame));
       }
     }
 
+    console.log(`✅ Returning ${validActiveGames.length} valid active games`);
     return validActiveGames;
   } catch (error) {
     console.error('❌ Error in getActiveGames:', error);
