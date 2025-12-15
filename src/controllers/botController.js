@@ -249,8 +249,8 @@ class BotController {
 💳 *Deposit Money to Your Wallet*
 
 *Supported Methods:*
-🏦 *Banks:* CBE, Awash, Dashen
-📱 *Mobile Money:* CBE Birr, Telebirr
+🏦 *Banks:* CBE, BOA, 
+📱 *Mobile Money:*  Telebirr
 
 *How to Deposit:*
 1. Select payment method below
@@ -894,6 +894,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 💳 *Deposit via ${methodName}*
 
 *Account Details:*
+Full Name: Alemayehu Yalew
 📞 Account: ${method.account}
 🏦 Name: Bingo Game
 
