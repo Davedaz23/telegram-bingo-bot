@@ -21,7 +21,7 @@ class Database {
       // REMOVED DNS CHECK - let mongoose handle connection directly
       
       await mongoose.connect(MONGODB_URI, {
-        serverSelectionTimeoutMS: 15000, // Increased timeout
+        serverSelectionTimeoutMS: 25000, // Increased timeout
         socketTimeoutMS: 30000,
         maxPoolSize: 5,
         retryWrites: true,
