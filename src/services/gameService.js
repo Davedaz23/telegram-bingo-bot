@@ -1400,19 +1400,61 @@ static async getActiveGames() {
 
 static async getWaitingGames() {
   try {
-    console.log('🔍 getWaitingGames called');
+    console.log('🔍 getWaitingGames called - Querying database...');
     
-    // SIMPLIFIED: Direct database query for waiting games only
+    // First, let's debug what games exist in the system
+    const allGames = await Game.find({ archived: { $ne: true } })
+      .select('code status maxPlayers currentPlayers createdAt autoStartEndTime')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    console.log('📊 ALL GAMES IN SYSTEM:');
+    allGames.forEach(game => {
+      console.log(`  - ${game.code}: ${game.status} (created: ${game.createdAt})`);
+    });
+    
+    // Now query specifically for waiting games
     const waitingGames = await Game.find({
       status: 'WAITING_FOR_PLAYERS',
       archived: { $ne: true }
     })
     .sort({ createdAt: -1 })
-    .limit(10) // Limit results to prevent overload
-    .select('code status maxPlayers currentPlayers createdAt autoStartEndTime')
-    .lean(); // Use lean() for faster queries
+    .limit(10)
+    .select('code status maxPlayers currentPlayers createdAt autoStartEndTime cardSelectionStartTime cardSelectionEndTime')
+    .lean();
     
-    console.log(`✅ Found ${waitingGames.length} waiting games`);
+    console.log(`✅ Found ${waitingGames.length} waiting games in database query`);
+    
+    // Add detailed debugging for each waiting game found
+    if (waitingGames.length > 0) {
+      console.log('📋 WAITING GAMES DETAILS:');
+      waitingGames.forEach((game, index) => {
+        console.log(`  Game ${index + 1}:`);
+        console.log(`    Code: ${game.code}`);
+        console.log(`    Status: ${game.status}`);
+        console.log(`    Current Players: ${game.currentPlayers}`);
+        console.log(`    Auto-start Time: ${game.autoStartEndTime}`);
+        console.log(`    Card Selection: ${game.cardSelectionStartTime ? 'Started' : 'Not started'}`);
+        if (game.cardSelectionEndTime) {
+          console.log(`    Card Selection Ends: ${game.cardSelectionEndTime}`);
+        }
+      });
+    } else {
+      console.log('❌ No waiting games found in database.');
+      
+      // Check if games exist but with different status
+      const gamesWithDifferentStatus = await Game.find({
+        archived: { $ne: true },
+        status: { $nin: ['FINISHED', 'NO_WINNER', 'CANCELLED'] }
+      }).lean();
+      
+      if (gamesWithDifferentStatus.length > 0) {
+        console.log('⚠️ Games with non-finished status:');
+        gamesWithDifferentStatus.forEach(game => {
+          console.log(`  - ${game.code}: ${game.status}`);
+        });
+      }
+    }
     
     // Add auto-start timer info
     const now = new Date();
@@ -1426,15 +1468,18 @@ static async getWaitingGames() {
       if (game.autoStartEndTime && game.autoStartEndTime > now) {
         gameObj.autoStartTimeRemaining = game.autoStartEndTime - now;
         gameObj.hasAutoStartTimer = true;
+        gameObj.autoStartTimeFormatted = `${Math.floor((gameObj.autoStartTimeRemaining / 1000) / 60)}:${Math.floor((gameObj.autoStartTimeRemaining / 1000) % 60).toString().padStart(2, '0')}`;
       }
       
       return gameObj;
     });
     
+    console.log(`🎯 Returning ${formattedGames.length} formatted waiting games`);
     return formattedGames;
     
   } catch (error) {
     console.error('❌ Error in getWaitingGames:', error);
+    console.error('Stack trace:', error.stack);
     return [];
   }
 }
