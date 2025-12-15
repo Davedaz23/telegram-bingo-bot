@@ -83,7 +83,7 @@ router.post('/:gameId/check-auto-start', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Game not found' });
     }
 
-    if (game.status !== 'WAITING') {
+    if (game.status !== 'WAITING_FOR_PLAYERS') {
       return res.json({ 
         success: true, 
         gameStarted: false, 

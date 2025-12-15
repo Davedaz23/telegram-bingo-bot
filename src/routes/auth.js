@@ -92,15 +92,34 @@ function getModeratorTelegramIds() {
   const moderatorIds = process.env.MODERATOR_TELEGRAM_IDS;
   return moderatorIds ? moderatorIds.split(',') : [];
 }
+// Get admin Telegram IDs from environment (supports multiple admins)
+function getAdminTelegramIds() {
+  // First check for multiple admins
+  const adminIdsEnv = process.env.ADMIN_TELEGRAM_IDS;
+  if (adminIdsEnv) {
+    return adminIdsEnv.split(',').map(id => id.trim());
+  }
+  
+  // Fallback to single admin for backward compatibility
+  const singleAdminId = process.env.ADMIN_TELEGRAM_ID;
+  return singleAdminId ? [singleAdminId] : [];
+}
 
+// Get moderator Telegram IDs from environment
+function getModeratorTelegramIds() {
+  const moderatorIds = process.env.MODERATOR_TELEGRAM_IDS;
+  return moderatorIds ? moderatorIds.split(',').map(id => id.trim()) : [];
+}
 // Check and assign user role based on Telegram ID
+
 function assignUserRole(telegramId, userData = {}) {
-  const adminTelegramId = getAdminTelegramId();
+  // Get admin Telegram IDs from environment
+  const adminTelegramIds = getAdminTelegramIds();
   const moderatorTelegramIds = getModeratorTelegramIds();
   
   console.log('👑 Role assignment check:', {
     telegramId,
-    adminTelegramId,
+    adminTelegramIds,
     moderatorTelegramIds,
     existingRole: userData.role
   });
@@ -110,8 +129,8 @@ function assignUserRole(telegramId, userData = {}) {
     return userData.role;
   }
 
-  // Assign role based on Telegram ID
-  if (telegramId === adminTelegramId) {
+  // Check if Telegram ID is in admin list
+  if (adminTelegramIds.includes(telegramId)) {
     console.log('✅ Assigning admin role to:', telegramId);
     return 'admin';
   } else if (moderatorTelegramIds.includes(telegramId)) {

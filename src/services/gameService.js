@@ -2474,7 +2474,7 @@ static async formatGameForFrontend(game) {
   static async checkAndAutoStartGame(gameId) {
     try {
       const game = await Game.findById(gameId);
-      if (!game || game.status !== 'WAITING') {
+      if (!game || game.status !== 'WAITING_FOR_PLAYERS') {
         return { started: false, reason: 'Game not in waiting state' };
       }
 
