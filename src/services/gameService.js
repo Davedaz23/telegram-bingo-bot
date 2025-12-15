@@ -793,7 +793,7 @@ static async getUniquePlayersCount(gameId) {
   
   // ==================== ENTRY FEES & RECONCILIATION ====================
   
- static async processEntryFees(gameId) {
+static async processEntryFees(gameId) {
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -806,7 +806,7 @@ static async getUniquePlayersCount(gameId) {
     // Check if entry fees were already processed
     const existingReconciliation = await Reconciliation.findOne({ 
       gameId, 
-      status: { $in: ['DEDUCTED', 'WINNER_DECLARED'] } 
+      status: { $in: ['DEDUCTED', 'WINNER_DECLARED', 'NO_WINNER_REFUNDED'] } 
     }).session(session);
 
     if (existingReconciliation) {
@@ -875,7 +875,7 @@ static async getUniquePlayersCount(gameId) {
             user.telegramId,
             gameId,
             entryFee,
-            `Entry fee for game ${game.code} (Card #${card.cardNumber})`
+            `Entry fee for game ${game.code} (User ID: ${user.telegramId})`
           );
           
           reconciliation.transactions.push({
@@ -890,7 +890,7 @@ static async getUniquePlayersCount(gameId) {
           usersDeducted.add(user.telegramId);
           totalUniquePlayers++;
           
-          console.log(`✅ Deducted $${entryFee} from ${user.telegramId} for card #${card.cardNumber}`);
+          console.log(`✅ Deducted $${entryFee} from ${user.telegramId} for game ${game.code}`);
         } catch (error) {
           console.error(`❌ Failed to deduct from user ${user.telegramId}:`, error.message);
           reconciliation.transactions.push({
