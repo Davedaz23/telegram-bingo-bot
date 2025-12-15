@@ -1396,15 +1396,48 @@ static async getActiveGames() {
   }
 }
 
-  static async getWaitingGames() {
-    try {
-      const mainGame = await this.getMainGame();
-      return [mainGame].filter(game => game !== null && game.status === 'WAITING_FOR_PLAYERS');
-    } catch (error) {
-      console.error('❌ Error in getWaitingGames:', error);
-      return [];
-    }
+// In GameService.js - Replace the getWaitingGames method
+
+static async getWaitingGames() {
+  try {
+    console.log('🔍 getWaitingGames called');
+    
+    // SIMPLIFIED: Direct database query for waiting games only
+    const waitingGames = await Game.find({
+      status: 'WAITING_FOR_PLAYERS',
+      archived: { $ne: true }
+    })
+    .sort({ createdAt: -1 })
+    .limit(10) // Limit results to prevent overload
+    .select('code status maxPlayers currentPlayers createdAt autoStartEndTime')
+    .lean(); // Use lean() for faster queries
+    
+    console.log(`✅ Found ${waitingGames.length} waiting games`);
+    
+    // Add auto-start timer info
+    const now = new Date();
+    const formattedGames = waitingGames.map(game => {
+      const gameObj = {
+        ...game,
+        _id: game._id.toString(),
+        message: 'Waiting for players to join...'
+      };
+      
+      if (game.autoStartEndTime && game.autoStartEndTime > now) {
+        gameObj.autoStartTimeRemaining = game.autoStartEndTime - now;
+        gameObj.hasAutoStartTimer = true;
+      }
+      
+      return gameObj;
+    });
+    
+    return formattedGames;
+    
+  } catch (error) {
+    console.error('❌ Error in getWaitingGames:', error);
+    return [];
   }
+}
   
   static async getGameWithDetails(gameId) {
     if (!mongoose.Types.ObjectId.isValid(gameId)) {
