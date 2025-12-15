@@ -1,4 +1,4 @@
-// src/app.js
+// src/app.js - UPDATED VERSION
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -11,7 +11,6 @@ const walletRoutes = require('./src/routes/wallet');
 const testRoutes = require('./src/routes/test');
 const cron = require('node-cron');
 const ReconciliationService = require('./src/services/reconciliationService');
-const BotController = require('./src/controllers/botController');
 // Import WalletService to initialize payment methods
 const WalletService = require('./src/services/walletService');
 // Import GameService - make sure the path is correct
@@ -24,42 +23,36 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected successfully'))
   .catch(err => console.error('MongoDB connection error:', err));
 
-// ✅ ADD THIS: Initialize and launch the bot with admin ID
-// ✅ ADD THIS: Initialize and launch the bot with admin ID
+// ✅ FIXED: Simplified bot initialization
 let botController = null;
 
-const initializeBot = async () => {
+const initializeBot = () => {
   try {
     if (!process.env.BOT_TOKEN) {
       console.warn('⚠️ BOT_TOKEN not found - Telegram bot disabled');
       return null;
     }
 
-    // Check if bot is already running
-    if (botController && botController.isRunning) {
-      console.log('🤖 Bot is already running');
-      return botController;
+    if (!process.env.ADMIN_TELEGRAM_ID) {
+      console.warn('⚠️ ADMIN_TELEGRAM_ID not found - Admin features disabled');
     }
 
-    // Initialize new bot instance
+    console.log('🤖 Initializing Telegram bot...');
+    
     const BotController = require('./src/controllers/botController');
-    botController = BotController.getInstance(
+    botController = new BotController(
       process.env.BOT_TOKEN,
-      process.env.ADMIN_TELEGRAM_ID
+      process.env.ADMIN_TELEGRAM_ID || ''
     );
     
-    // Setup handlers if not already set up
-    if (!botController.areHandlersSetup) {
-      botController.setupHandlers();
-      botController.areHandlersSetup = true;
-    }
-    
+    // Launch the bot immediately
     botController.launch();
-    console.log('🤖 Telegram Bot initialized successfully');
+    console.log('✅ Telegram Bot launched successfully');
     
     return botController;
   } catch (error) {
     console.error('❌ Failed to initialize Telegram bot:', error);
+    console.error('Error details:', error.stack);
     return null;
   }
 };
@@ -110,15 +103,17 @@ app.get('/test-quick', async (req, res) => {
   }
 });
 
-// ✅ MODIFIED: Initialize auto-game service AND wallet payment methods
+// ✅ MODIFIED: Initialize services with proper error handling
 const initializeServices = async () => {
   try {
-    // Initialize payment methods
+    console.log('🔄 Initializing all services...');
+
+    // 1. Initialize payment methods
     console.log('💰 Initializing payment methods...');
     await WalletService.initializePaymentMethods();
     console.log('✅ Payment methods initialized successfully');
 
-    // Initialize auto-game service
+    // 2. Initialize auto-game service
     console.log('🎮 Initializing auto-game service...');
     if (GameService && typeof GameService.startAutoGameService === 'function') {
       GameService.startAutoGameService();
@@ -126,6 +121,19 @@ const initializeServices = async () => {
     } else {
       console.error('❌ GameService.startAutoGameService is not available');
     }
+
+    // 3. Initialize Telegram bot
+    console.log('🤖 Initializing Telegram bot...');
+    botController = initializeBot();
+    
+    if (botController) {
+      console.log('✅ Telegram bot initialized successfully');
+    } else {
+      console.warn('⚠️ Telegram bot not initialized (check BOT_TOKEN in .env)');
+    }
+
+    console.log('🎉 All services initialized successfully!');
+    
   } catch (error) {
     console.error('❌ Failed to initialize services:', error);
     console.error('Error details:', error.message);
@@ -148,6 +156,8 @@ app.get('/health', async (req, res) => {
       status: 'PENDING'
     });
 
+    const botStatus = botController ? '✅ Running' : '❌ Not running';
+
     res.json({
       status: 'OK',
       timestamp: new Date().toISOString(),
@@ -156,6 +166,7 @@ app.get('/health', async (req, res) => {
         totalWallets,
         pendingDeposits
       },
+      telegramBot: botStatus,
       uptime: process.uptime(),
       cors: {
         allowedOrigins: [
@@ -203,7 +214,8 @@ app.get('/admin/health', async (req, res) => {
       status: 'OK',
       system: 'Bingo Admin Dashboard',
       timestamp: new Date().toISOString(),
-      stats
+      stats,
+      telegramBot: botController ? 'Running' : 'Not running'
     });
   } catch (error) {
     res.status(500).json({
@@ -215,10 +227,17 @@ app.get('/admin/health', async (req, res) => {
 
 // Root route
 app.get('/', (req, res) => {
+  const botStatus = botController ? '✅ Running' : '❌ Not running';
+  
   res.json({
     message: 'Bingo API Server with Wallet System',
     version: '2.0.0',
     timestamp: new Date().toISOString(),
+    status: {
+      telegramBot: botStatus,
+      walletSystem: '✅ Enabled',
+      gameService: '✅ Active'
+    },
     features: [
       'Telegram Authentication',
       'Real-time Bingo Games',
