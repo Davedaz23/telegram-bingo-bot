@@ -210,7 +210,7 @@ static async matchAndAutoApproveSMS(smsText, telegramId, paymentMethod) {
     
     if (sms.includes('cbe') && sms.includes('birr')) return 'CBE Birr';
     if (sms.includes('cbe') && !sms.includes('birr')) return 'CBE Bank';
-    if (sms.includes('awash')) return 'Awash Bank';
+    if (sms.includes('awash')) return 'Bank of Abysinia';
     if (sms.includes('dashen')) return 'Dashen Bank';
     if (sms.includes('telebirr')) return 'Telebirr';
     
@@ -1966,7 +1966,7 @@ static async tryAutoMatchSMS(newSMSDeposit, smsText) {
     
     if (sms.includes('cbe') && sms.includes('birr')) return 'CBE Birr';
     if (sms.includes('cbe') && !sms.includes('birr')) return 'CBE Bank';
-    if (sms.includes('awash')) return 'Awash Bank';
+    if (sms.includes('awash')) return 'Bank of Abysinia';
     if (sms.includes('dashen')) return 'Dashen Bank';
     if (sms.includes('telebirr')) return 'Telebirr';
     
@@ -3247,7 +3247,7 @@ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
         type: 'BANK', 
         accountName: 'Bingo Game',
         accountNumber: '145633257',
-        instructions: 'Send money to Awash Bank account 145633257',
+        instructions: 'Send money to Bank of Abysinia account 145633257',
         smsFormat: 'You have received|ETB|from|Awash'
       },
       // {

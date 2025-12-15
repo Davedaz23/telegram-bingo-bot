@@ -265,7 +265,7 @@ class BotController {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
             [Markup.button.callback('🏦 CBE Bank', 'deposit_cbe')],
-            [Markup.button.callback('🏦 Awash Bank', 'deposit_awash')],
+            [Markup.button.callback('🏦 Bank of Abysinia', 'deposit_awash')],
             [Markup.button.callback('🏦 Dashen Bank', 'deposit_dashen')],
             [Markup.button.callback('📱 CBE Birr', 'deposit_cbebirr')],
             [Markup.button.callback('📱 Telebirr', 'deposit_telebirr')],
@@ -841,7 +841,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
           [Markup.button.callback('🏦 CBE Bank', 'deposit_cbe')],
-          [Markup.button.callback('🏦 Awash Bank', 'deposit_awash')],
+          [Markup.button.callback('🏦 Bank of Abysinia', 'deposit_awash')],
           [Markup.button.callback('🏦 Dashen Bank', 'deposit_dashen')],
           [Markup.button.callback('📱 CBE Birr', 'deposit_cbebirr')],
           [Markup.button.callback('📱 Telebirr', 'deposit_telebirr')],
@@ -853,9 +853,9 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
     this.bot.action(/deposit_(.+)/, async (ctx) => {
       const methodMap = {
         'cbe': 'CBE Bank',
-        'awash': 'Awash Bank',
-        'dashen': 'Dashen Bank',
-        'cbebirr': 'CBE Birr',
+        'boa': 'Bank of Abysinia',
+        // 'dashen': 'Dashen Bank',
+        // 'cbebirr': 'CBE Birr',
         'telebirr': 'Telebirr'
       };
 
@@ -873,7 +873,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
           },
           'BOA': {
             account: '145633257',
-            instructions: 'Send money to Awash Bank account 145633257'
+            instructions: 'Send money to Bank of Abysinia account 145633257'
           },
           // 'Dashen Bank': {
           //   account: '3000400050006000',
