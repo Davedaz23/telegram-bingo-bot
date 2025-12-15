@@ -265,7 +265,7 @@ class BotController {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
             [Markup.button.callback('🏦 CBE Bank', 'deposit_cbe')],
-            [Markup.button.callback('🏦 Bank of Abysinia', 'deposit_awash')],
+            [Markup.button.callback('🏦 Bank of Abysinia', 'deposit_boa')],
             [Markup.button.callback('🏦 Dashen Bank', 'deposit_dashen')],
             [Markup.button.callback('📱 CBE Birr', 'deposit_cbebirr')],
             [Markup.button.callback('📱 Telebirr', 'deposit_telebirr')],
@@ -841,9 +841,9 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
           [Markup.button.callback('🏦 CBE Bank', 'deposit_cbe')],
-          [Markup.button.callback('🏦 Bank of Abysinia', 'deposit_awash')],
-          [Markup.button.callback('🏦 Dashen Bank', 'deposit_dashen')],
-          [Markup.button.callback('📱 CBE Birr', 'deposit_cbebirr')],
+          [Markup.button.callback('🏦 Bank of Abysinia', 'deposit_boa')],
+          // [Markup.button.callback('🏦 Dashen Bank', 'deposit_dashen')],
+          // [Markup.button.callback('📱 CBE Birr', 'deposit_cbebirr')],
           [Markup.button.callback('📱 Telebirr', 'deposit_telebirr')],
           [Markup.button.callback('⬅️ Back', 'back_to_start')]
         ])
