@@ -23,8 +23,9 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected successfully'))
   .catch(err => console.error('MongoDB connection error:', err));
 
-// ✅ FIXED: Simplified bot initialization
+// ✅ FIXED: Simplified bot initialization with singleton pattern
 let botController = null;
+let servicesInitialized = false; // Add flag to track initialization
 
 const initializeBot = () => {
   try {
@@ -39,15 +40,20 @@ const initializeBot = () => {
 
     console.log('🤖 Initializing Telegram bot...');
     
+    // Use singleton pattern
     const BotController = require('./src/controllers/botController');
-    botController = new BotController(
+    botController = BotController.getInstance(
       process.env.BOT_TOKEN,
       process.env.ADMIN_TELEGRAM_ID || ''
     );
     
-    // Launch the bot immediately
-    botController.launch();
-    console.log('✅ Telegram Bot launched successfully');
+    // Launch the bot only if not already running
+    if (!botController.isRunning) {
+      botController.launch();
+      console.log('✅ Telegram Bot launched successfully');
+    } else {
+      console.log('✅ Telegram Bot is already running');
+    }
     
     return botController;
   } catch (error) {
@@ -103,10 +109,17 @@ app.get('/test-quick', async (req, res) => {
   }
 });
 
-// ✅ MODIFIED: Initialize services with proper error handling
+// ✅ MODIFIED: Initialize services with proper error handling and singleton pattern
 const initializeServices = async () => {
+  // Check if services are already initialized
+  if (servicesInitialized) {
+    console.log('✅ Services already initialized, skipping...');
+    return;
+  }
+
   try {
     console.log('🔄 Initializing all services...');
+    servicesInitialized = true;
 
     // 1. Initialize payment methods
     console.log('💰 Initializing payment methods...');
@@ -137,6 +150,7 @@ const initializeServices = async () => {
   } catch (error) {
     console.error('❌ Failed to initialize services:', error);
     console.error('Error details:', error.message);
+    servicesInitialized = false; // Reset flag on error
   }
 };
 
@@ -167,6 +181,7 @@ app.get('/health', async (req, res) => {
         pendingDeposits
       },
       telegramBot: botStatus,
+      servicesInitialized,
       uptime: process.uptime(),
       cors: {
         allowedOrigins: [
@@ -215,7 +230,8 @@ app.get('/admin/health', async (req, res) => {
       system: 'Bingo Admin Dashboard',
       timestamp: new Date().toISOString(),
       stats,
-      telegramBot: botController ? 'Running' : 'Not running'
+      telegramBot: botController ? 'Running' : 'Not running',
+      servicesInitialized
     });
   } catch (error) {
     res.status(500).json({
@@ -236,7 +252,8 @@ app.get('/', (req, res) => {
     status: {
       telegramBot: botStatus,
       walletSystem: '✅ Enabled',
-      gameService: '✅ Active'
+      gameService: '✅ Active',
+      servicesInitialized
     },
     features: [
       'Telegram Authentication',
@@ -340,16 +357,16 @@ const server = app.listen(PORT, () => {
   console.log(`   - http://localhost:3001 (Development)`);
   console.log(`   - http://localhost:3000 (Development)`);
 
-  // Initialize services after server is running
-  setTimeout(() => {
-    console.log('🔄 Initializing services...');
-    initializeServices();
-  }, 2000);
+  // Initialize services after server is running - only once
+  console.log('🔄 Initializing services...');
+  initializeServices();
 });
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('🛑 Server shutting down gracefully...');
+  
+  servicesInitialized = false; // Reset flag
 
   // Clean up game service intervals
   if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
@@ -374,6 +391,8 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
   console.log('🛑 Server terminating gracefully...');
+  
+  servicesInitialized = false; // Reset flag
 
   // Clean up game service intervals
   if (GameService && typeof GameService.cleanupAllIntervals === 'function') {

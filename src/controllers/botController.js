@@ -1,4 +1,4 @@
-// botController.js - COMPLETE WORKING VERSION WITH SIMPLIFIED SMS PROCESSING
+// botController.js - UPDATED VERSION WITH SINGLETON PATTERN
 const { Telegraf, Markup } = require('telegraf');
 const UserService = require('../services/userService');
 const WalletService = require('../services/walletService');
@@ -6,9 +6,29 @@ const SMSDeposit = require('../models/SMSDeposit');
 
 class BotController {
   constructor(botToken, adminId) {
+    if (BotController.instance) {
+      console.log('🤖 Bot instance already exists, returning existing instance');
+      return BotController.instance;
+    }
+    
     this.bot = new Telegraf(botToken);
     this.adminId = adminId.toString();
+    this.isRunning = false;
     this.setupHandlers();
+    
+    BotController.instance = this;
+    console.log('🤖 New BotController instance created');
+  }
+
+  static getInstance(botToken, adminId) {
+    if (!BotController.instance) {
+      BotController.instance = new BotController(botToken, adminId);
+    }
+    return BotController.instance;
+  }
+
+  static clearInstance() {
+    BotController.instance = null;
   }
 
   setupHandlers() {
@@ -104,6 +124,7 @@ class BotController {
         ])
       );
     });
+
     this.bot.command('matchsms', async (ctx) => {
       if (ctx.from.id.toString() !== this.adminId) {
         await ctx.reply('❌ Access denied');
@@ -218,6 +239,7 @@ class BotController {
         await ctx.reply('❌ Error force matching: ' + error.message);
       }
     });
+
     // Deposit command
     this.bot.command('deposit', async (ctx) => {
       try {
@@ -393,6 +415,7 @@ Keep playing to improve your stats! 🎯
         await ctx.reply('❌ Error loading admin panel: ' + error.message);
       }
     });
+
     this.bot.command('processsms', async (ctx) => {
       if (ctx.from.id.toString() !== this.adminId) {
         await ctx.reply('❌ Access denied');
@@ -589,60 +612,6 @@ Keep playing to improve your stats! 🎯
 
       } catch (error) {
         await ctx.reply(`❌ Batch approval error: ${error.message}`);
-      }
-    });
-    // SMS List command
-    this.bot.command('smslist', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.reply('❌ Access denied');
-        return;
-      }
-
-      try {
-        const page = parseInt(ctx.message.text.split(' ')[1]) || 1;
-        const result = await WalletService.getSMSDeposits(page, 10);
-
-        let message = `📱 *SMS Deposit History - Page ${page}*\n\n`;
-
-        if (result.deposits.length === 0) {
-          message += `No SMS deposits found.\n`;
-        } else {
-          result.deposits.forEach((sms, index) => {
-            const statusEmoji = sms.status === 'APPROVED' ? '✅' :
-              sms.status === 'REJECTED' ? '❌' :
-                sms.status === 'AUTO_APPROVED' ? '🤖' : '⏳';
-            const userName = sms.userId?.firstName || sms.userId?.username || 'Unknown User';
-
-            message += `${statusEmoji} $${sms.extractedAmount} - ${userName}\n`;
-            message += `   Method: ${sms.paymentMethod} | Status: ${sms.status}\n`;
-            message += `   Time: ${new Date(sms.createdAt).toLocaleDateString()}\n`;
-
-            if (sms.status === 'PENDING') {
-              message += `   [Approve: /approvesms_${sms._id}] [Reject: /rejectsms_${sms._id}]\n`;
-            }
-
-            message += `   [View: /viewsms_${sms._id}]\n\n`;
-          });
-        }
-
-        message += `\nPage ${page} of ${result.pagination.pages}`;
-
-        const keyboard = [];
-        if (page > 1) {
-          keyboard.push(Markup.button.callback('⬅️ Previous', `sms_page_${page - 1}`));
-        }
-        if (page < result.pagination.pages) {
-          keyboard.push(Markup.button.callback('Next ➡️', `sms_page_${page + 1}`));
-        }
-
-        if (keyboard.length > 0) {
-          await ctx.replyWithMarkdown(message, Markup.inlineKeyboard(keyboard));
-        } else {
-          await ctx.replyWithMarkdown(message);
-        }
-      } catch (error) {
-        console.error('SMS list error:', error);
-        await ctx.reply('❌ Error loading SMS list: ' + error.message);
       }
     });
 
@@ -1097,7 +1066,8 @@ Keep playing to improve your stats! 🎯
           [Markup.button.callback('💼 My Wallet', 'show_wallet')],
           [Markup.button.callback('📊 My Stats', 'show_stats')]
         ])
-      });
+      }
+      );
     });
 
     this.bot.action('waiting_sms', async (ctx) => {
@@ -1273,7 +1243,8 @@ Keep playing to improve your stats! 🎯
         await ctx.editMessageText(message, {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard(keyboard)
-        });
+        }
+        );
       } catch (error) {
         console.error('Admin SMS list error:', error);
         await ctx.answerCbQuery('Error loading list');
@@ -1283,100 +1254,100 @@ Keep playing to improve your stats! 🎯
     // ========== TEXT HANDLER (MUST BE LAST) ==========
 
     this.bot.on('text', async (ctx) => {
-  console.log('📝 Text received:', ctx.message.text.substring(0, 100));
+      console.log('📝 Text received:', ctx.message.text.substring(0, 100));
 
-  // Handle SMS deposits with payment method selected
-  if (ctx.session && ctx.session.pendingDepositMethod) {
-    const smsText = ctx.message.text;
-    const paymentMethod = ctx.session.pendingDepositMethod;
+      // Handle SMS deposits with payment method selected
+      if (ctx.session && ctx.session.pendingDepositMethod) {
+        const smsText = ctx.message.text;
+        const paymentMethod = ctx.session.pendingDepositMethod;
 
-    console.log('📱 Processing SMS deposit for method:', paymentMethod);
+        console.log('📱 Processing SMS deposit for method:', paymentMethod);
 
-    // Show processing message
-    const processingMsg = await ctx.reply('🔄 Processing your SMS...');
+        // Show processing message
+        const processingMsg = await ctx.reply('🔄 Processing your SMS...');
 
-    try {
-      await UserService.findOrCreateUser(ctx.from);
-      
-      // Use new matching system with error handling
-      let result;
-      try {
-        result = await WalletService.matchAndAutoApproveSMS(
-          smsText,
-          ctx.from.id.toString(),
-          paymentMethod
-        );
-      } catch (matchError) {
-        console.error('Match error:', matchError);
-        // Even if matching fails, store the SMS
-        result = await WalletService.storeSMSMessage(
-          ctx.from.id.toString(),
-          smsText,
-          paymentMethod
-        );
+        try {
+          await UserService.findOrCreateUser(ctx.from);
+          
+          // Use new matching system with error handling
+          let result;
+          try {
+            result = await WalletService.matchAndAutoApproveSMS(
+              smsText,
+              ctx.from.id.toString(),
+              paymentMethod
+            );
+          } catch (matchError) {
+            console.error('Match error:', matchError);
+            // Even if matching fails, store the SMS
+            result = await WalletService.storeSMSMessage(
+              ctx.from.id.toString(),
+              smsText,
+              paymentMethod
+            );
+          }
+
+          delete ctx.session.pendingDepositMethod;
+          
+          // Delete processing message
+          try {
+            await ctx.deleteMessage(processingMsg.message_id);
+          } catch (e) {
+            console.warn('Could not delete processing message:', e.message);
+          }
+
+          // Analyze the SMS type for better messaging
+          const smsAnalysis = WalletService.analyzeSMSType(smsText);
+          const identifiers = WalletService.extractTransactionIdentifiers(smsText);
+          
+          let message = '';
+          let keyboard = [];
+          
+          if (result.status === 'APPROVED') {
+            message = `✅ *Deposit Approved!*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour deposit has been automatically matched and approved! 🎉`;
+            keyboard = [
+              [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
+              [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+            ];
+          } else if (result.status === 'RECEIVED_WAITING_MATCH') {
+            const typeText = smsAnalysis.type === 'SENDER' ? 'You sent money' : 'We received money';
+            message = `⏳ *SMS Received - Waiting for Match*\n\n*Amount:* $${result.extractedAmount}\n*Type:* ${typeText}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour SMS has been received. We'll match it with the corresponding transaction shortly.`;
+            keyboard = [
+              [Markup.button.callback('💼 Check Status', 'show_wallet')],
+              [Markup.button.callback('💰 New Deposit', 'show_deposit')]
+            ];
+          } else {
+            message = `📱 *SMS Received*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Status:* ${result.status}\n\nYour deposit is being processed.`;
+            keyboard = [
+              [Markup.button.callback('💼 Check Status', 'show_wallet')],
+              [Markup.button.callback('💰 New Deposit', 'show_deposit')]
+            ];
+          }
+
+          await ctx.replyWithMarkdown(message, Markup.inlineKeyboard(keyboard));
+
+        } catch (error) {
+          console.error('❌ SMS deposit error:', error);
+          
+          // Delete processing message
+          try {
+            await ctx.deleteMessage(processingMsg.message_id);
+          } catch (e) {}
+          
+          const errorMessage = error.message.includes('User not found') 
+            ? 'Please use /start first to set up your account.'
+            : 'Processing error. Please try again or contact support.';
+            
+          await ctx.replyWithMarkdown(
+            `❌ *Deposit Processing Failed*\n\nError: ${errorMessage}`,
+            Markup.inlineKeyboard([
+              [Markup.button.callback('🔄 Try Again', 'show_deposit')],
+              [Markup.button.callback('📞 Contact Support', 'contact_support')]
+            ])
+          );
+        }
+        return;
       }
-
-      delete ctx.session.pendingDepositMethod;
-      
-      // Delete processing message
-      try {
-        await ctx.deleteMessage(processingMsg.message_id);
-      } catch (e) {
-        console.warn('Could not delete processing message:', e.message);
-      }
-
-      // Analyze the SMS type for better messaging
-      const smsAnalysis = WalletService.analyzeSMSType(smsText);
-      const identifiers = WalletService.extractTransactionIdentifiers(smsText);
-      
-      let message = '';
-      let keyboard = [];
-      
-      if (result.status === 'APPROVED') {
-        message = `✅ *Deposit Approved!*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour deposit has been automatically matched and approved! 🎉`;
-        keyboard = [
-          [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
-          [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
-        ];
-      } else if (result.status === 'RECEIVED_WAITING_MATCH') {
-        const typeText = smsAnalysis.type === 'SENDER' ? 'You sent money' : 'We received money';
-        message = `⏳ *SMS Received - Waiting for Match*\n\n*Amount:* $${result.extractedAmount}\n*Type:* ${typeText}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour SMS has been received. We'll match it with the corresponding transaction shortly.`;
-        keyboard = [
-          [Markup.button.callback('💼 Check Status', 'show_wallet')],
-          [Markup.button.callback('💰 New Deposit', 'show_deposit')]
-        ];
-      } else {
-        message = `📱 *SMS Received*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Status:* ${result.status}\n\nYour deposit is being processed.`;
-        keyboard = [
-          [Markup.button.callback('💼 Check Status', 'show_wallet')],
-          [Markup.button.callback('💰 New Deposit', 'show_deposit')]
-        ];
-      }
-
-      await ctx.replyWithMarkdown(message, Markup.inlineKeyboard(keyboard));
-
-    } catch (error) {
-      console.error('❌ SMS deposit error:', error);
-      
-      // Delete processing message
-      try {
-        await ctx.deleteMessage(processingMsg.message_id);
-      } catch (e) {}
-      
-      const errorMessage = error.message.includes('User not found') 
-        ? 'Please use /start first to set up your account.'
-        : 'Processing error. Please try again or contact support.';
-        
-      await ctx.replyWithMarkdown(
-        `❌ *Deposit Processing Failed*\n\nError: ${errorMessage}`,
-        Markup.inlineKeyboard([
-          [Markup.button.callback('🔄 Try Again', 'show_deposit')],
-          [Markup.button.callback('📞 Contact Support', 'contact_support')]
-        ])
-      );
-    }
-    return;
-  }
 
       // Handle automatic SMS detection and storage
       const text = ctx.message.text;
@@ -1478,6 +1449,7 @@ Keep playing to improve your stats! 🎯
       }
     });
   }
+
   looksLikeBankSMS(text) {
     const sms = text.toLowerCase();
 
@@ -1517,6 +1489,7 @@ Keep playing to improve your stats! 🎯
 
     return isBankSMS || (hasAmount && hasTransactionWords && reasonableLength);
   }
+
   async notifyAdminAboutDeposit(smsDeposit, user) {
     try {
       const message = `📥 *New SMS Deposit Needs Review*\n\n` +
@@ -1536,15 +1509,54 @@ Keep playing to improve your stats! 🎯
   }
 
   launch() {
+    // Prevent multiple launches
+    if (this.isRunning) {
+      console.log('🤖 Bot is already running, skipping launch');
+      return;
+    }
+
+    console.log('🤖 Launching Telegram bot...');
+    
+    // Initialize payment methods
     WalletService.initializePaymentMethods().catch(console.error);
 
-    this.bot.launch();
-    console.log('🤖 Bingo Bot is running and ready!');
-    console.log('👑 Admin ID:', this.adminId);
+    // Launch the bot
+    this.bot.launch().then(() => {
+      this.isRunning = true;
+      console.log('🤖 Bingo Bot is running and ready!');
+      console.log('👑 Admin ID:', this.adminId);
+    }).catch(error => {
+      console.error('❌ Failed to launch bot:', error);
+      this.isRunning = false;
+    });
 
-    process.once('SIGINT', () => this.bot.stop('SIGINT'));
-    process.once('SIGTERM', () => this.bot.stop('SIGTERM'));
+    // Setup graceful shutdown
+    process.once('SIGINT', () => {
+      console.log('🛑 SIGINT received, stopping bot...');
+      this.stop('SIGINT');
+    });
+    
+    process.once('SIGTERM', () => {
+      console.log('🛑 SIGTERM received, stopping bot...');
+      this.stop('SIGTERM');
+    });
+  }
+
+  stop(signal) {
+    if (!this.isRunning) {
+      console.log('🤖 Bot is not running');
+      return;
+    }
+
+    console.log(`🤖 Stopping bot with signal: ${signal}`);
+    this.bot.stop(signal);
+    this.isRunning = false;
+    BotController.clearInstance();
+    console.log('🤖 Bot stopped successfully');
   }
 }
+
+// Static instance variable for singleton pattern
+BotController.instance = null;
 
 module.exports = BotController;
