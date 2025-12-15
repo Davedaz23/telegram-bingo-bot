@@ -2035,7 +2035,8 @@ static async formatGameForFrontend(game) {
       { type: 'COLUMN', positions: [3, 8, 13, 18, 23] },
       { type: 'COLUMN', positions: [4, 9, 14, 19, 24] },
       { type: 'DIAGONAL', positions: [0, 6, 12, 18, 24] },
-      { type: 'DIAGONAL', positions: [4, 8, 12, 16, 20] }
+      { type: 'DIAGONAL', positions: [4, 8, 12, 16, 20] },
+    { type: 'FOUR_CORNERS', positions: [0, 4, 20, 24] }
     ];
 
     for (const pattern of winningPatterns) {
