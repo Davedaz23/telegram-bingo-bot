@@ -868,24 +868,24 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 
         const methods = {
           'CBE Bank': {
-            account: '1000200030004000',
-            instructions: 'Send money to CBE account 1000200030004000 via CBE Birr app or bank transfer'
+            account: '1000143822668',
+            instructions: 'Send money to CBE account 1000143822668 via CBE Birr app or bank transfer'
           },
-          'Awash Bank': {
-            account: '2000300040005000',
-            instructions: 'Send money to Awash Bank account 2000300040005000'
+          'BOA': {
+            account: '145633257',
+            instructions: 'Send money to Awash Bank account 145633257'
           },
-          'Dashen Bank': {
-            account: '3000400050006000',
-            instructions: 'Send money to Dashen Bank account 3000400050006000'
-          },
-          'CBE Birr': {
-            account: '0911000000',
-            instructions: 'Send money to CBE Birr 0911000000 via CBE Birr app'
-          },
+          // 'Dashen Bank': {
+          //   account: '3000400050006000',
+          //   instructions: 'Send money to Dashen Bank account 3000400050006000'
+          // },
+          // 'CBE Birr': {
+          //   account: '0911000000',
+          //   instructions: 'Send money to CBE Birr 0911000000 via CBE Birr app'
+          // },
           'Telebirr': {
-            account: '0912000000',
-            instructions: 'Send money to Telebirr 0912000000 via Telebirr app'
+            account: '0968546687',
+            instructions: 'Send money to Telebirr 0968546687 via Telebirr app'
           }
         };
 

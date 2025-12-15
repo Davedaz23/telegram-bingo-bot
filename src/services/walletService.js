@@ -3238,40 +3238,40 @@ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
         name: 'CBE Bank',
         type: 'BANK',
         accountName: 'Bingo Game',
-        accountNumber: '1000200030004000',
-        instructions: 'Send money to CBE account 1000200030004000 via CBE Birr or bank transfer',
+        accountNumber: '1000143822668',
+        instructions: 'Send money to CBE account 1000143822668 via CBE Birr or bank transfer',
         smsFormat: 'You have received|ETB|from|CBE'
       },
       {
-        name: 'Awash Bank',
+        name: 'BOA',
         type: 'BANK', 
         accountName: 'Bingo Game',
-        accountNumber: '2000300040005000',
-        instructions: 'Send money to Awash Bank account 2000300040005000',
+        accountNumber: '145633257',
+        instructions: 'Send money to Awash Bank account 145633257',
         smsFormat: 'You have received|ETB|from|Awash'
       },
-      {
-        name: 'Dashen Bank',
-        type: 'BANK',
-        accountName: 'Bingo Game',
-        accountNumber: '3000400050006000',
-        instructions: 'Send money to Dashen Bank account 3000400050006000',
-        smsFormat: 'You have received|ETB|from|Dashen'
-      },
-      {
-        name: 'CBE Birr',
-        type: 'MOBILE_MONEY',
-        accountName: 'Bingo Game',
-        accountNumber: '0911000000',
-        instructions: 'Send money to CBE Birr 0911000000',
-        smsFormat: 'You have received|ETB|from|CBEBirr'
-      },
+      // {
+      //   name: 'Dashen Bank',
+      //   type: 'BANK',
+      //   accountName: 'Bingo Game',
+      //   accountNumber: '3000400050006000',
+      //   instructions: 'Send money to Dashen Bank account 3000400050006000',
+      //   smsFormat: 'You have received|ETB|from|Dashen'
+      // },
+      // {
+      //   name: 'CBE Birr',
+      //   type: 'MOBILE_MONEY',
+      //   accountName: 'Bingo Game',
+      //   accountNumber: '0911000000',
+      //   instructions: 'Send money to CBE Birr 0911000000',
+      //   smsFormat: 'You have received|ETB|from|CBEBirr'
+      // },
       {
         name: 'Telebirr',
         type: 'MOBILE_MONEY',
         accountName: 'Bingo Game',
-        accountNumber: '0912000000',
-        instructions: 'Send money to Telebirr 0912000000',
+        accountNumber: '0968546687',
+        instructions: 'Send money to Telebirr 0968546687',
         smsFormat: 'You have received|ETB|from|Telebirr'
       }
     ];
