@@ -508,11 +508,23 @@ static async endGameDueToNoWinner(gameId) {
       const entryFee = 10;
       const WalletService = require('./walletService');
       
+      // Create a Set to track unique users to avoid duplicate refunds
+      const refundedUsers = new Set();
+      
       for (const card of bingoCards) {
         try {
           const user = await User.findById(card.userId).session(session);
           
           if (user && user.telegramId) {
+            // Check if this user has already been refunded
+            if (refundedUsers.has(user.telegramId)) {
+              console.log(`⚠️ User ${user.telegramId} already refunded, skipping duplicate`);
+              continue;
+            }
+            
+            // Mark user as refunded
+            refundedUsers.add(user.telegramId);
+            
             await WalletService.addWinning(
               user.telegramId,
               gameId,
@@ -542,11 +554,11 @@ static async endGameDueToNoWinner(gameId) {
         finalReconciliation = new Reconciliation({
           gameId: gameInSession._id,
           status: 'NO_WINNER_REFUNDED',
-          totalPot: bingoCards.length * entryFee,
+          totalPot: refundedUsers.size * entryFee, // Use unique user count
           platformFee: 0,
           winnerAmount: 0,
-          debitTotal: bingoCards.length * entryFee,
-          creditTotal: bingoCards.length * entryFee,
+          debitTotal: refundedUsers.size * entryFee,
+          creditTotal: refundedUsers.size * entryFee,
           completedAt: now
         });
       } else {
@@ -557,7 +569,7 @@ static async endGameDueToNoWinner(gameId) {
       await finalReconciliation.save({ session });
       await session.commitTransaction();
       
-      console.log(`✅ Game ${gameInSession.code} ended as NO_WINNER. All refunds processed.`);
+      console.log(`✅ Game ${gameInSession.code} ended as NO_WINNER. Refunded ${refundedUsers.size} unique players.`);
       
       this.winnerDeclared.add(gameId.toString());
       this.stopAutoNumberCalling(gameId);
