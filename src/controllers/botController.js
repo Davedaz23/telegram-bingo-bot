@@ -896,7 +896,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 *Account Details:*
 Full Name: Alemayehu Yalew
 📞 Account: ${method.account}
-🏦 Name: Bingo Game
+🏦 For: Bingo Game
 
 *Instructions:*
 ${method.instructions}
