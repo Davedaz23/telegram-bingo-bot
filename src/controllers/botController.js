@@ -9,11 +9,9 @@ const AdminUtils = {
   
   initialize() {
     // Get admin IDs from environment variables
-    // Support both ADMIN_TELEGRAM_ID (single) and ADMIN_TELEGRAM_IDS (multiple)
     const singleAdmin = process.env.ADMIN_TELEGRAM_ID || '';
     const multipleAdmins = process.env.ADMIN_TELEGRAM_IDS || '';
     
-    // Combine both - remove empty strings and duplicates
     let allAdmins = [];
     
     if (singleAdmin) {
@@ -25,7 +23,6 @@ const AdminUtils = {
       allAdmins = [...allAdmins, ...ids];
     }
     
-    // Remove duplicates
     this.adminIds = [...new Set(allAdmins)].filter(id => id !== '');
     
     console.log(`👑 AdminUtils initialized with ${this.adminIds.length} admins: ${this.adminIds.join(', ')}`);
@@ -33,7 +30,7 @@ const AdminUtils = {
   
   isAdmin(userId) {
     if (this.adminIds.length === 0) {
-      this.initialize(); // Auto-initialize if not done
+      this.initialize();
     }
     const userIdStr = userId.toString();
     return this.adminIds.includes(userIdStr);
@@ -44,20 +41,6 @@ const AdminUtils = {
       this.initialize();
     }
     return this.adminIds.length;
-  },
-  
-  getAdminList() {
-    if (this.adminIds.length === 0) {
-      this.initialize();
-    }
-    return this.adminIds.join(', ');
-  },
-  
-  getAdminIds() {
-    if (this.adminIds.length === 0) {
-      this.initialize();
-    }
-    return [...this.adminIds];
   }
 };
 class BotController {
@@ -68,9 +51,11 @@ class BotController {
     }
     
     this.bot = new Telegraf(botToken);
-    this.adminId = adminId.toString();
     this.isRunning = false;
+    
+    // ✅ Initialize AdminUtils
     AdminUtils.initialize();
+    
     this.setupHandlers();
     
     BotController.instance = this;
@@ -87,9 +72,12 @@ class BotController {
   static clearInstance() {
     BotController.instance = null;
   }
-isUserAdmin(userId) {
+
+  // ✅ Use AdminUtils for all admin checks
+  isUserAdmin(userId) {
     return AdminUtils.isAdmin(userId);
   }
+
   setupHandlers() {
     // Start command - ensures user is created
      this.bot.start(async (ctx) => {
@@ -97,7 +85,7 @@ isUserAdmin(userId) {
         console.log('🚀 Start command received from:', ctx.from.id, ctx.from.first_name);
 
         // Check if user is admin - FIXED: ADD THIS LINE
-        const isAdmin = ctx.from.id.toString() === this.adminId;
+       const isAdmin = AdminUtils.isAdmin(ctx.from.id);
         
         const user = await UserService.findOrCreateUser(ctx.from);
         console.log('✅ User processed:', user.telegramId, user._id);
@@ -212,7 +200,7 @@ isUserAdmin(userId) {
     });
 
     this.bot.command('matchsms', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+     if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -264,7 +252,7 @@ isUserAdmin(userId) {
     });
 
     this.bot.command(/^findmatch_(.+)/, async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -305,7 +293,7 @@ isUserAdmin(userId) {
     });
 
     this.bot.command(/^forcematch_(.+)_(.+)/, async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+       if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -455,7 +443,7 @@ Keep playing to improve your stats! 🎯
     this.bot.command('admin', async (ctx) => {
       console.log('🔐 Admin command received from:', ctx.from.id, 'Expected admin:', this.adminId);
 
-      if (ctx.from.id.toString() !== this.adminId) {
+       if (!AdminUtils.isAdmin(ctx.from.id)) {
         console.log('❌ Access denied for user:', ctx.from.id);
         await ctx.reply('❌ Access denied');
         return;
@@ -466,7 +454,7 @@ Keep playing to improve your stats! 🎯
 
     // Admin panel action handler
     this.bot.action('admin_panel', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.answerCbQuery('❌ Access denied');
         return;
       }
@@ -485,7 +473,7 @@ Keep playing to improve your stats! 🎯
 
     // SMS Management menu
     this.bot.action('admin_sms_menu', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.answerCbQuery('❌ Access denied');
         return;
       }
@@ -530,7 +518,7 @@ Keep playing to improve your stats! 🎯
 
     // Pending SMS list
     this.bot.action('admin_pending_sms', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+        if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.answerCbQuery('❌ Access denied');
         return;
       }
@@ -578,8 +566,8 @@ Keep playing to improve your stats! 🎯
 
     // Process SMS action
     this.bot.action('admin_process_sms', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+     if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -604,8 +592,8 @@ Keep playing to improve your stats! 🎯
       }
     });
  this.bot.action('admin_auto_approve', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -631,8 +619,8 @@ Keep playing to improve your stats! 🎯
     });
      // Batch approve action
     this.bot.action('admin_batch_approve', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+       if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -687,8 +675,8 @@ Keep playing to improve your stats! 🎯
 
     // SMS Matching menu
     this.bot.action('admin_sms_matching', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+       if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -731,8 +719,8 @@ Keep playing to improve your stats! 🎯
 
     // SMS Statistics
     this.bot.action('admin_sms_stats', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -779,8 +767,8 @@ Keep playing to improve your stats! 🎯
 
     // User Management menu
     this.bot.action('admin_users_menu', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+    if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -806,8 +794,8 @@ Manage users, wallets, and transactions.
 
     // Transactions menu
     this.bot.action('admin_transactions_menu', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -833,8 +821,8 @@ View and manage all transactions.
 
     // Pending deposits list
     this.bot.action('admin_pending_deposits', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -881,8 +869,8 @@ View and manage all transactions.
 
     // System Tools menu
     this.bot.action('admin_tools_menu', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+     if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -908,8 +896,8 @@ Maintenance and diagnostic tools.
 
     // Bot Status
     this.bot.action('admin_bot_status', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -947,8 +935,8 @@ Maintenance and diagnostic tools.
 
     // Help menu for admin
     this.bot.action('admin_help_menu', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -992,7 +980,7 @@ Contact developer for technical issues.
 
  
     this.bot.command('processsms', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -1013,7 +1001,7 @@ Contact developer for technical issues.
 
     // View received SMS
     this.bot.command('smslist', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+     if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -1070,7 +1058,7 @@ Contact developer for technical issues.
 
     // Update approve SMS command to handle RECEIVED status
     this.bot.command(/^approvesms_(.+)/, async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+     if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -1105,8 +1093,8 @@ Contact developer for technical issues.
 
     // Add confirmation handler
     this.bot.action(/confirm_approve_(.+)/, async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+    if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -1148,7 +1136,7 @@ Contact developer for technical issues.
 
     // NEW: Batch approve command
     this.bot.command('batchapprove', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+       if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -1192,7 +1180,7 @@ Contact developer for technical issues.
 
     // View SMS detail
     this.bot.command(/^viewsms_(.+)/, async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+       if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -1248,7 +1236,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 
     // Auto-approve command
     this.bot.command('autoapprove', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+     if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -1267,7 +1255,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 
     // Pending deposits command
     this.bot.command('pending', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+       if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -1299,7 +1287,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 
     // Approve deposit command
     this.bot.command(/^approve_(.+)/, async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -1331,7 +1319,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 
     // Approve SMS command
     this.bot.command(/^approvesms_(.+)/, async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+       if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
@@ -1363,11 +1351,10 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 
     // Reject SMS command
     this.bot.command(/^rejectsms_(.+)/, async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
+         if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
         return;
       }
-
       const smsId = ctx.match[1];
 
       try {
@@ -1396,7 +1383,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
     // ========== ACTION HANDLERS ==========
 
   this.bot.action('show_deposit', async (ctx) => {
-      const isAdmin = ctx.from.id.toString() === this.adminId;
+        const isAdmin = AdminUtils.isAdmin(ctx.from.id);
       
       const depositMessage = `
 💳 *Deposit Money to Your Wallet*
@@ -1667,8 +1654,8 @@ Keep playing to improve your stats! 🎯
 
     // Admin action handlers
     this.bot.action(/admin_approve_sms_(.+)/, async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+       if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -1699,8 +1686,8 @@ Keep playing to improve your stats! 🎯
     });
 
     this.bot.action(/admin_reject_sms_(.+)/, async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+      if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -1731,8 +1718,8 @@ Keep playing to improve your stats! 🎯
     });
 
     this.bot.action(/sms_page_(.+)/, async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+       if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
@@ -1785,8 +1772,8 @@ Keep playing to improve your stats! 🎯
     });
 
     this.bot.action('admin_sms_list', async (ctx) => {
-      if (ctx.from.id.toString() !== this.adminId) {
-        await ctx.answerCbQuery('❌ Access denied');
+        if (!AdminUtils.isAdmin(ctx.from.id)) {
+        await ctx.reply('❌ Access denied');
         return;
       }
 
