@@ -42,6 +42,25 @@ const gameSchema = new mongoose.Schema({
   endedAt: {
     type: Date
   },
+  noWinner: {
+  type: Boolean,
+  default: false
+},
+refunded: {
+  type: Boolean,
+  default: false
+},
+refundedAt: {
+  type: Date
+},
+totalRefunded: {
+  type: Number,
+  default: 0
+},
+uniquePlayersRefunded: {
+  type: Number,
+  default: 0
+},
   // CARD SELECTION TIMING
   cardSelectionStartTime: {
     type: Date
