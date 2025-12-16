@@ -3,7 +3,63 @@ const { Telegraf, Markup } = require('telegraf');
 const UserService = require('../services/userService');
 const WalletService = require('../services/walletService');
 const SMSDeposit = require('../models/SMSDeposit');
-
+// ✅ NEW: AdminUtils for multiple admin support
+const AdminUtils = {
+  adminIds: [],
+  
+  initialize() {
+    // Get admin IDs from environment variables
+    // Support both ADMIN_TELEGRAM_ID (single) and ADMIN_TELEGRAM_IDS (multiple)
+    const singleAdmin = process.env.ADMIN_TELEGRAM_ID || '';
+    const multipleAdmins = process.env.ADMIN_TELEGRAM_IDS || '';
+    
+    // Combine both - remove empty strings and duplicates
+    let allAdmins = [];
+    
+    if (singleAdmin) {
+      allAdmins.push(singleAdmin.trim());
+    }
+    
+    if (multipleAdmins) {
+      const ids = multipleAdmins.split(',').map(id => id.trim()).filter(id => id);
+      allAdmins = [...allAdmins, ...ids];
+    }
+    
+    // Remove duplicates
+    this.adminIds = [...new Set(allAdmins)].filter(id => id !== '');
+    
+    console.log(`👑 AdminUtils initialized with ${this.adminIds.length} admins: ${this.adminIds.join(', ')}`);
+  },
+  
+  isAdmin(userId) {
+    if (this.adminIds.length === 0) {
+      this.initialize(); // Auto-initialize if not done
+    }
+    const userIdStr = userId.toString();
+    return this.adminIds.includes(userIdStr);
+  },
+  
+  getAdminCount() {
+    if (this.adminIds.length === 0) {
+      this.initialize();
+    }
+    return this.adminIds.length;
+  },
+  
+  getAdminList() {
+    if (this.adminIds.length === 0) {
+      this.initialize();
+    }
+    return this.adminIds.join(', ');
+  },
+  
+  getAdminIds() {
+    if (this.adminIds.length === 0) {
+      this.initialize();
+    }
+    return [...this.adminIds];
+  }
+};
 class BotController {
   constructor(botToken, adminId) {
     if (BotController.instance) {
@@ -14,6 +70,7 @@ class BotController {
     this.bot = new Telegraf(botToken);
     this.adminId = adminId.toString();
     this.isRunning = false;
+    AdminUtils.initialize();
     this.setupHandlers();
     
     BotController.instance = this;
@@ -30,7 +87,9 @@ class BotController {
   static clearInstance() {
     BotController.instance = null;
   }
-
+isUserAdmin(userId) {
+    return AdminUtils.isAdmin(userId);
+  }
   setupHandlers() {
     // Start command - ensures user is created
      this.bot.start(async (ctx) => {

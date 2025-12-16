@@ -27,6 +27,51 @@ mongoose.connect(process.env.MONGODB_URI)
 let botController = null;
 let servicesInitialized = false; // Add flag to track initialization
 
+const AdminUtils = {
+  adminIds: [],
+  
+  initialize() {
+    // Get admin IDs from environment variables
+    // Support both ADMIN_TELEGRAM_ID (single) and ADMIN_TELEGRAM_IDS (multiple)
+    const singleAdmin = process.env.ADMIN_TELEGRAM_ID || '';
+    const multipleAdmins = process.env.ADMIN_TELEGRAM_IDS || '';
+    
+    // Combine both - remove empty strings and duplicates
+    let allAdmins = [];
+    
+    if (singleAdmin) {
+      allAdmins.push(singleAdmin.trim());
+    }
+    
+    if (multipleAdmins) {
+      const ids = multipleAdmins.split(',').map(id => id.trim()).filter(id => id);
+      allAdmins = [...allAdmins, ...ids];
+    }
+    
+    // Remove duplicates
+    this.adminIds = [...new Set(allAdmins)].filter(id => id !== '');
+    
+    console.log(`👑 AdminUtils initialized with ${this.adminIds.length} admins: ${this.adminIds.join(', ')}`);
+  },
+  
+  isAdmin(userId) {
+    const userIdStr = userId.toString();
+    return this.adminIds.includes(userIdStr);
+  },
+  
+  getAdminCount() {
+    return this.adminIds.length;
+  },
+  
+  getAdminList() {
+    return this.adminIds.join(', ');
+  },
+  
+  getAdminIds() {
+    return [...this.adminIds];
+  }
+};
+
 const initializeBot = () => {
   try {
     if (!process.env.BOT_TOKEN) {
@@ -34,26 +79,21 @@ const initializeBot = () => {
       return null;
     }
 
-    if (!process.env.ADMIN_TELEGRAM_ID) {
-      console.warn('⚠️ ADMIN_TELEGRAM_ID not found - Admin features disabled');
-    }
-
     console.log('🤖 Initializing Telegram bot...');
     
-    // Use singleton pattern
+    // Initialize AdminUtils first
+    AdminUtils.initialize();
+    
+    // Use the BotController - it will use AdminUtils internally
     const BotController = require('./src/controllers/botController');
-    botController = BotController.getInstance(
+    botController = new BotController(
       process.env.BOT_TOKEN,
-      process.env.ADMIN_TELEGRAM_ID || ''
+      process.env.ADMIN_TELEGRAM_ID || '' // Keep for backward compatibility
     );
     
-    // Launch the bot only if not already running
-    if (!botController.isRunning) {
-      botController.launch();
-      console.log('✅ Telegram Bot launched successfully');
-    } else {
-      console.log('✅ Telegram Bot is already running');
-    }
+    // Launch the bot immediately
+    botController.launch();
+    console.log('✅ Telegram Bot launched successfully');
     
     return botController;
   } catch (error) {
