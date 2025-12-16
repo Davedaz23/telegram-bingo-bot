@@ -70,13 +70,25 @@ class BotController {
 *Quick Actions:*
         `;
 
+        // Add admin badge if user is admin
+        if (isAdmin) {
+          welcomeMessage = `👑 *ADMIN PANEL*\n\n${welcomeMessage}`;
+        }
+
+        const keyboardButtons = [
+          [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+          [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
+          [Markup.button.callback('📊 My Stats & History', 'show_stats')],
+          [Markup.button.callback('💼 My Wallet', 'show_wallet')]
+        ];
+
+        // Add Admin Panel button for admin users
+        if (isAdmin) {
+          keyboardButtons.unshift([Markup.button.callback('👑 ADMIN PANEL', 'admin_panel')]);
+        }
+
         await ctx.replyWithMarkdown(welcomeMessage,
-          Markup.inlineKeyboard([
-            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
-            [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
-            [Markup.button.callback('📊 My Stats & History', 'show_stats')],
-            [Markup.button.callback('💼 My Wallet', 'show_wallet')]
-          ])
+          Markup.inlineKeyboard(keyboardButtons)
         );
 
         console.log('✅ Start command completed successfully');
@@ -91,6 +103,7 @@ class BotController {
         );
       }
     });
+
 
     // Help command
     this.bot.help(async (ctx) => {
@@ -365,6 +378,7 @@ Keep playing to improve your stats! 🎯
 
     // ========== ADMIN COMMANDS ==========
 
+       // Admin command - Shows structured admin menu
     this.bot.command('admin', async (ctx) => {
       console.log('🔐 Admin command received from:', ctx.from.id, 'Expected admin:', this.adminId);
 
@@ -374,48 +388,536 @@ Keep playing to improve your stats! 🎯
         return;
       }
 
-      try {
-        console.log('✅ Admin access granted, loading admin panel...');
+      await this.showAdminPanel(ctx);
+    });
 
-        const [pendingDeposits, pendingSMS, recentSMS] = await Promise.all([
-          WalletService.getPendingDeposits().catch(err => { console.error('Error getting pending deposits:', err); return []; }),
-          WalletService.getPendingSMSDeposits(5).catch(err => { console.error('Error getting pending SMS:', err); return []; }),
-          WalletService.getSMSDeposits(1, 5).catch(err => { console.error('Error getting SMS deposits:', err); return { deposits: [] }; })
+    // Admin panel action handler
+    this.bot.action('admin_panel', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+      await this.showAdminPanel(ctx);
+    });
+
+    // Admin back to panel action
+    this.bot.action('admin_back_to_panel', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+      await this.showAdminPanel(ctx);
+    });
+ // ========== ADMIN SUB-MENUS ==========
+
+    // SMS Management menu
+    this.bot.action('admin_sms_menu', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      try {
+        const [pendingSMS, recentSMS] = await Promise.all([
+          WalletService.getPendingSMSDeposits(5).catch(() => []),
+          WalletService.getSMSDeposits(1, 5).catch(() => ({ deposits: [] }))
         ]);
 
-        let message = `👑 *Admin Panel*\n\n`;
-        message += `📊 *Statistics:*\n`;
-        message += `⏳ Pending Deposits: ${pendingDeposits?.length || 0}\n`;
-        message += `📱 Pending SMS: ${pendingSMS?.length || 0}\n\n`;
+        const pendingCount = pendingSMS?.length || 0;
+        const recentCount = recentSMS.deposits?.length || 0;
 
-        if (pendingSMS && pendingSMS.length > 0) {
-          message += `*Recent Pending SMS Deposits:*\n`;
-          pendingSMS.forEach((sms, index) => {
-            const userName = sms.userId?.firstName || sms.userId?.username || 'Unknown User';
-            message += `\n${index + 1}. $${sms.extractedAmount} - ${userName}\n`;
-            message += `   Method: ${sms.paymentMethod}\n`;
-            message += `   Time: ${new Date(sms.createdAt).toLocaleDateString()}\n`;
-            message += `   [View: /viewsms_${sms._id}] [Approve: /approvesms_${sms._id}] [Reject: /rejectsms_${sms._id}]\n`;
-          });
-        } else {
-          message += `*No pending SMS deposits.*\n\n`;
-        }
+        const message = `
+📱 *SMS Management Panel*
 
-        message += `\n*Admin Commands:*\n`;
-        message += `/smslist - View all SMS deposits\n`;
-        message += `/pending - Pending deposits\n`;
-        message += `/autoapprove - Auto-approve small deposits\n`;
-        message += `/stats - System statistics`;
+📊 *Quick Stats:*
+⏳ Pending SMS: ${pendingCount}
+📥 Recent SMS: ${recentCount}
 
-        await ctx.replyWithMarkdown(message);
-        console.log('✅ Admin panel loaded successfully');
+🔧 *SMS Actions:*
+        `;
 
+        await ctx.editMessageText(message, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('📋 View All SMS', 'admin_sms_list')],
+            [Markup.button.callback('⏳ Pending Review', 'admin_pending_sms')],
+            [Markup.button.callback('🔄 Process Received SMS', 'admin_process_sms')],
+            [Markup.button.callback('🤖 Auto-Approve', 'admin_auto_approve')],
+            [Markup.button.callback('🔄 Batch Approve', 'admin_batch_approve')],
+            [Markup.button.callback('🔍 SMS Matching', 'admin_sms_matching')],
+            [Markup.button.callback('📊 SMS Statistics', 'admin_sms_stats')],
+            [Markup.button.callback('⬅️ Back to Admin Panel', 'admin_back_to_panel')]
+          ])
+        });
       } catch (error) {
-        console.error('❌ Admin command error:', error);
-        await ctx.reply('❌ Error loading admin panel: ' + error.message);
+        console.error('Error in SMS menu:', error);
+        await ctx.answerCbQuery('Error loading SMS menu');
       }
     });
 
+    // Pending SMS list
+    this.bot.action('admin_pending_sms', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      try {
+        const pendingSMS = await WalletService.getPendingSMSDeposits(10);
+
+        let message = `⏳ *Pending SMS Deposits*\n\n`;
+
+        if (pendingSMS.length === 0) {
+          message += `✅ No pending SMS deposits. All clear!\n`;
+        } else {
+          pendingSMS.forEach((sms, index) => {
+            const userName = sms.userId?.firstName || sms.userId?.username || 'Unknown User';
+            const telegramId = sms.userId?.telegramId || 'N/A';
+            
+            message += `━━━━━━━━━━━━━━━━━━\n`;
+            message += `#${index + 1}\n`;
+            message += `👤 User: ${userName}\n`;
+            message += `📞 ID: ${telegramId}\n`;
+            message += `💰 Amount: $${sms.extractedAmount}\n`;
+            message += `🏦 Method: ${sms.paymentMethod}\n`;
+            message += `⏰ Time: ${new Date(sms.createdAt).toLocaleString()}\n\n`;
+            
+            message += `🔧 Actions:\n`;
+            message += `   • [Approve: /approvesms_${sms._id}]\n`;
+            message += `   • [Reject: /rejectsms_${sms._id}]\n`;
+            message += `   • [View: /viewsms_${sms._id}]\n\n`;
+          });
+        }
+
+        await ctx.editMessageText(message, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Refresh List', 'admin_pending_sms')],
+            [Markup.button.callback('📱 SMS Menu', 'admin_sms_menu')],
+            [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+          ])
+        });
+      } catch (error) {
+        console.error('Error loading pending SMS:', error);
+        await ctx.editMessageText('❌ Error loading pending SMS list');
+      }
+    });
+
+    // Process SMS action
+    this.bot.action('admin_process_sms', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      await ctx.editMessageText('🔄 Processing all received SMS messages...');
+
+      try {
+        const result = await WalletService.autoProcessReceivedSMS();
+
+        await ctx.editMessageText(
+          `📊 *SMS Processing Complete*\n\n*Total Received SMS:* ${result.total}\n*Successfully Processed:* ${result.processed}\n*Auto-Approved:* ${result.approved}\n*Matched:* ${result.matched || 0}`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('📱 SMS Menu', 'admin_sms_menu')],
+              [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+            ])
+          }
+        );
+      } catch (error) {
+        console.error('Process SMS error:', error);
+        await ctx.editMessageText(`❌ Error processing SMS: ${error.message}`);
+      }
+    });
+ this.bot.action('admin_auto_approve', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      await ctx.editMessageText('🤖 Processing auto-approval for small deposits...');
+
+      try {
+        const result = await WalletService.processAutoApproveDeposits(100);
+
+        await ctx.editMessageText(
+          `🤖 *Auto-Approval Results*\n\n*Processed:* ${result.processed} deposits\n*Approved:* ${result.approved} deposits\n\nAll deposits up to $100 have been auto-approved.`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('📱 SMS Menu', 'admin_sms_menu')],
+              [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+            ])
+          }
+        );
+      } catch (error) {
+        console.error('Auto-approve error:', error);
+        await ctx.editMessageText(`❌ Error during auto-approval: ${error.message}`);
+      }
+    });
+     // Batch approve action
+    this.bot.action('admin_batch_approve', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      try {
+        const receivedSMS = await WalletService.getReceivedSMSDeposits();
+
+        if (receivedSMS.length === 0) {
+          await ctx.editMessageText(
+            '✅ No received SMS deposits to approve.',
+            Markup.inlineKeyboard([
+              [Markup.button.callback('📱 SMS Menu', 'admin_sms_menu')]
+            ])
+          );
+          return;
+        }
+
+        const smsIds = receivedSMS.map(sms => sms._id);
+        const result = await WalletService.batchApproveSMSDeposits(smsIds, ctx.from.id);
+
+        let message = `🔄 *Batch Approval Results*\n\n`;
+        message += `✅ Successful: ${result.successful.length}\n`;
+        message += `❌ Failed: ${result.failed.length}\n`;
+
+        if (result.successful.length > 0) {
+          message += `\n*Approved Deposits:*\n`;
+          result.successful.slice(0, 5).forEach((success, index) => {
+            message += `${index + 1}. $${success.amount} - User ${success.user}\n`;
+          });
+          if (result.successful.length > 5) {
+            message += `... and ${result.successful.length - 5} more\n`;
+          }
+        }
+
+        if (result.failed.length > 0) {
+          message += `\n*Failed:*\n`;
+          result.failed.slice(0, 3).forEach((fail, index) => {
+            message += `${index + 1}. ${fail.smsDepositId} - ${fail.error}\n`;
+          });
+        }
+
+        await ctx.editMessageText(message, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('📱 SMS Menu', 'admin_sms_menu')],
+            [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+          ])
+        });
+      } catch (error) {
+        await ctx.editMessageText(`❌ Batch approval error: ${error.message}`);
+      }
+    });
+
+    // SMS Matching menu
+    this.bot.action('admin_sms_matching', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      try {
+        const [unmatchedSMS, matchedPairs] = await Promise.all([
+          WalletService.getUnmatchedSMS(),
+          WalletService.findRecentlyMatchedSMS ? WalletService.findRecentlyMatchedSMS() : Promise.resolve([])
+        ]);
+
+        const senderCount = unmatchedSMS.SENDER?.length || 0;
+        const receiverCount = unmatchedSMS.RECEIVER?.length || 0;
+        const matchedCount = matchedPairs.length || 0;
+
+        const message = `
+🔍 *SMS Matching Panel*
+
+📊 *Matching Status:*
+📤 Sender SMS Waiting: ${senderCount}
+📥 Receiver SMS Waiting: ${receiverCount}
+✅ Recently Matched: ${matchedCount}
+
+🔄 *Matching Actions:*
+        `;
+
+        await ctx.editMessageText(message, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Auto-Match All', 'admin_auto_match')],
+            [Markup.button.callback('🔍 Find Match for SMS', 'admin_find_match_menu')],
+            [Markup.button.callback('🧹 Clean Old SMS', 'admin_clean_sms')],
+            [Markup.button.callback('📱 SMS Menu', 'admin_sms_menu')],
+            [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+          ])
+        });
+      } catch (error) {
+        console.error('Error in SMS matching menu:', error);
+        await ctx.editMessageText('❌ Error loading matching panel');
+      }
+    });
+
+    // SMS Statistics
+    this.bot.action('admin_sms_stats', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      try {
+        const [allSMS, pendingSMS, approvedSMS, rejectedSMS] = await Promise.all([
+          SMSDeposit.countDocuments(),
+          SMSDeposit.countDocuments({ status: 'PENDING' }),
+          SMSDeposit.countDocuments({ status: { $in: ['APPROVED', 'AUTO_APPROVED'] } }),
+          SMSDeposit.countDocuments({ status: 'REJECTED' })
+        ]);
+
+        const message = `
+📊 *SMS Statistics*
+
+📈 *Total SMS:* ${allSMS}
+⏳ *Pending:* ${pendingSMS}
+✅ *Approved:* ${approvedSMS}
+❌ *Rejected:* ${rejectedSMS}
+
+*Status Breakdown:*
+🟢 Approved: ${Math.round((approvedSMS / allSMS) * 100) || 0}%
+🟡 Pending: ${Math.round((pendingSMS / allSMS) * 100) || 0}%
+🔴 Rejected: ${Math.round((rejectedSMS / allSMS) * 100) || 0}%
+
+*Quick Commands:*
+/smslist - View all SMS
+/matchsms - Matching status
+/processsms - Process all SMS
+        `;
+
+        await ctx.editMessageText(message, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Refresh Stats', 'admin_sms_stats')],
+            [Markup.button.callback('📱 SMS Menu', 'admin_sms_menu')],
+            [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+          ])
+        });
+      } catch (error) {
+        console.error('Error loading SMS stats:', error);
+        await ctx.editMessageText('❌ Error loading statistics');
+      }
+    });
+
+    // User Management menu
+    this.bot.action('admin_users_menu', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      const message = `
+👥 *User Management Panel*
+
+Manage users, wallets, and transactions.
+
+🔧 *User Actions:*
+        `;
+
+      await ctx.editMessageText(message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('👥 All Users', 'admin_users_list')],
+          [Markup.button.callback('💼 User Wallets', 'admin_wallets_list')],
+          [Markup.button.callback('📊 User Statistics', 'admin_users_stats')],
+          [Markup.button.callback('🔍 Search User', 'admin_search_user')],
+          [Markup.button.callback('⬅️ Back to Admin Panel', 'admin_back_to_panel')]
+        ])
+      });
+    });
+
+    // Transactions menu
+    this.bot.action('admin_transactions_menu', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      const message = `
+💳 *Transactions Panel*
+
+View and manage all transactions.
+
+🔧 *Transaction Actions:*
+        `;
+
+      await ctx.editMessageText(message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📋 All Transactions', 'admin_transactions_list')],
+          [Markup.button.callback('⏳ Pending Deposits', 'admin_pending_deposits')],
+          [Markup.button.callback('✅ Completed', 'admin_completed_transactions')],
+          [Markup.button.callback('❌ Failed', 'admin_failed_transactions')],
+          [Markup.button.callback('⬅️ Back to Admin Panel', 'admin_back_to_panel')]
+        ])
+      });
+    });
+
+    // Pending deposits list
+    this.bot.action('admin_pending_deposits', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      try {
+        const pendingDeposits = await WalletService.getPendingDeposits();
+
+        let message = `⏳ *Pending Deposits*\n\n`;
+
+        if (pendingDeposits.length === 0) {
+          message += `✅ No pending deposits. All clear!\n`;
+        } else {
+          pendingDeposits.forEach((deposit, index) => {
+            const userName = deposit.userId?.firstName || deposit.userId?.username || 'Unknown User';
+            const telegramId = deposit.userId?.telegramId || 'N/A';
+            const paymentMethod = deposit.metadata?.paymentMethod || 'Unknown';
+
+            message += `━━━━━━━━━━━━━━━━━━\n`;
+            message += `#${index + 1}\n`;
+            message += `👤 User: ${userName}\n`;
+            message += `📞 ID: ${telegramId}\n`;
+            message += `💰 Amount: $${deposit.amount}\n`;
+            message += `🏦 Method: ${paymentMethod}\n`;
+            message += `⏰ Time: ${new Date(deposit.createdAt).toLocaleString()}\n\n`;
+
+            message += `🔧 Actions:\n`;
+            message += `   • [Approve: /approve_${deposit._id}]\n`;
+            message += `   • [View User: /user_${telegramId}]\n\n`;
+          });
+        }
+
+        await ctx.editMessageText(message, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Refresh List', 'admin_pending_deposits')],
+            [Markup.button.callback('💳 Transactions Menu', 'admin_transactions_menu')],
+            [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+          ])
+        });
+      } catch (error) {
+        console.error('Error loading pending deposits:', error);
+        await ctx.editMessageText('❌ Error loading pending deposits');
+      }
+    });
+
+    // System Tools menu
+    this.bot.action('admin_tools_menu', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      const message = `
+🔧 *System Tools Panel*
+
+Maintenance and diagnostic tools.
+
+🛠️ *System Tools:*
+        `;
+
+      await ctx.editMessageText(message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('📊 System Stats', 'admin_system_stats')],
+          [Markup.button.callback('🔄 Clear Cache', 'admin_clear_cache')],
+          [Markup.button.callback('📝 View Logs', 'admin_view_logs')],
+          [Markup.button.callback('⚙️ Bot Status', 'admin_bot_status')],
+          [Markup.button.callback('⬅️ Back to Admin Panel', 'admin_back_to_panel')]
+        ])
+      });
+    });
+
+    // Bot Status
+    this.bot.action('admin_bot_status', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      const memoryUsage = process.memoryUsage();
+      const uptime = process.uptime();
+
+      const message = `
+🤖 *Bot Status Panel*
+
+*Bot Information:*
+• Status: ${this.isRunning ? '✅ Running' : '❌ Stopped'}
+• Uptime: ${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m
+• Admin ID: ${this.adminId}
+
+*System Resources:*
+• Memory: ${Math.round(memoryUsage.heapUsed / 1024 / 1024)}MB / ${Math.round(memoryUsage.heapTotal / 1024 / 1024)}MB
+• RSS: ${Math.round(memoryUsage.rss / 1024 / 1024)}MB
+• Platform: ${process.platform}
+
+*Quick Commands:*
+/start - Start bot (if stopped)
+/stats - System statistics
+/admin - Admin panel
+        `;
+
+      await ctx.editMessageText(message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔄 Refresh Status', 'admin_bot_status')],
+          [Markup.button.callback('🔧 Tools Menu', 'admin_tools_menu')],
+          [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+        ])
+      });
+    });
+
+    // Help menu for admin
+    this.bot.action('admin_help_menu', async (ctx) => {
+      if (ctx.from.id.toString() !== this.adminId) {
+        await ctx.answerCbQuery('❌ Access denied');
+        return;
+      }
+
+      const message = `
+📖 *Admin Help & Commands*
+
+*Quick Admin Commands:*
+/admin - Open admin panel
+/smslist [page] - View all SMS deposits
+/viewsms_[id] - View SMS details
+/approvesms_[id] - Approve SMS deposit
+/rejectsms_[id] - Reject SMS deposit
+/pending - View pending deposits
+/autoapprove - Auto-approve small deposits
+/processsms - Process all received SMS
+/matchsms - SMS matching status
+
+*Button Navigation:*
+👑 ADMIN PANEL - Main admin menu
+📱 SMS Menu - Manage SMS deposits
+👥 Users - User management
+💳 Transactions - Transaction management
+🔧 Tools - System tools
+📖 Help - This menu
+
+*Need Help?*
+Contact developer for technical issues.
+        `;
+
+      await ctx.editMessageText(message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('👑 Admin Panel', 'admin_back_to_panel')],
+          [Markup.button.callback('📱 Try SMS Menu', 'admin_sms_menu')],
+          [Markup.button.callback('👥 Try Users Menu', 'admin_users_menu')]
+        ])
+      });
+    });
+
+    // ========== HELPER METHOD FOR ADMIN PANEL ==========
+
+ 
     this.bot.command('processsms', async (ctx) => {
       if (ctx.from.id.toString() !== this.adminId) {
         await ctx.reply('❌ Access denied');
@@ -1490,6 +1992,82 @@ Keep playing to improve your stats! 🎯
 
     return isBankSMS || (hasAmount && hasTransactionWords && reasonableLength);
   }
+     async showAdminPanel(ctx) {
+      try {
+        console.log('✅ Admin access granted, loading admin panel...');
+
+        const [pendingDeposits, pendingSMS, systemStats] = await Promise.all([
+          WalletService.getPendingDeposits().catch(() => []),
+          WalletService.getPendingSMSDeposits(5).catch(() => []),
+          this.getSystemStats().catch(() => ({ users: 0, transactions: 0, deposits: 0 }))
+        ]);
+
+        const message = `
+👑 *ADMIN PANEL*
+
+📊 *Quick Overview:*
+• ⏳ Pending Deposits: ${pendingDeposits.length}
+• 📱 Pending SMS: ${pendingSMS.length}
+• 👥 Total Users: ${systemStats.users}
+• 💰 Total Deposits: ${systemStats.deposits}
+
+🏠 *Main Sections:*
+        `;
+
+        await ctx.editMessageText(message, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            // First row: Main categories
+            [
+              Markup.button.callback('📱 SMS', 'admin_sms_menu'),
+              Markup.button.callback('👥 Users', 'admin_users_menu')
+            ],
+            [
+              Markup.button.callback('💳 Transactions', 'admin_transactions_menu'),
+              Markup.button.callback('🔧 Tools', 'admin_tools_menu')
+            ],
+            // Second row: Quick actions
+            [
+              Markup.button.callback('⏳ Pending', 'admin_pending_deposits'),
+              Markup.button.callback('🤖 Auto-Approve', 'admin_auto_approve')
+            ],
+            // Third row: Info and back
+            [
+              Markup.button.callback('📖 Help', 'admin_help_menu'),
+              Markup.button.callback('🤖 Status', 'admin_bot_status')
+            ],
+            [
+              Markup.button.callback('⬅️ Back to Main', 'back_to_start')
+            ]
+          ])
+        });
+
+        console.log('✅ Admin panel loaded successfully');
+
+      } catch (error) {
+        console.error('❌ Admin panel error:', error);
+        await ctx.reply('❌ Error loading admin panel: ' + error.message);
+      }
+    }
+
+     async getSystemStats() {
+      try {
+        // You'll need to implement these methods in your services
+        const userCount = await UserService.getUserCount ? await UserService.getUserCount() : 0;
+        const transactionCount = await WalletService.getTransactionCount ? await WalletService.getTransactionCount() : 0;
+        const depositCount = await WalletService.getDepositCount ? await WalletService.getDepositCount() : 0;
+        
+        return {
+          users: userCount,
+          transactions: transactionCount,
+          deposits: depositCount
+        };
+      } catch (error) {
+        console.error('Error getting system stats:', error);
+        return { users: 0, transactions: 0, deposits: 0 };
+      }
+    }
+
 
   async notifyAdminAboutDeposit(smsDeposit, user) {
     try {
