@@ -516,8 +516,33 @@ static async endGameDueToNoWinner(gameId) {
     
     const game = await Game.findById(gameId);
     
-    if (!game || game.status !== 'ACTIVE') {
-      console.log(`⚠️ Game ${gameId} is not active (status: ${game?.status})`);
+    if (!game) {
+      console.log(`⚠️ Game ${gameId} not found`);
+      return;
+    }
+
+    // CRITICAL CHECK: If game already has a winner, DO NOT process as NO_WINNER
+    if (game.winnerId) {
+      console.log(`✅ Game ${game.code} already has a winner ${game.winnerId}. Setting status to FINISHED instead of NO_WINNER.`);
+      
+      // Update game to FINISHED state if it's not already
+      if (game.status !== 'FINISHED') {
+        game.status = 'FINISHED';
+        game.endedAt = game.endedAt || new Date();
+        await game.save();
+        console.log(`✅ Updated game ${game.code} to FINISHED status`);
+      }
+      
+      this.winnerDeclared.add(gameId.toString());
+      this.stopAutoNumberCalling(gameId);
+      
+      // Set countdown for next game
+      await this.setNextGameCountdown(gameId);
+      return;
+    }
+
+    if (game.status !== 'ACTIVE') {
+      console.log(`⚠️ Game ${gameId} is not active (status: ${game.status})`);
       return;
     }
 
@@ -548,8 +573,32 @@ static async endGameDueToNoWinner(gameId) {
       // IMPORTANT: Re-fetch the game within the transaction WITH lock
       const gameInSession = await Game.findById(gameId).session(session);
       
-      if (!gameInSession || gameInSession.status !== 'ACTIVE') {
-        console.log(`⚠️ Game ${gameId} no longer active, aborting`);
+      if (!gameInSession) {
+        console.log(`⚠️ Game ${gameId} not found in session`);
+        await session.abortTransaction();
+        return;
+      }
+
+      // DOUBLE CRITICAL CHECK: Verify no winner exists within transaction
+      if (gameInSession.winnerId) {
+        console.log(`✅ Game ${gameInSession.code} has winner ${gameInSession.winnerId} in transaction. Setting to FINISHED.`);
+        
+        if (gameInSession.status !== 'FINISHED') {
+          gameInSession.status = 'FINISHED';
+          gameInSession.endedAt = gameInSession.endedAt || new Date();
+          await gameInSession.save({ session });
+        }
+        
+        await session.commitTransaction();
+        
+        this.winnerDeclared.add(gameId.toString());
+        this.stopAutoNumberCalling(gameId);
+        await this.setNextGameCountdown(gameId);
+        return;
+      }
+
+      if (gameInSession.status !== 'ACTIVE') {
+        console.log(`⚠️ Game ${gameId} no longer active (status: ${gameInSession.status}), aborting`);
         await session.abortTransaction();
         return;
       }
@@ -573,7 +622,7 @@ static async endGameDueToNoWinner(gameId) {
         // Update game status if needed
         if (gameInSession.status !== 'NO_WINNER') {
           gameInSession.status = 'NO_WINNER';
-          gameInSession.endedAt = new Date();
+          gameInSession.endedAt = gameInSession.endedAt || new Date();
           await gameInSession.save({ session });
         }
         
@@ -583,6 +632,29 @@ static async endGameDueToNoWinner(gameId) {
 
       const bingoCards = await BingoCard.find({ gameId: gameInSession._id }).session(session);
       
+      // Check if any card is marked as winner
+      const winningCard = await BingoCard.findOne({ 
+        gameId: gameInSession._id, 
+        isWinner: true 
+      }).session(session);
+      
+      if (winningCard) {
+        console.log(`✅ Found winning card for game ${gameInSession.code} (Card #${winningCard.cardNumber}). Game should be FINISHED, not NO_WINNER.`);
+        
+        // Update game to FINISHED state with winner
+        gameInSession.status = 'FINISHED';
+        gameInSession.winnerId = winningCard.userId;
+        gameInSession.endedAt = gameInSession.endedAt || new Date();
+        await gameInSession.save({ session });
+        
+        await session.commitTransaction();
+        
+        this.winnerDeclared.add(gameId.toString());
+        this.stopAutoNumberCalling(gameId);
+        await this.setNextGameCountdown(gameId);
+        return;
+      }
+
       console.log(`💰 Processing refunds for ${bingoCards.length} cards...`);
       
       const entryFee = 10;
@@ -782,11 +854,17 @@ static async setNextGameCountdown(gameId) {
 
     const now = new Date();
     
-    // Set game to COOLDOWN state with 30 second timer
-    game.status = 'NO_WINNER';
-    game.cooldownEndTime = new Date(now.getTime() + this.NEXT_GAME_COUNTDOWN);
-    await game.save({ session });
+    // If game is FINISHED (has winner), don't set to NO_WINNER
+    if (game.status === 'FINISHED' && game.winnerId) {
+      console.log(`✅ Game ${game.code} already FINISHED with winner ${game.winnerId}. Setting cooldown.`);
+      game.cooldownEndTime = new Date(now.getTime() + this.NEXT_GAME_COUNTDOWN);
+    } else {
+      // For NO_WINNER games, ensure they're marked correctly
+      game.status = 'NO_WINNER';
+      game.cooldownEndTime = new Date(now.getTime() + this.NEXT_GAME_COUNTDOWN);
+    }
     
+    await game.save({ session });
     await session.commitTransaction();
     
     console.log(`⏰ Next game countdown set for game ${game.code}. New game starts in ${this.NEXT_GAME_COUNTDOWN/1000} seconds`);
