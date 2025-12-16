@@ -33,10 +33,13 @@ class BotController {
 
   setupHandlers() {
     // Start command - ensures user is created
-    this.bot.start(async (ctx) => {
+     this.bot.start(async (ctx) => {
       try {
         console.log('🚀 Start command received from:', ctx.from.id, ctx.from.first_name);
 
+        // Check if user is admin - FIXED: ADD THIS LINE
+        const isAdmin = ctx.from.id.toString() === this.adminId;
+        
         const user = await UserService.findOrCreateUser(ctx.from);
         console.log('✅ User processed:', user.telegramId, user._id);
 
@@ -56,7 +59,7 @@ class BotController {
           }
         }
 
-        const welcomeMessage = `
+        let welcomeMessage = `
 🎯 *Welcome to Bingo Bot, ${user.firstName || user.username}!*
 
 *Your Wallet Balance:* $${balance}
@@ -72,9 +75,10 @@ class BotController {
 
         // Add admin badge if user is admin
         if (isAdmin) {
-          welcomeMessage = `👑 *ADMIN PANEL*\n\n${welcomeMessage}`;
+          welcomeMessage = `👑 *ADMIN MODE*\n\n${welcomeMessage}`;
         }
 
+        // ALL BUTTONS FOR REGULAR USERS
         const keyboardButtons = [
           [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
           [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
@@ -82,8 +86,9 @@ class BotController {
           [Markup.button.callback('💼 My Wallet', 'show_wallet')]
         ];
 
-        // Add Admin Panel button for admin users
+        // Add Admin Panel button ONLY for admin users - KEEP OTHER BUTTONS
         if (isAdmin) {
+          // Add Admin Panel as the first button, keep all other buttons
           keyboardButtons.unshift([Markup.button.callback('👑 ADMIN PANEL', 'admin_panel')]);
         }
 
@@ -106,7 +111,9 @@ class BotController {
 
 
     // Help command
-    this.bot.help(async (ctx) => {
+      this.bot.help(async (ctx) => {
+      const isAdmin = ctx.from.id.toString() === this.adminId;
+      
       const helpMessage = `
 🤖 *Bingo Bot Commands*
 
@@ -124,17 +131,24 @@ class BotController {
 💼 My Wallet - Check balance & transactions
 
 *Deposit Methods:*
-🏦 Banks: CBE, Awash, Dashen
-📱 Mobile Money: CBE Birr, Telebirr
+🏦 Banks: CBE, BOA
+📱 Mobile Money: Telebirr
       `;
 
+      const helpButtons = [
+        [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+        [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
+        [Markup.button.callback('💼 My Wallet', 'show_wallet')],
+        [Markup.button.callback('📊 My Stats', 'show_stats')]
+      ];
+
+      // Add admin help button if user is admin
+      if (isAdmin) {
+        helpButtons.unshift([Markup.button.callback('👑 Admin Help', 'admin_help_menu')]);
+      }
+
       await ctx.replyWithMarkdown(helpMessage,
-        Markup.inlineKeyboard([
-          [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
-          [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
-          [Markup.button.callback('💼 My Wallet', 'show_wallet')],
-          [Markup.button.callback('📊 My Stats', 'show_stats')]
-        ])
+        Markup.inlineKeyboard(helpButtons)
       );
     });
 
@@ -1322,13 +1336,15 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 
     // ========== ACTION HANDLERS ==========
 
-    this.bot.action('show_deposit', async (ctx) => {
+  this.bot.action('show_deposit', async (ctx) => {
+      const isAdmin = ctx.from.id.toString() === this.adminId;
+      
       const depositMessage = `
 💳 *Deposit Money to Your Wallet*
 
 *Supported Methods:*
-🏦 *Banks:* CBE, Awash, Dashen
-📱 *Mobile Money:* CBE Birr, Telebirr
+🏦 *Banks:* CBE, BOA
+📱 *Mobile Money:* Telebirr
 
 *How to Deposit:*
 1. Select payment method below
@@ -1339,25 +1355,31 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
 *Minimum Deposit:* $1 (≈ 50 ETB)
       `;
 
+      const depositButtons = [
+        [Markup.button.callback('🏦 CBE Bank', 'deposit_cbe')],
+        [Markup.button.callback('🏦 Bank of Abysinia', 'deposit_boa')],
+        [Markup.button.callback('📱 Telebirr', 'deposit_telebirr')],
+        [Markup.button.callback('⬅️ Back', 'back_to_start')]
+      ];
+
+      // Add admin button if user is admin
+      if (isAdmin) {
+        depositButtons.unshift([Markup.button.callback('👑 Admin Panel', 'admin_panel')]);
+      }
+
       await ctx.editMessageText(depositMessage, {
         parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('🏦 CBE Bank', 'deposit_cbe')],
-          [Markup.button.callback('🏦 Bank of Abysinia', 'deposit_boa')],
-          // [Markup.button.callback('🏦 Dashen Bank', 'deposit_dashen')],
-          // [Markup.button.callback('📱 CBE Birr', 'deposit_cbebirr')],
-          [Markup.button.callback('📱 Telebirr', 'deposit_telebirr')],
-          [Markup.button.callback('⬅️ Back', 'back_to_start')]
-        ])
+        ...Markup.inlineKeyboard(depositButtons)
       });
     });
 
+
     this.bot.action(/deposit_(.+)/, async (ctx) => {
+      const isAdmin = ctx.from.id.toString() === this.adminId;
+      
       const methodMap = {
         'cbe': 'CBE Bank',
         'boa': 'Bank of Abysinia',
-        // 'dashen': 'Dashen Bank',
-        // 'cbebirr': 'CBE Birr',
         'telebirr': 'Telebirr'
       };
 
@@ -1377,14 +1399,6 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
             account: '145633257',
             instructions: 'Send money to Bank of Abysinia account 145633257'
           },
-          // 'Dashen Bank': {
-          //   account: '3000400050006000',
-          //   instructions: 'Send money to Dashen Bank account 3000400050006000'
-          // },
-          // 'CBE Birr': {
-          //   account: '0911000000',
-          //   instructions: 'Send money to CBE Birr 0911000000 via CBE Birr app'
-          // },
           'Telebirr': {
             account: '0968546687',
             instructions: 'Send money to Telebirr 0968546687 via Telebirr app'
@@ -1411,12 +1425,19 @@ ${method.instructions}
 ⚠️ *Only send from your registered accounts*
         `;
 
+        const methodButtons = [
+          [Markup.button.callback('📤 I have sent money', 'waiting_sms')],
+          [Markup.button.callback('⬅️ Back to Methods', 'show_deposit')]
+        ];
+
+        // Add admin button if user is admin
+        if (isAdmin) {
+          methodButtons.unshift([Markup.button.callback('👑 Admin Panel', 'admin_panel')]);
+        }
+
         await ctx.editMessageText(message, {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback('📤 I have sent money', 'waiting_sms')],
-            [Markup.button.callback('⬅️ Back to Methods', 'show_deposit')]
-          ])
+          ...Markup.inlineKeyboard(methodButtons)
         });
       }
     });
