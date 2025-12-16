@@ -18,7 +18,7 @@ const smsDepositSchema = new mongoose.Schema({
   paymentMethod: {
     type: String,
     required: true,
-    enum: ['CBE Bank', 'Bank of Abysinia', 'Dashen Bank', 'CBE Birr', 'Telebirr', 'UNKNOWN'],
+    enum: ['CBE Bank', 'Awash Bank', 'Dashen Bank', 'CBE Birr', 'Telebirr', 'UNKNOWN'],
     default: 'UNKNOWN'
   },
   extractedAmount: {

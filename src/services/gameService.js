@@ -28,12 +28,12 @@ class GameService {
   
 static async getMainGame() {
   try {
-    // Get the current active game (excluding archived)
-    let game = await Game.findOne({
+    // FIRST: Check if there's already an active game
+    const activeGame = await Game.findOne({
       status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
       archived: { $ne: true }
     })
-    .sort({ createdAt: -1 }) // Get most recent
+    .sort({ createdAt: -1 })
     .populate('winnerId', 'username firstName')
     .populate({
       path: 'players',
@@ -43,52 +43,77 @@ static async getMainGame() {
       }
     });
     
-    // If we found a game in active, waiting, or card selection state
-    if (game) {
+    // If we have an active/waiting/card selection game, RETURN IT IMMEDIATELY
+    // DO NOT create a new game while one exists
+    if (activeGame) {
+      console.log(`🎮 Found existing game: ${activeGame.code} (Status: ${activeGame.status})`);
+      
       // Check if active game has all 75 numbers but still ACTIVE
-      if (game.status === 'ACTIVE' && game.numbersCalled && game.numbersCalled.length >= 75) {
-        console.log(`⚠️ Game ${game.code} has all 75 numbers but still ACTIVE. Forcing end...`);
-        await this.endGameDueToNoWinner(game._id);
+      if (activeGame.status === 'ACTIVE' && activeGame.numbersCalled && activeGame.numbersCalled.length >= 75) {
+        console.log(`⚠️ Game ${activeGame.code} has all 75 numbers but still ACTIVE. Forcing end...`);
+        await this.endGameDueToNoWinner(activeGame._id);
         
-        // Re-fetch the game
-        game = await Game.findById(game._id).populate('winnerId').populate({
+        // Get the updated game after ending
+        const updatedGame = await Game.findById(activeGame._id).populate('winnerId').populate({
           path: 'players',
           populate: { path: 'userId' }
         });
+        
+        // If game is now finished, continue to check for new game
+        if (updatedGame && (updatedGame.status === 'FINISHED' || updatedGame.status === 'NO_WINNER')) {
+          console.log(`✅ Game ${updatedGame.code} is now finished. Will create new game...`);
+        } else {
+          // Game is still active/waiting, return it
+          return this.formatGameForFrontend(updatedGame || activeGame);
+        }
+      } else {
+        // Game is valid and active/waiting, return it
+        if (activeGame.status === 'ACTIVE' && !this.activeIntervals.has(activeGame._id.toString())) {
+          console.log(`🔄 Restarting auto-calling for active game ${activeGame.code}`);
+          this.startAutoNumberCalling(activeGame._id);
+        }
+        return this.formatGameForFrontend(activeGame);
       }
-      
-      // If game is ACTIVE but no auto-calling, restart it
-      if (game.status === 'ACTIVE' && !this.activeIntervals.has(game._id.toString())) {
-        console.log(`🔄 Restarting auto-calling for active game ${game.code}`);
-        this.startAutoNumberCalling(game._id);
-      }
-      
-      // Manage game lifecycle
-      await this.manageGameLifecycle();
-      
-      return this.formatGameForFrontend(game);
     }
     
     // ==================== NO ACTIVE/WAITING/CARD_SELECTION GAME FOUND ====================
+    // Only create a new game if NO active/waiting games exist
+    
+    console.log('📭 No active/waiting games found. Checking for finished games to create new one...');
+    
     // Check for COOLDOWN games that need new game creation
-    const cooldownGames = await Game.find({
-      status: 'NO_WINNER',
+    const cooldownGame = await Game.findOne({
+      status: { $in: ['FINISHED', 'NO_WINNER', 'COOLDOWN'] },
       cooldownEndTime: { $lte: new Date() },
       archived: { $ne: true }
     }).sort({ createdAt: -1 });
     
-    if (cooldownGames.length > 0) {
-      // Create new game from the most recent cooldown game
-      console.log(`🔄 Creating new game from expired cooldown game`);
-      game = await this.createNewGameAfterCooldown(cooldownGames[0]._id);
-    } else {
-      // Create a brand new game ONLY if no active/waiting/card selection game exists
-      console.log('🎮 No active, waiting, or card selection games found. Creating new game...');
-      game = await this.createNewGame();
-    }
+    let game;
     
-    // Manage game lifecycle for the new game
-    await this.manageGameLifecycle();
+    if (cooldownGame) {
+      // Create new game from expired cooldown game
+      console.log(`🔄 Creating new game from expired game ${cooldownGame.code}`);
+      game = await this.createNewGameAfterCooldown(cooldownGame._id);
+    } else {
+      // Create a brand new game ONLY if truly no game exists
+      const allGamesCount = await Game.countDocuments({
+        archived: { $ne: true },
+        status: { $nin: ['FINISHED', 'NO_WINNER', 'CANCELLED'] }
+      });
+      
+      if (allGamesCount === 0) {
+        console.log('🎮 Creating brand new game...');
+        game = await this.createNewGame();
+      } else {
+        // There are some games that aren't finished yet, find the most recent one
+        const mostRecentGame = await Game.findOne({
+          archived: { $ne: true }
+        }).sort({ createdAt: -1 });
+        
+        console.log(`⚠️ Found existing game ${mostRecentGame.code} (Status: ${mostRecentGame.status}), returning it instead of creating new.`);
+        return this.formatGameForFrontend(mostRecentGame);
+      }
+    }
     
     return this.formatGameForFrontend(game);
     
@@ -97,7 +122,6 @@ static async getMainGame() {
     throw error;
   }
 }
-  
  static async manageGameLifecycle() {
   try {
     const now = new Date();
@@ -151,36 +175,47 @@ static async getMainGame() {
   }
 }
 
-  static async createNewGame() {
-    try {
-      const gameCode = GameUtils.generateGameCode();
-      const now = new Date();
-      
-      const game = new Game({
-        code: gameCode,
-        maxPlayers: 10,
-        isPrivate: false,
-        numbersCalled: [],
-        status: 'WAITING_FOR_PLAYERS',
-        currentPlayers: 0,
-        isAutoCreated: true,
-        autoStartEndTime: new Date(now.getTime() + this.AUTO_START_DELAY)
-      });
-
-      await game.save();
-      console.log(`🎯 Created new game: ${gameCode} - Waiting for players`);
-      
-      // Schedule auto-start check
-      setTimeout(() => {
-        this.scheduleAutoStartCheck(game._id);
-      }, this.AUTO_START_DELAY);
-      
-      return this.getGameWithDetails(game._id);
-    } catch (error) {
-      console.error('❌ Error creating new game:', error);
-      throw error;
+ static async createNewGame() {
+  try {
+    // CRITICAL: Double-check that no active/waiting games exist
+    const existingActiveGame = await Game.findOne({
+      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+      archived: { $ne: true }
+    });
+    
+    if (existingActiveGame) {
+      console.log(`❌ Cannot create new game: Game ${existingActiveGame.code} already exists (Status: ${existingActiveGame.status})`);
+      throw new Error(`Cannot create new game while game ${existingActiveGame.code} is ${existingActiveGame.status}`);
     }
+    
+    const gameCode = GameUtils.generateGameCode();
+    const now = new Date();
+    
+    const game = new Game({
+      code: gameCode,
+      maxPlayers: 10,
+      isPrivate: false,
+      numbersCalled: [],
+      status: 'WAITING_FOR_PLAYERS',
+      currentPlayers: 0,
+      isAutoCreated: true,
+      autoStartEndTime: new Date(now.getTime() + this.AUTO_START_DELAY)
+    });
+
+    await game.save();
+    console.log(`🎯 Created new game: ${gameCode} - Waiting for players`);
+    
+    // Schedule auto-start check
+    setTimeout(() => {
+      this.scheduleAutoStartCheck(game._id);
+    }, this.AUTO_START_DELAY);
+    
+    return this.getGameWithDetails(game._id);
+  } catch (error) {
+    console.error('❌ Error creating new game:', error);
+    throw error;
   }
+}
   
   static async beginCardSelection(gameId) {
     const session = await mongoose.startSession();
@@ -1278,8 +1313,8 @@ static async processEntryFees(gameId) {
   //
 static async getActiveGames() {
   try {
-    // Check if we have any active game in the database
-    let activeGame = await Game.findOne({
+    // STRICT: Only return ONE active game
+    const activeGame = await Game.findOne({
       status: 'ACTIVE',
       archived: { $ne: true }
     })
@@ -1293,102 +1328,27 @@ static async getActiveGames() {
       }
     });
 
-    console.log(`🔍 Initial active game check: ${activeGame ? activeGame.code : 'No active game found'}`);
-    
-    // If we found an active game in database
-    if (activeGame) {
-      // Check if active game has all 75 numbers but still ACTIVE
-      if (activeGame.numbersCalled && activeGame.numbersCalled.length >= 75) {
-        console.log(`⚠️ Game ${activeGame.code} has all 75 numbers but still ACTIVE. Forcing end...`);
-        await this.endGameDueToNoWinner(activeGame._id);
-        
-        // Re-fetch the game after ending it
-        activeGame = await Game.findById(activeGame._id).populate('winnerId').populate({
-          path: 'players',
-          populate: { path: 'userId' }
-        });
-        
-        // If game is now not ACTIVE, return empty array
-        if (!activeGame || activeGame.status !== 'ACTIVE') {
-          console.log(`✅ Game ${activeGame?.code} is no longer ACTIVE`);
-          return [];
-        }
-      }
-      
-      // If game is ACTIVE but no auto-calling, restart it
-      if (activeGame.status === 'ACTIVE' && !this.activeIntervals.has(activeGame._id.toString())) {
-        console.log(`🔄 Restarting auto-calling for active game ${activeGame.code}`);
-        this.startAutoNumberCalling(activeGame._id);
-      }
-      
-      // Format and return the active game
-      const formattedGame = await this.formatGameForFrontend(activeGame);
-      console.log(`✅ Returning active game: ${formattedGame.code} with ${formattedGame.numbersCalled?.length || 0} numbers called`);
-      return [formattedGame];
+    if (!activeGame) {
+      console.log('❌ No active games found');
+      return [];
     }
     
-    // ==================== NO ACTIVE GAME FOUND ====================
-    // Check if there are any games that should be active but aren't
-    // This could happen if server restarted and lost in-memory state
-    
-    // Check for games in CARD_SELECTION that should have started
-    const cardSelectionGame = await Game.findOne({
-      status: 'CARD_SELECTION',
-      archived: { $ne: true },
-      cardSelectionEndTime: { $lte: new Date() }
-    }).sort({ createdAt: -1 });
-    
-    if (cardSelectionGame) {
-      console.log(`🔄 Card selection ended for game ${cardSelectionGame.code}, checking if it should start...`);
-      
-      const playersWithCards = await BingoCard.countDocuments({ gameId: cardSelectionGame._id });
-      
-      if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
-        console.log(`✅ Starting game ${cardSelectionGame.code} with ${playersWithCards} players`);
-        await this.startGame(cardSelectionGame._id);
-        
-        // Get the newly started game
-        activeGame = await Game.findById(cardSelectionGame._id)
-          .populate('winnerId', 'username firstName')
-          .populate({
-            path: 'players',
-            populate: {
-              path: 'userId',
-              select: 'username firstName telegramId'
-            }
-          });
-        
-        if (activeGame && activeGame.status === 'ACTIVE') {
-          this.startAutoNumberCalling(activeGame._id);
-          const formattedGame = await this.formatGameForFrontend(activeGame);
-          return [formattedGame];
-        }
-      }
+    // Validate the active game
+    if (activeGame.numbersCalled && activeGame.numbersCalled.length >= 75) {
+      console.log(`⚠️ Game ${activeGame.code} has all 75 numbers but still ACTIVE. Forcing end...`);
+      await this.endGameDueToNoWinner(activeGame._id);
+      return [];
     }
     
-    // Check if there's an active game in our intervals but not in database (shouldn't happen, but just in case)
-    for (const [gameId] of this.activeIntervals) {
-      if (mongoose.Types.ObjectId.isValid(gameId)) {
-        const game = await Game.findById(gameId)
-          .populate('winnerId', 'username firstName')
-          .populate({
-            path: 'players',
-            populate: {
-              path: 'userId',
-              select: 'username firstName telegramId'
-            }
-          });
-        
-        if (game && game.status === 'ACTIVE') {
-          console.log(`🔄 Found active game ${game.code} from intervals cache`);
-          const formattedGame = await this.formatGameForFrontend(game);
-          return [formattedGame];
-        }
-      }
+    // Ensure auto-calling is running
+    if (!this.activeIntervals.has(activeGame._id.toString())) {
+      console.log(`🔄 Restarting auto-calling for active game ${activeGame.code}`);
+      this.startAutoNumberCalling(activeGame._id);
     }
     
-    console.log(`❌ No active games found at this time`);
-    return [];
+    const formattedGame = await this.formatGameForFrontend(activeGame);
+    console.log(`✅ Returning active game: ${formattedGame.code}`);
+    return [formattedGame];
     
   } catch (error) {
     console.error('❌ Error in getActiveGames:', error);
