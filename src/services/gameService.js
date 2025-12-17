@@ -1757,8 +1757,10 @@ static async formatGameForFrontend(game) {
       
     case 'CARD_SELECTION':
       gameObj.message = 'Select your bingo card!';
-      if (gameObj.cardSelectionEndTime && gameObj.cardSelectionEndTime > now) {
-        gameObj.cardSelectionTimeRemaining = gameObj.cardSelectionEndTime - now;
+      if (gameObj.cardSelectionEndTime) {
+        gameObj.cardSelectionTimeRemaining = Math.max(0, gameObj.cardSelectionEndTime - now);
+        gameObj.cardSelectionTotalDuration = this.CARD_SELECTION_DURATION;
+        gameObj.hasCardSelectionTimer = true;
       }
       break;
       
