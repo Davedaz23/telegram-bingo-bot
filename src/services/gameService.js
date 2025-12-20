@@ -1046,7 +1046,7 @@ static async processEntryFees(gameId) {
     const reconciliation = new Reconciliation({
       gameId: game._id,
       status: 'DEDUCTED',
-      totalPot: 0, // Will calculate based on unique users
+      totalPot: 0,
       platformFee: 0,
       winnerAmount: 0,
       debitTotal: 0,
@@ -1057,73 +1057,92 @@ static async processEntryFees(gameId) {
     const usersDeducted = new Set();
     let totalUniquePlayers = 0;
     
-    // Deduct entry fees - ONLY ONCE PER USER
+    // FIXED: Group cards by user first
+    const userCardsMap = new Map();
+    
+    // Group all cards by user
     for (const card of bingoCards) {
       const user = await User.findById(card.userId).session(session);
       
       if (user && user.telegramId) {
-        // Check if this user has already been deducted
-        if (usersDeducted.has(user.telegramId)) {
-          console.log(`ℹ️ User ${user.telegramId} already deducted, skipping additional card ${card.cardNumber}`);
-          continue;
-        }
-        
-        // Check if payment was already made
-        const existingPayment = await Transaction.findOne({
-          userId: card.userId,
-          gameId: gameId,
-          type: 'GAME_ENTRY',
-          status: 'COMPLETED'
-        }).session(session);
-        
-        if (existingPayment) {
-          console.log(`✅ User ${user.telegramId} already paid for game ${game.code}`);
-          
-          reconciliation.transactions.push({
-            userId: card.userId,
-            type: 'ENTRY_FEE',
-            amount: -entryFee,
-            status: 'COMPLETED',
-            transactionId: existingPayment._id,
-            alreadyPaid: true
-          });
-          
-          usersDeducted.add(user.telegramId);
-          totalUniquePlayers++;
-          continue;
-        }
-        
-        try {
-          const result = await WalletService.deductGameEntry(
-            user.telegramId,
-            gameId,
-            entryFee,
-            `Entry fee for game ${game.code} (User ID: ${user.telegramId})`
-          );
-          
-          reconciliation.transactions.push({
-            userId: card.userId,
-            type: 'ENTRY_FEE',
-            amount: -entryFee,
-            status: 'COMPLETED',
-            transactionId: result.transaction._id,
-            alreadyPaid: false
-          });
-          
-          usersDeducted.add(user.telegramId);
-          totalUniquePlayers++;
-          
-          console.log(`✅ Deducted $${entryFee} from ${user.telegramId} for game ${game.code}`);
-        } catch (error) {
-          console.error(`❌ Failed to deduct from user ${user.telegramId}:`, error.message);
-          reconciliation.transactions.push({
-            userId: card.userId,
-            type: 'ENTRY_FEE',
-            amount: -entryFee,
-            status: 'FAILED',
-            error: error.message
+        const userId = user.telegramId.toString();
+        if (!userCardsMap.has(userId)) {
+          userCardsMap.set(userId, {
+            user: user,
+            cards: [],
+            totalCards: 0
           });
         }
+        
+        const userData = userCardsMap.get(userId);
+        userData.cards.push(card.cardNumber);
+        userData.totalCards++;
+      }
+    }
+
+    // Process each user (only deduct once per user per game)
+    for (const [telegramId, userData] of userCardsMap.entries()) {
+      const user = userData.user;
+      
+      // Check if this user has already been deducted for this game
+      const alreadyDeducted = await Transaction.findOne({
+        userId: user._id,
+        gameId: gameId,
+        type: 'GAME_ENTRY',
+        status: 'COMPLETED'
+      }).session(session);
+      
+      if (alreadyDeducted) {
+        console.log(`✅ User ${telegramId} already paid for game ${game.code}`);
+        
+        reconciliation.transactions.push({
+          userId: user._id,
+          type: 'ENTRY_FEE',
+          amount: -entryFee,
+          status: 'ALREADY_PAID',
+          transactionId: alreadyDeducted._id,
+          alreadyPaid: true,
+          cardNumbers: userData.cards
+        });
+        
+        usersDeducted.add(telegramId);
+        totalUniquePlayers++;
+        continue;
+      }
+      
+      try {
+        // Deduct only ONCE per user regardless of number of cards
+        const result = await WalletService.deductGameEntry(
+          user.telegramId,
+          gameId,
+          entryFee,
+          `Entry fee for game ${game.code} (User: ${telegramId}, Cards: ${userData.totalCards})`
+        );
+        
+        reconciliation.transactions.push({
+          userId: user._id,
+          type: 'ENTRY_FEE',
+          amount: -entryFee,
+          status: 'COMPLETED',
+          transactionId: result.transaction._id,
+          alreadyPaid: false,
+          cardNumbers: userData.cards
+        });
+        
+        usersDeducted.add(telegramId);
+        totalUniquePlayers++;
+        
+        console.log(`✅ Deducted $${entryFee} from ${telegramId} for ${userData.totalCards} cards in game ${game.code}`);
+      } catch (error) {
+        console.error(`❌ Failed to deduct from user ${telegramId}:`, error.message);
+        reconciliation.transactions.push({
+          userId: user._id,
+          type: 'ENTRY_FEE',
+          amount: -entryFee,
+          status: 'FAILED',
+          error: error.message,
+          cardNumbers: userData.cards
+        });
       }
     }
 
@@ -1131,12 +1150,22 @@ static async processEntryFees(gameId) {
     reconciliation.totalPot = totalUniquePlayers * entryFee;
     reconciliation.debitTotal = totalUniquePlayers * entryFee;
     
+    // Add audit trail
+    reconciliation.addAudit('ENTRY_FEES_DEDUCTED', {
+      gameCode: game.code,
+      uniquePlayers: totalUniquePlayers,
+      totalCards: bingoCards.length,
+      entryFee,
+      totalPot: reconciliation.totalPot,
+      timestamp: new Date()
+    });
+    
     await reconciliation.save({ session });
     await session.commitTransaction();
     
-    console.log(`💰 Entry fees processed for game ${game.code}: $${reconciliation.totalPot} from ${totalUniquePlayers} unique players`);
+    console.log(`💰 Entry fees processed for game ${game.code}: $${reconciliation.totalPot} from ${totalUniquePlayers} unique players (${bingoCards.length} cards)`);
     
-    return { success: true, reconciliation, totalUniquePlayers };
+    return { success: true, reconciliation, totalUniquePlayers, totalCards: bingoCards.length };
     
   } catch (error) {
     await session.abortTransaction();
@@ -2765,7 +2794,120 @@ static async formatGameForFrontend(game) {
       return { started: false, reason: error.message };
     }
   }
+  // Add this method to GameService.js
+static async checkAndPreventDuplicateReconciliation(gameId, userId) {
+  try {
+    // Check if user already has a reconciliation transaction for this game
+    const existingReconciliation = await Reconciliation.findOne({
+      gameId: gameId,
+      'transactions.userId': userId,
+      status: { $in: ['DEDUCTED', 'WINNER_DECLARED', 'NO_WINNER_REFUNDED'] }
+    });
+
+    if (existingReconciliation) {
+      // Check if this specific user already has a completed transaction
+      const userTransaction = existingReconciliation.transactions.find(
+        tx => tx.userId.toString() === userId.toString() && tx.status === 'COMPLETED'
+      );
+      
+      if (userTransaction) {
+        console.log(`⚠️ User ${userId} already has reconciliation for game ${gameId}`);
+        return true;
+      }
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('❌ Error checking duplicate reconciliation:', error);
+    return false;
+  }
+}
+
+// Update the startGame method to use this check
+static async startGame(gameId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
   
+  try {
+    const game = await Game.findById(gameId).session(session);
+    
+    if (!game) {
+      console.log(`❌ Game ${gameId} not found`);
+      await session.abortTransaction();
+      return;
+    }
+    
+    console.log(`📊 Game ${game.code} status before start: ${game.status}`);
+    
+    // Only allow starting from CARD_SELECTION or WAITING_FOR_PLAYERS
+    if (game.status !== 'CARD_SELECTION' && game.status !== 'WAITING_FOR_PLAYERS') {
+      console.log(`⚠️ Game ${gameId} not in correct state to start: ${game.status}`);
+      await session.abortTransaction();
+      return;
+    }
+    
+    const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
+    
+    if (playersWithCards < this.MIN_PLAYERS_TO_START) {
+      console.log(`❌ Not enough players to start game ${game.code}: ${playersWithCards}/${this.MIN_PLAYERS_TO_START}`);
+      
+      // If we're in CARD_SELECTION, go back to WAITING
+      if (game.status === 'CARD_SELECTION') {
+        game.status = 'WAITING_FOR_PLAYERS';
+        game.cardSelectionStartTime = null;
+        game.cardSelectionEndTime = null;
+      }
+      
+      const autoStartTime = new Date(Date.now() + this.AUTO_START_DELAY);
+      game.autoStartEndTime = autoStartTime;
+      await game.save({ session });
+      
+      await session.commitTransaction();
+      
+      console.log(`⏳ Rescheduling auto-start for game ${game.code}`);
+      
+      setTimeout(() => {
+        this.scheduleAutoStartCheck(gameId);
+      }, this.AUTO_START_DELAY);
+      
+      return;
+    }
+    
+    // Process entry fees
+    const feeResult = await this.processEntryFees(gameId);
+    
+    if (feeResult.alreadyProcessed) {
+      console.log(`⚠️ Entry fees already processed for game ${game.code}`);
+      await session.abortTransaction();
+      return;
+    }
+    
+    // SUCCESS - Start the game!
+    const now = new Date();
+    game.status = 'ACTIVE';
+    game.startedAt = now;
+    game.cardSelectionStartTime = null;
+    game.cardSelectionEndTime = null;
+    game.autoStartEndTime = null;
+    game.currentPlayers = playersWithCards;
+    
+    await game.save({ session });
+    await session.commitTransaction();
+    
+    console.log(`🎮 Game ${game.code} started with ${game.currentPlayers} player(s).`);
+    
+    this.startAutoNumberCalling(gameId);
+    
+    return this.getGameWithDetails(game._id);
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Start game error:', error);
+    throw error;
+  } finally {
+    session.endSession();
+  }
+}
+
   static async autoStartGame(gameId) {
     try {
       const game = await Game.findById(gameId);

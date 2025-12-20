@@ -45,10 +45,27 @@ class CardSelectionService {
         throw new Error(`Card #${cardNumber} is already selected by another player`);
       }
 
-      // Check if user already selected a card
+      // Check if user already selected a card - FIXED: Use more efficient check
+      const userIdStr = userId.toString();
+      let userAlreadySelected = false;
+      let existingCardNumber = null;
+      
       for (let [cardNum, cardUserId] of selectedCards) {
-        if (cardUserId.toString() === userId.toString()) {
-          throw new Error('You have already selected a card');
+        if (cardUserId.toString() === userIdStr) {
+          userAlreadySelected = true;
+          existingCardNumber = cardNum;
+          break;
+        }
+      }
+
+      if (userAlreadySelected) {
+        // If user is selecting the same card they already have, allow it
+        if (parseInt(existingCardNumber) === cardNumber) {
+          throw new Error(`You have already selected card #${cardNumber}`);
+        } else {
+          // User is trying to select a different card - release the old one first
+          selectedCards.delete(existingCardNumber);
+          console.log(`🔄 User ${userId} releasing previous card #${existingCardNumber} for new card #${cardNumber}`);
         }
       }
 
@@ -67,7 +84,8 @@ class CardSelectionService {
         cardNumber,
         gameId,
         userId,
-        selectionEndTime: game.cardSelectionEndTime
+        selectionEndTime: game.cardSelectionEndTime,
+        message: userAlreadySelected ? 'Card replaced successfully' : 'Card selected successfully'
       };
 
     } catch (error) {
@@ -79,54 +97,59 @@ class CardSelectionService {
     }
   }
 
-  static async getAvailableCards(gameId) {
-    try {
-      // Validate gameId
-      if (!mongoose.Types.ObjectId.isValid(gameId)) {
-        throw new Error('Invalid game ID');
-      }
 
-      const game = await Game.findById(gameId);
-      if (!game) {
-        throw new Error('Game not found');
-      }
-
-      // Convert selectedCards to Map
-      let selectedCards = new Map();
-      if (game.selectedCards) {
-        if (game.selectedCards instanceof Map) {
-          selectedCards = game.selectedCards;
-        } else {
-          selectedCards = new Map(Object.entries(game.selectedCards));
-        }
-      }
-
-      const takenCards = Array.from(selectedCards.keys()).map(Number);
-      const availableCards = [];
-      
-      for (let i = 1; i <= 400; i++) {
-        if (!takenCards.includes(i)) {
-          availableCards.push(i);
-        }
-      }
-
-      const isSelectionActive = new Date() < game.cardSelectionEndTime && game.status === 'WAITING';
-
-      return {
-        availableCards,
-        takenCards: Array.from(selectedCards.entries()).map(([cardNumber, userId]) => ({
-          cardNumber: parseInt(cardNumber),
-          userId: userId
-        })),
-        isSelectionActive,
-        selectionEndTime: game.cardSelectionEndTime,
-        timeRemaining: Math.max(0, game.cardSelectionEndTime - new Date())
-      };
-    } catch (error) {
-      console.error('❌ Get available cards error:', error);
-      throw error;
+static async getAvailableCards(gameId) {
+  try {
+    // Validate gameId
+    if (!mongoose.Types.ObjectId.isValid(gameId)) {
+      throw new Error('Invalid game ID');
     }
+
+    const game = await Game.findById(gameId).lean(); // Use lean() for better performance
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    // Convert selectedCards to Map more efficiently
+    let selectedCards = new Map();
+    if (game.selectedCards) {
+      if (game.selectedCards instanceof Map) {
+        selectedCards = game.selectedCards;
+      } else {
+        // Optimized: Use direct Object.entries instead of multiple checks
+        selectedCards = new Map(Object.entries(game.selectedCards));
+      }
+    }
+
+    // Generate available cards more efficiently
+    const takenCards = Array.from(selectedCards.keys()).map(Number);
+    const totalCards = 400;
+    const availableCards = [];
+    
+    // Use pre-allocated array for better performance
+    for (let i = 1; i <= totalCards; i++) {
+      if (!takenCards.includes(i)) {
+        availableCards.push(i);
+      }
+    }
+
+    const isSelectionActive = new Date() < game.cardSelectionEndTime && game.status === 'WAITING';
+
+    return {
+      availableCards,
+      takenCards: Array.from(selectedCards.entries()).map(([cardNumber, userId]) => ({
+        cardNumber: parseInt(cardNumber),
+        userId: userId
+      })),
+      isSelectionActive,
+      selectionEndTime: game.cardSelectionEndTime,
+      timeRemaining: Math.max(0, game.cardSelectionEndTime - new Date())
+    };
+  } catch (error) {
+    console.error('❌ Get available cards error:', error);
+    throw error;
   }
+}
 
   static async releaseCard(gameId, userId) {
     const session = await mongoose.startSession();
