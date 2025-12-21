@@ -29,7 +29,7 @@ class GameService {
 static async getMainGame() {
   try {
     console.log('🎮 getMainGame() called - Checking game state...');
-    
+     await this.cleanupDuplicateGames();
     // FIRST: Find ALL games that are in active states
     const activeGames = await Game.find({
       status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
@@ -187,6 +187,111 @@ static async getMainGame() {
   } catch (error) {
     console.error('❌ Error in getMainGame:', error);
     throw error;
+  }
+}
+// NEW METHOD: Clean up duplicate games
+static async cleanupDuplicateGames() {
+  try {
+    console.log('🧹 Checking for duplicate active games...');
+    
+    const activeGames = await Game.find({
+      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+      archived: { $ne: true }
+    }).sort({ createdAt: -1 });
+    
+    if (activeGames.length > 1) {
+      console.warn(`⚠️ Found ${activeGames.length} active/waiting games - cleaning up duplicates`);
+      
+      // Keep only the newest game
+      const newestGame = activeGames[0];
+      console.log(`✅ Keeping newest game: ${newestGame.code} (created: ${newestGame.createdAt})`);
+      
+      // Archive all older duplicates
+      for (let i = 1; i < activeGames.length; i++) {
+        const oldGame = activeGames[i];
+        console.log(`🗑️ Archiving duplicate: ${oldGame.code} (${oldGame.status}, created: ${oldGame.createdAt})`);
+        
+        // Archive the game
+        oldGame.archived = true;
+        oldGame.archivedAt = new Date();
+        oldGame.archivedReason = 'Duplicate active game detected during cleanup';
+        await oldGame.save();
+        
+        // Move players to the newest game if needed
+        await this.migratePlayersToNewGame(oldGame._id, newestGame._id);
+      }
+      
+      return true;
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('❌ Error in cleanupDuplicateGames:', error);
+    return false;
+  }
+}
+
+// NEW METHOD: Migrate players from old game to new game
+static async migratePlayersToNewGame(oldGameId, newGameId) {
+  try {
+    const oldGamePlayers = await GamePlayer.find({ gameId: oldGameId });
+    const oldBingoCards = await BingoCard.find({ gameId: oldGameId });
+    
+    console.log(`🔄 Migrating ${oldGamePlayers.length} players and ${oldBingoCards.length} cards from old game to new game`);
+    
+    // Migrate players
+    for (const player of oldGamePlayers) {
+      // Check if player already exists in new game
+      const existingPlayer = await GamePlayer.findOne({
+        gameId: newGameId,
+        userId: player.userId
+      });
+      
+      if (!existingPlayer) {
+        // Create new player record in the new game
+        await GamePlayer.create({
+          userId: player.userId,
+          gameId: newGameId,
+          isReady: player.isReady,
+          playerType: player.playerType,
+          joinedAt: new Date()
+        });
+      }
+    }
+    
+    // Migrate bingo cards
+    for (const card of oldBingoCards) {
+      // Check if user already has a card in new game
+      const existingCard = await BingoCard.findOne({
+        gameId: newGameId,
+        userId: card.userId
+      });
+      
+      if (!existingCard) {
+        // Create new card in the new game
+        await BingoCard.create({
+          userId: card.userId,
+          gameId: newGameId,
+          cardNumber: card.cardNumber,
+          numbers: card.numbers,
+          markedPositions: card.markedPositions,
+          isLateJoiner: card.isLateJoiner,
+          joinedAt: new Date(),
+          numbersCalledAtJoin: card.numbersCalledAtJoin || []
+        });
+      }
+    }
+    
+    // Update player count in new game
+    const newGame = await Game.findById(newGameId);
+    const uniquePlayers = await GamePlayer.distinct('userId', { gameId: newGameId });
+    newGame.currentPlayers = uniquePlayers.length;
+    await newGame.save();
+    
+    console.log(`✅ Migration complete. New game now has ${newGame.currentPlayers} players`);
+    
+  } catch (error) {
+    console.error('❌ Error migrating players:', error);
   }
 }
  static async manageGameLifecycle() {
