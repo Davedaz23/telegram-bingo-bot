@@ -1706,92 +1706,113 @@ class GameService {
     }
   }
 
-  static async claimBingo(gameId, userId, patternType = 'BINGO') {
-    const session = await mongoose.startSession();
+static async claimBingo(gameId, userId, patternType = 'BINGO') {
+  const session = await mongoose.startSession();
+  
+  try {
+    console.log(`🏆 BINGO CLAIM attempt by ${userId} for game ${gameId}`);
     
-    try {
-      console.log(`🏆 BINGO CLAIM attempt by ${userId} for game ${gameId}`);
-      
-      if (this.winnerDeclared.has(gameId.toString())) {
-        throw new Error('Winner already declared for this game');
-      }
-
-      const game = await Game.findById(gameId).session(session);
-      if (!game || game.status !== 'ACTIVE') {
-        throw new Error('Game not active');
-      }
-
-      // Find user
-      let user;
-      if (mongoose.Types.ObjectId.isValid(userId)) {
-        user = await User.findById(userId).session(session);
-      } else {
-        user = await User.findOne({ telegramId: userId }).session(session);
-      }
-
-      if (!user) {
-        throw new Error('User not found');
-      }
-
-      const mongoUserId = user._id;
-      const bingoCard = await BingoCard.findOne({ 
-        gameId, 
-        userId: mongoUserId 
-      }).session(session);
-
-      if (!bingoCard) {
-        throw new Error('No bingo card found');
-      }
-
-      // Verify claim
-      const numbers = bingoCard.numbers.flat();
-      let effectiveMarkedPositions = [...bingoCard.markedPositions];
-      
-      // Account for late joiners
-      if (bingoCard.isLateJoiner) {
-        const numbersCalledAtJoin = bingoCard.numbersCalledAtJoin || [];
-        const allCalledNumbers = game.numbersCalled || [];
-        
-        for (let i = 0; i < numbers.length; i++) {
-          const cardNumber = numbers[i];
-          if (allCalledNumbers.includes(cardNumber) && !effectiveMarkedPositions.includes(i)) {
-            effectiveMarkedPositions.push(i);
-          }
-        }
-      }
-
-      effectiveMarkedPositions = [...new Set([...effectiveMarkedPositions, 12])];
-      
-      const winResult = this.checkEnhancedWinCondition(numbers, effectiveMarkedPositions);
-      
-      if (!winResult.isWinner) {
-        throw new Error('Invalid claim - no winning pattern found');
-      }
-
-      console.log(`✅ VALID BINGO CLAIM by ${userId} with ${winResult.patternType}`);
-      
-      // Declare winner
-      await this.declareWinnerWithRetry(
-        gameId, 
-        mongoUserId, 
-        { ...bingoCard.toObject(), winningPatternType: winResult.patternType }, 
-        winResult.winningPositions
-      );
-      
-      return {
-        success: true,
-        message: 'Bingo claim successful! You are the winner!',
-        patternType: winResult.patternType,
-        winningPositions: winResult.winningPositions
-      };
-      
-    } catch (error) {
-      console.error('❌ Bingo claim error:', error);
-      throw error;
-    } finally {
-      session.endSession();
+    if (this.winnerDeclared.has(gameId.toString())) {
+      throw new Error('Winner already declared for this game');
     }
+
+    const game = await Game.findById(gameId).session(session);
+    if (!game || game.status !== 'ACTIVE') {
+      throw new Error('Game not active');
+    }
+
+    // Find user
+    let user;
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId).session(session);
+    } else {
+      user = await User.findOne({ telegramId: userId }).session(session);
+    }
+
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    const mongoUserId = user._id;
+    const bingoCard = await BingoCard.findOne({ 
+      gameId, 
+      userId: mongoUserId 
+    }).session(session);
+
+    if (!bingoCard) {
+      throw new Error('No bingo card found');
+    }
+
+    // Get all called numbers
+    const calledNumbers = game.numbersCalled || [];
+    
+    // Get user's card numbers (flattened array)
+    const cardNumbers = bingoCard.numbers.flat();
+    
+    // Get manually marked positions
+    const manuallyMarkedPositions = bingoCard.markedPositions || [];
+    
+    // Always include FREE space
+    const effectiveMarkedPositions = [...new Set([...manuallyMarkedPositions, 12])];
+    
+    console.log(`📊 User ${userId} has ${manuallyMarkedPositions.length} manually marked positions`);
+    console.log(`🔢 Total called numbers: ${calledNumbers.length}`);
+    
+    // Check for "one away" scenarios where user has 3 marked and 4th is already called
+    const winResult = this.checkEnhancedWinConditionWithAutoMark(
+      cardNumbers, 
+      effectiveMarkedPositions, 
+      calledNumbers
+    );
+    
+    if (!winResult.isWinner) {
+      throw new Error('Invalid claim - no winning pattern found');
+    }
+
+    console.log(`✅ VALID BINGO CLAIM by ${userId} with ${winResult.patternType}`);
+    console.log(`🔄 Auto-marked positions: ${winResult.autoMarkedPositions?.length || 0}`);
+    
+    // Update the card with auto-marked positions if any
+    if (winResult.autoMarkedPositions && winResult.autoMarkedPositions.length > 0) {
+      const newMarkedPositions = [...new Set([
+        ...bingoCard.markedPositions,
+        ...winResult.autoMarkedPositions
+      ])];
+      
+      bingoCard.markedPositions = newMarkedPositions;
+      await bingoCard.save({ session });
+      
+      console.log(`✅ Updated card with auto-marked positions: ${winResult.autoMarkedPositions}`);
+    }
+    
+    // Declare winner
+    await this.declareWinnerWithRetry(
+      gameId, 
+      mongoUserId, 
+      { 
+        ...bingoCard.toObject(), 
+        winningPatternType: winResult.patternType,
+        autoMarkedPositions: winResult.autoMarkedPositions || []
+      }, 
+      winResult.winningPositions
+    );
+    
+    return {
+      success: true,
+      message: 'Bingo claim successful! You are the winner!',
+      patternType: winResult.patternType,
+      winningPositions: winResult.winningPositions,
+      autoMarkedPositions: winResult.autoMarkedPositions || [],
+      manuallyMarked: manuallyMarkedPositions.length
+    };
+    
+  } catch (error) {
+    console.error('❌ Bingo claim error:', error);
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
 
   static checkEnhancedWinCondition(cardNumbers, markedPositions) {
     if (!cardNumbers || !markedPositions) {
@@ -1830,6 +1851,132 @@ class GameService {
 
     return { isWinner: false, patternType: null, winningPositions: [] };
   }
+  static checkEnhancedWinConditionWithAutoMark(cardNumbers, markedPositions, calledNumbers) {
+  if (!cardNumbers || !markedPositions) {
+    return { isWinner: false, patternType: null, winningPositions: [], autoMarkedPositions: [] };
+  }
+
+  const effectiveMarked = [...markedPositions];
+  
+  const winningPatterns = [
+    // Rows
+    { type: 'ROW', positions: [0, 1, 2, 3, 4] },
+    { type: 'ROW', positions: [5, 6, 7, 8, 9] },
+    { type: 'ROW', positions: [10, 11, 12, 13, 14] },
+    { type: 'ROW', positions: [15, 16, 17, 18, 19] },
+    { type: 'ROW', positions: [20, 21, 22, 23, 24] },
+    
+    // Columns
+    { type: 'COLUMN', positions: [0, 5, 10, 15, 20] },
+    { type: 'COLUMN', positions: [1, 6, 11, 16, 21] },
+    { type: 'COLUMN', positions: [2, 7, 12, 17, 22] },
+    { type: 'COLUMN', positions: [3, 8, 13, 18, 23] },
+    { type: 'COLUMN', positions: [4, 9, 14, 19, 24] },
+    
+    // Diagonals
+    { type: 'DIAGONAL', positions: [0, 6, 12, 18, 24] },
+    { type: 'DIAGONAL', positions: [4, 8, 12, 16, 20] },
+    
+    // Four Corners (special pattern)
+    { type: 'FOUR_CORNERS', positions: [0, 4, 20, 24] }
+  ];
+
+  for (const pattern of winningPatterns) {
+    // Count how many positions are already marked
+    const markedInPattern = pattern.positions.filter(pos => effectiveMarked.includes(pos));
+    
+    // If all 5 are marked, it's a regular win
+    if (markedInPattern.length === pattern.positions.length) {
+      return {
+        isWinner: true,
+        patternType: pattern.type,
+        winningPositions: pattern.positions,
+        autoMarkedPositions: []
+      };
+    }
+    
+    // Check for "one away" scenario: 3 marked, 4th is called but not marked
+    if (markedInPattern.length === 3) {
+      // Find the unmarked position in the pattern
+      const unmarkedPositions = pattern.positions.filter(pos => !effectiveMarked.includes(pos));
+      
+      // For a pattern of 5, we should have 2 unmarked positions
+      if (unmarkedPositions.length === 2) {
+        // Check if one of the unmarked numbers is in called numbers
+        const autoMarkablePositions = [];
+        
+        for (const unmarkedPos of unmarkedPositions) {
+          const unmarkedNumber = cardNumbers[unmarkedPos];
+          
+          // Skip FREE space (already included)
+          if (unmarkedNumber === 'FREE') continue;
+          
+          // Check if this number has been called
+          if (calledNumbers.includes(unmarkedNumber)) {
+            autoMarkablePositions.push(unmarkedPos);
+          }
+        }
+        
+        // If we found 1 auto-markable position and user has 3 marked,
+        // then with the auto-mark we'll have 4 marked, leaving only 1 unmarked
+        // This meets your requirement for faster claiming
+        if (autoMarkablePositions.length === 1) {
+          const finalMarkedPositions = [...effectiveMarked, ...autoMarkablePositions];
+          
+          // Check if this now completes the pattern
+          const isComplete = pattern.positions.every(pos => finalMarkedPositions.includes(pos));
+          
+          if (isComplete) {
+            return {
+              isWinner: true,
+              patternType: pattern.type,
+              winningPositions: pattern.positions,
+              autoMarkedPositions: autoMarkablePositions
+            };
+          }
+        }
+      }
+    }
+    
+    // Also check for "two away" scenario: 2 marked, 3rd and 4th are called but not marked
+    // This is even faster claiming
+    if (markedInPattern.length === 2) {
+      const unmarkedPositions = pattern.positions.filter(pos => !effectiveMarked.includes(pos));
+      
+      if (unmarkedPositions.length === 3) {
+        const autoMarkablePositions = [];
+        
+        for (const unmarkedPos of unmarkedPositions) {
+          const unmarkedNumber = cardNumbers[unmarkedPos];
+          
+          if (unmarkedNumber === 'FREE') continue;
+          
+          if (calledNumbers.includes(unmarkedNumber)) {
+            autoMarkablePositions.push(unmarkedPos);
+          }
+        }
+        
+        // If we found 2 auto-markable positions
+        if (autoMarkablePositions.length >= 2) {
+          const finalMarkedPositions = [...effectiveMarked, ...autoMarkablePositions];
+          
+          const isComplete = pattern.positions.every(pos => finalMarkedPositions.includes(pos));
+          
+          if (isComplete) {
+            return {
+              isWinner: true,
+              patternType: pattern.type,
+              winningPositions: pattern.positions,
+              autoMarkedPositions: autoMarkablePositions.slice(0, 2) // Take first 2
+            };
+          }
+        }
+      }
+    }
+  }
+
+  return { isWinner: false, patternType: null, winningPositions: [], autoMarkedPositions: [] };
+}
 
   static async getUniquePlayersCount(gameId) {
     try {
