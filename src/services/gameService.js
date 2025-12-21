@@ -1053,47 +1053,50 @@ static async processEntryFees(gameId) {
       creditTotal: 0
     });
 
-    // Track unique users to avoid duplicate deductions
-    const usersDeducted = new Set();
+    // Track unique users by their telegramId (NOT MongoDB _id)
+    const usersProcessed = new Map();  // Key: telegramId, Value: { processed: boolean, cards: [] }
     let totalUniquePlayers = 0;
     
-    // FIXED: Group cards by user first
-    const userCardsMap = new Map();
+    // FIRST: Group all cards by user telegramId
+    const userCardsMap = new Map(); // Key: telegramId
     
-    // Group all cards by user
     for (const card of bingoCards) {
       const user = await User.findById(card.userId).session(session);
       
       if (user && user.telegramId) {
-        const userId = user.telegramId.toString();
-        if (!userCardsMap.has(userId)) {
-          userCardsMap.set(userId, {
+        const telegramId = user.telegramId.toString();
+        
+        if (!userCardsMap.has(telegramId)) {
+          userCardsMap.set(telegramId, {
             user: user,
             cards: [],
+            userId: user._id,  // Store MongoDB _id for transaction check
             totalCards: 0
           });
         }
         
-        const userData = userCardsMap.get(userId);
+        const userData = userCardsMap.get(telegramId);
         userData.cards.push(card.cardNumber);
         userData.totalCards++;
       }
     }
 
-    // Process each user (only deduct once per user per game)
+    // SECOND: Process each UNIQUE user (deduct only once per user)
     for (const [telegramId, userData] of userCardsMap.entries()) {
       const user = userData.user;
       
-      // Check if this user has already been deducted for this game
+      // 🛑 **CRITICAL FIX 1: Check if this specific user has already paid for THIS game**
+      // Check by BOTH userId AND gameId to prevent duplicate charges
       const alreadyDeducted = await Transaction.findOne({
-        userId: user._id,
+        userId: user._id,  // MongoDB user._id
         gameId: gameId,
         type: 'GAME_ENTRY',
-        status: 'COMPLETED'
+        status: 'COMPLETED',
+        createdAt: { $gte: new Date(Date.now() - 60000) } // Within last minute
       }).session(session);
       
       if (alreadyDeducted) {
-        console.log(`✅ User ${telegramId} already paid for game ${game.code}`);
+        console.log(`✅ User ${telegramId} already paid for game ${game.code} (Transaction: ${alreadyDeducted._id})`);
         
         reconciliation.transactions.push({
           userId: user._id,
@@ -1105,18 +1108,19 @@ static async processEntryFees(gameId) {
           cardNumbers: userData.cards
         });
         
-        usersDeducted.add(telegramId);
+        usersProcessed.set(telegramId, { processed: true, transactionId: alreadyDeducted._id });
         totalUniquePlayers++;
         continue;
       }
       
       try {
-        // Deduct only ONCE per user regardless of number of cards
+        // 🛑 **CRITICAL FIX 2: Deduct only ONCE regardless of number of cards**
+        // NOT entryFee * userData.totalCards
         const result = await WalletService.deductGameEntry(
           user.telegramId,
           gameId,
-          entryFee,
-          `Entry fee for game ${game.code} (User: ${telegramId}, Cards: ${userData.totalCards})`
+          entryFee,  // <-- SINGLE ENTRY FEE, not multiplied!
+          `Entry fee for game ${game.code} (User: ${telegramId}, Cards: ${userData.cards.join(', ')})`
         );
         
         reconciliation.transactions.push({
@@ -1129,7 +1133,7 @@ static async processEntryFees(gameId) {
           cardNumbers: userData.cards
         });
         
-        usersDeducted.add(telegramId);
+        usersProcessed.set(telegramId, { processed: true, transactionId: result.transaction._id });
         totalUniquePlayers++;
         
         console.log(`✅ Deducted $${entryFee} from ${telegramId} for ${userData.totalCards} cards in game ${game.code}`);
@@ -1146,7 +1150,7 @@ static async processEntryFees(gameId) {
       }
     }
 
-    // Update reconciliation totals based on unique players
+    // 🛑 **CRITICAL FIX 3: Total pot should be based on UNIQUE players, not total cards**
     reconciliation.totalPot = totalUniquePlayers * entryFee;
     reconciliation.debitTotal = totalUniquePlayers * entryFee;
     
@@ -1327,7 +1331,7 @@ static async processEntryFees(gameId) {
   
   // ==================== CARD MANAGEMENT ====================
   
-  static async selectCard(gameId, userId, cardNumbers, cardNumber) {
+ static async selectCard(gameId, userId, cardNumbers, cardNumber) {
     const session = await mongoose.startSession();
     session.startTransaction();
 
@@ -1394,41 +1398,66 @@ static async processEntryFees(gameId) {
         console.log(`✅ User ${userId} auto-joined game ${game.code}. Total players: ${game.currentPlayers}`);
       }
 
-      // Check if user already has a card
+      // Check if user already has a card IN THIS GAME
       const existingCard = await BingoCard.findOne({ 
         gameId, 
         userId: mongoUserId 
       }).session(session);
       
       if (existingCard) {
-        console.log(`🔄 User ${userId} already has a card. Updating card instead of creating new one.`);
-        
         const previousCardNumber = existingCard.cardNumber;
         
-        existingCard.numbers = cardNumbers;
-        existingCard.cardNumber = cardNumber;
-        existingCard.markedPositions = [12];
-        existingCard.isWinner = false;
-        existingCard.updatedAt = new Date();
-        
-        await existingCard.save({ session });
-        
-        if (previousCardNumber && previousCardNumber !== cardNumber) {
-          console.log(`🔄 Releasing previous card #${previousCardNumber} for user ${userId}`);
-          this.updateCardSelection(gameId, previousCardNumber, mongoUserId, 'RELEASED');
+        // If user is selecting the SAME card number, just return success
+        if (previousCardNumber === cardNumber) {
+          console.log(`✅ User ${userId} already has card #${cardNumber} for game ${game.code}`);
+          
+          await session.commitTransaction();
+          
+          return { 
+            success: true, 
+            message: 'Card already selected',
+            action: 'ALREADY_SELECTED',
+            cardId: existingCard._id,
+            cardNumber: cardNumber,
+            gameJoined: true
+          };
         }
+        
+        console.log(`🔄 User ${userId} has card #${previousCardNumber}. Replacing with card #${cardNumber}...`);
+        
+        // 1. DELETE the old card completely
+        await BingoCard.deleteOne({ 
+          _id: existingCard._id 
+        }).session(session);
+        
+        console.log(`🗑️ Deleted previous card #${previousCardNumber} for user ${userId}`);
+        
+        // 2. Release the previous card number
+        this.updateCardSelection(gameId, previousCardNumber, mongoUserId, 'RELEASED');
+        
+        // 3. Create NEW card with the new card number
+        const newCard = await BingoCard.create([{
+          userId: mongoUserId,
+          gameId,
+          cardNumber: cardNumber, // NEW card number
+          numbers: cardNumbers,   // NEW card numbers
+          markedPositions: [12],
+          isLateJoiner: game.status === 'CARD_SELECTION' || game.status === 'ACTIVE',
+          joinedAt: new Date(),
+          numbersCalledAtJoin: game.status === 'CARD_SELECTION' || game.status === 'ACTIVE' ? (game.numbersCalled || []) : []
+        }], { session });
         
         await session.commitTransaction();
         
-        console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) UPDATED card #${cardNumber} for game ${game.code}`);
+        console.log(`✅ User ${user._id} (Telegram: ${user.telegramId}) REPLACED card #${previousCardNumber} with NEW card #${cardNumber} for game ${game.code}`);
         
-        this.updateCardSelection(gameId, cardNumber, mongoUserId, 'UPDATED');
+        this.updateCardSelection(gameId, cardNumber, mongoUserId, 'REPLACED');
         
         return { 
           success: true, 
-          message: 'Card updated successfully',
-          action: 'UPDATED',
-          cardId: existingCard._id,
+          message: 'Card replaced successfully',
+          action: 'REPLACED',
+          cardId: newCard[0]._id,
           cardNumber: cardNumber,
           previousCardNumber: previousCardNumber,
           gameJoined: true
@@ -1440,7 +1469,7 @@ static async processEntryFees(gameId) {
         throw new Error('Invalid card format');
       }
 
-      // Create new card
+      // User doesn't have any card yet - CREATE NEW CARD
       const newCard = await BingoCard.create([{
         userId: mongoUserId,
         gameId,
