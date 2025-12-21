@@ -28,12 +28,14 @@ class GameService {
   
 static async getMainGame() {
   try {
-    // FIRST: Check if there's already an active game
-    const activeGame = await Game.findOne({
+    console.log('🎮 getMainGame() called - Checking game state...');
+    
+    // FIRST: Find ALL games that are in active states
+    const activeGames = await Game.find({
       status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
       archived: { $ne: true }
     })
-    .sort({ createdAt: -1 })
+    .sort({ createdAt: -1 }) // Get newest first
     .populate('winnerId', 'username firstName')
     .populate({
       path: 'players',
@@ -43,10 +45,75 @@ static async getMainGame() {
       }
     });
     
-    // If we have an active/waiting/card selection game, RETURN IT IMMEDIATELY
-    // DO NOT create a new game while one exists
-    if (activeGame) {
-      console.log(`🎮 Found existing game: ${activeGame.code} (Status: ${activeGame.status})`);
+    console.log(`📊 Found ${activeGames.length} active/waiting games in database`);
+    
+    // CRITICAL FIX: If we have multiple active games, we need to:
+    // 1. Return the newest one
+    // 2. Archive/clean up the older ones
+    if (activeGames.length > 1) {
+      console.warn(`⚠️ MULTIPLE ACTIVE GAMES DETECTED (${activeGames.length})! This is a bug.`);
+      console.warn('📋 Games found:');
+      activeGames.forEach((game, index) => {
+        console.warn(`  ${index + 1}. ${game.code} - ${game.status} (created: ${game.createdAt})`);
+      });
+      
+      // Return the newest game (first in array due to sort)
+      const newestGame = activeGames[0];
+      console.log(`✅ Returning newest game: ${newestGame.code} (created: ${newestGame.createdAt})`);
+      
+      // Archive all older games to clean up the mess
+      for (let i = 1; i < activeGames.length; i++) {
+        const oldGame = activeGames[i];
+        console.warn(`🗑️ Archiving duplicate game: ${oldGame.code} (${oldGame.status})`);
+        
+        // Archive the duplicate game
+        oldGame.archived = true;
+        oldGame.archivedAt = new Date();
+        oldGame.archivedReason = 'Duplicate active game detected by getMainGame()';
+        await oldGame.save();
+        
+        // Also clean up any players/cards for the archived game
+        await GamePlayer.deleteMany({ gameId: oldGame._id });
+        await BingoCard.deleteMany({ gameId: oldGame._id });
+      }
+      
+      // Check if the newest game is ACTIVE with all numbers
+      if (newestGame.status === 'ACTIVE' && newestGame.numbersCalled && newestGame.numbersCalled.length >= 75) {
+        console.log(`⚠️ Game ${newestGame.code} has all 75 numbers but still ACTIVE. Forcing end...`);
+        await this.endGameDueToNoWinner(newestGame._id);
+        
+        // Get the updated game after ending
+        const updatedGame = await Game.findById(newestGame._id).populate('winnerId').populate({
+          path: 'players',
+          populate: { path: 'userId' }
+        });
+        
+        // If game is now finished, continue to check for new game
+        if (updatedGame && (updatedGame.status === 'FINISHED' || updatedGame.status === 'NO_WINNER')) {
+          console.log(`✅ Game ${updatedGame.code} is now finished. Will create new game...`);
+          // Continue to the new game creation logic below
+        } else {
+          // Game is still active/waiting, return it
+          if (updatedGame.status === 'ACTIVE' && !this.activeIntervals.has(updatedGame._id.toString())) {
+            console.log(`🔄 Restarting auto-calling for active game ${updatedGame.code}`);
+            this.startAutoNumberCalling(updatedGame._id);
+          }
+          return this.formatGameForFrontend(updatedGame || newestGame);
+        }
+      } else {
+        // Game is valid and active/waiting, return it
+        if (newestGame.status === 'ACTIVE' && !this.activeIntervals.has(newestGame._id.toString())) {
+          console.log(`🔄 Restarting auto-calling for active game ${newestGame.code}`);
+          this.startAutoNumberCalling(newestGame._id);
+        }
+        return this.formatGameForFrontend(newestGame);
+      }
+    }
+    
+    // If we have exactly one active game
+    if (activeGames.length === 1) {
+      const activeGame = activeGames[0];
+      console.log(`🎮 Found single existing game: ${activeGame.code} (Status: ${activeGame.status})`);
       
       // Check if active game has all 75 numbers but still ACTIVE
       if (activeGame.status === 'ACTIVE' && activeGame.numbersCalled && activeGame.numbersCalled.length >= 75) {
@@ -175,8 +242,20 @@ static async getMainGame() {
   }
 }
 
- static async createNewGame() {
+static async createNewGame() {
+  // Use a lock to prevent multiple simultaneous game creation
+  const lockKey = 'game_creation_lock';
+  
+  if (this.processingGames.has(lockKey)) {
+    console.log('⏳ Game creation already in progress, waiting...');
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Try to get existing game instead
+    return await this.getMainGame();
+  }
+
   try {
+    this.processingGames.add(lockKey);
+    
     // CRITICAL: Double-check that no active/waiting games exist
     const existingActiveGame = await Game.findOne({
       status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
@@ -185,7 +264,8 @@ static async getMainGame() {
     
     if (existingActiveGame) {
       console.log(`❌ Cannot create new game: Game ${existingActiveGame.code} already exists (Status: ${existingActiveGame.status})`);
-      throw new Error(`Cannot create new game while game ${existingActiveGame.code} is ${existingActiveGame.status}`);
+      // Instead of throwing error, return the existing game
+      return this.formatGameForFrontend(existingActiveGame);
     }
     
     const gameCode = GameUtils.generateGameCode();
@@ -211,9 +291,13 @@ static async getMainGame() {
     }, this.AUTO_START_DELAY);
     
     return this.getGameWithDetails(game._id);
+    
   } catch (error) {
     console.error('❌ Error creating new game:', error);
     throw error;
+  } finally {
+    // Release lock
+    this.processingGames.delete(lockKey);
   }
 }
   
