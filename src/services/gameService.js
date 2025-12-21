@@ -1026,14 +1026,14 @@ static async processEntryFees(gameId) {
       throw new Error('Game not found');
     }
 
-    // Check if entry fees were already processed
+    // 1. FIRST: Check if a DEDUCTED reconciliation already exists.
     const existingReconciliation = await Reconciliation.findOne({ 
       gameId, 
-      status: { $in: ['DEDUCTED', 'WINNER_DECLARED', 'NO_WINNER_REFUNDED'] } 
+      status: 'DEDUCTED'
     }).session(session);
 
     if (existingReconciliation) {
-      console.log(`⚠️ Entry fees already processed for game ${game.code}`);
+      console.log(`⚠️ Entry fees already processed for game ${game.code}. Reconciliation ID: ${existingReconciliation._id}`);
       await session.abortTransaction();
       return { alreadyProcessed: true };
     }
@@ -1042,7 +1042,6 @@ static async processEntryFees(gameId) {
     const WalletService = require('./walletService');
     const entryFee = 10;
     
-    // Create reconciliation
     const reconciliation = new Reconciliation({
       gameId: game._id,
       status: 'DEDUCTED',
@@ -1053,94 +1052,80 @@ static async processEntryFees(gameId) {
       creditTotal: 0
     });
 
-    // Track unique users by their telegramId (NOT MongoDB _id)
-    const usersProcessed = new Map();  // Key: telegramId, Value: { processed: boolean, cards: [] }
-    let totalUniquePlayers = 0;
-    
-    // FIRST: Group all cards by user telegramId
-    const userCardsMap = new Map(); // Key: telegramId
+    // 2. CRITICAL: Build a CORRECT map of unique users.
+    // Map Key: User's MongoDB _id (as string)
+    const userCardsMap = new Map(); 
     
     for (const card of bingoCards) {
-      const user = await User.findById(card.userId).session(session);
+      // Use the userId already stored on the bingo card
+      const userIdStr = card.userId.toString();
       
-      if (user && user.telegramId) {
-        const telegramId = user.telegramId.toString();
-        
-        if (!userCardsMap.has(telegramId)) {
-          userCardsMap.set(telegramId, {
-            user: user,
-            cards: [],
-            userId: user._id,  // Store MongoDB _id for transaction check
-            totalCards: 0
-          });
-        }
-        
-        const userData = userCardsMap.get(telegramId);
-        userData.cards.push(card.cardNumber);
-        userData.totalCards++;
+      if (!userCardsMap.has(userIdStr)) {
+        userCardsMap.set(userIdStr, {
+          userId: card.userId, // The actual ObjectId
+          cards: []
+        });
       }
+      
+      const userData = userCardsMap.get(userIdStr);
+      userData.cards.push(card.cardNumber);
     }
 
-    // SECOND: Process each UNIQUE user (deduct only once per user)
-    for (const [telegramId, userData] of userCardsMap.entries()) {
-      const user = userData.user;
-      
-      // 🛑 **CRITICAL FIX 1: Check if this specific user has already paid for THIS game**
-      // Check by BOTH userId AND gameId to prevent duplicate charges
+    // 3. Process each UNIQUE user (by MongoDB _id)
+    for (const [userIdStr, userData] of userCardsMap.entries()) {
+      // FIXED CHECK: Look for ANY existing GAME_ENTRY for this user/game, NOT just in the last minute.
       const alreadyDeducted = await Transaction.findOne({
-        userId: user._id,  // MongoDB user._id
+        userId: userData.userId,
         gameId: gameId,
         type: 'GAME_ENTRY',
-        status: 'COMPLETED',
-        createdAt: { $gte: new Date(Date.now() - 60000) } // Within last minute
+        status: 'COMPLETED'
+        // REMOVED the incorrect 1-minute time filter
       }).session(session);
       
       if (alreadyDeducted) {
-        console.log(`✅ User ${telegramId} already paid for game ${game.code} (Transaction: ${alreadyDeducted._id})`);
+        console.log(`✅ User ${userIdStr} already paid for game ${game.code}. Skipping charge.`);
         
         reconciliation.transactions.push({
-          userId: user._id,
+          userId: userData.userId,
           type: 'ENTRY_FEE',
-          amount: -entryFee,
-          status: 'ALREADY_PAID',
+          amount: 0, // Amount is 0 because they already paid
+          status: 'ALREADY_PROCESSED',
           transactionId: alreadyDeducted._id,
-          alreadyPaid: true,
           cardNumbers: userData.cards
         });
-        
-        usersProcessed.set(telegramId, { processed: true, transactionId: alreadyDeducted._id });
-        totalUniquePlayers++;
-        continue;
+        continue; // SKIP the charge for this user entirely
       }
       
+      // 4. Deduct the single $10 entry fee for this unique user.
       try {
-        // 🛑 **CRITICAL FIX 2: Deduct only ONCE regardless of number of cards**
-        // NOT entryFee * userData.totalCards
+        // Get the user's telegramId to pass to WalletService
+        const user = await User.findById(userData.userId).session(session);
+        if (!user || !user.telegramId) {
+          throw new Error(`User ${userIdStr} or their telegramId not found`);
+        }
+
         const result = await WalletService.deductGameEntry(
-          user.telegramId,
+          user.telegramId, // Pass telegramId for the wallet service
           gameId,
-          entryFee,  // <-- SINGLE ENTRY FEE, not multiplied!
-          `Entry fee for game ${game.code} (User: ${telegramId}, Cards: ${userData.cards.join(', ')})`
+          entryFee, // Charge the single $10 fee
+          `Entry fee for game ${game.code} (Cards: ${userData.cards.join(', ')})`
         );
         
         reconciliation.transactions.push({
-          userId: user._id,
+          userId: userData.userId,
           type: 'ENTRY_FEE',
           amount: -entryFee,
           status: 'COMPLETED',
           transactionId: result.transaction._id,
-          alreadyPaid: false,
           cardNumbers: userData.cards
         });
         
-        usersProcessed.set(telegramId, { processed: true, transactionId: result.transaction._id });
-        totalUniquePlayers++;
+        console.log(`✅ Correctly deducted $${entryFee} from user ${userIdStr} for game ${game.code}`);
         
-        console.log(`✅ Deducted $${entryFee} from ${telegramId} for ${userData.totalCards} cards in game ${game.code}`);
       } catch (error) {
-        console.error(`❌ Failed to deduct from user ${telegramId}:`, error.message);
+        console.error(`❌ Failed to deduct from user ${userIdStr}:`, error.message);
         reconciliation.transactions.push({
-          userId: user._id,
+          userId: userData.userId,
           type: 'ENTRY_FEE',
           amount: -entryFee,
           status: 'FAILED',
@@ -1150,14 +1135,19 @@ static async processEntryFees(gameId) {
       }
     }
 
-    // 🛑 **CRITICAL FIX 3: Total pot should be based on UNIQUE players, not total cards**
-    reconciliation.totalPot = totalUniquePlayers * entryFee;
-    reconciliation.debitTotal = totalUniquePlayers * entryFee;
+    // 5. Calculate the total pot correctly: only from SUCCESSFUL charges in this run.
+    const successfulCharges = reconciliation.transactions.filter(tx => 
+      tx.status === 'COMPLETED'
+    ).length;
+    
+    reconciliation.totalPot = successfulCharges * entryFee;
+    reconciliation.debitTotal = successfulCharges * entryFee;
     
     // Add audit trail
     reconciliation.addAudit('ENTRY_FEES_DEDUCTED', {
       gameCode: game.code,
-      uniquePlayers: totalUniquePlayers,
+      uniqueUsersAttempted: userCardsMap.size,
+      successfullyCharged: successfulCharges,
       totalCards: bingoCards.length,
       entryFee,
       totalPot: reconciliation.totalPot,
@@ -1167,13 +1157,13 @@ static async processEntryFees(gameId) {
     await reconciliation.save({ session });
     await session.commitTransaction();
     
-    console.log(`💰 Entry fees processed for game ${game.code}: $${reconciliation.totalPot} from ${totalUniquePlayers} unique players (${bingoCards.length} cards)`);
+    console.log(`💰 Entry fees FINAL for game ${game.code}: Attempted ${userCardsMap.size} users, successfully charged ${successfulCharges}. Total pot: $${reconciliation.totalPot}`);
     
-    return { success: true, reconciliation, totalUniquePlayers, totalCards: bingoCards.length };
+    return { success: true, reconciliation };
     
   } catch (error) {
     await session.abortTransaction();
-    console.error('❌ Error processing entry fees:', error);
+    console.error('❌ ERROR in processEntryFees:', error);
     throw error;
   } finally {
     session.endSession();
