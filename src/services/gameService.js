@@ -425,82 +425,86 @@ class GameService {
     }
   }
 
-  static async startGame(gameId) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+ static async startGame(gameId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
+  try {
+    const game = await Game.findById(gameId).session(session);
     
-    try {
-      const game = await Game.findById(gameId).session(session);
+    if (!game) {
+      throw new Error('Game not found');
+    }
+    
+    console.log(`📊 Game ${game.code} status: ${game.status}`);
+    
+    // Only allow starting from correct states
+    if (game.status !== 'CARD_SELECTION' && game.status !== 'WAITING_FOR_PLAYERS') {
+      throw new Error(`Game ${game.code} not in correct state to start: ${game.status}`);
+    }
+    
+    const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
+    
+    if (playersWithCards < this.MIN_PLAYERS_TO_START) {
+      console.log(`❌ Not enough players to start: ${playersWithCards}/${this.MIN_PLAYERS_TO_START}`);
       
-      if (!game) {
-        throw new Error('Game not found');
-      }
-      
-      console.log(`📊 Game ${game.code} status: ${game.status}`);
-      
-      // Only allow starting from correct states
-      if (game.status !== 'CARD_SELECTION' && game.status !== 'WAITING_FOR_PLAYERS') {
-        throw new Error(`Game ${game.code} not in correct state to start: ${game.status}`);
-      }
-      
-      const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
-      
-      if (playersWithCards < this.MIN_PLAYERS_TO_START) {
-        console.log(`❌ Not enough players to start: ${playersWithCards}/${this.MIN_PLAYERS_TO_START}`);
-        
-        // Go back to waiting
-        game.status = 'WAITING_FOR_PLAYERS';
-        game.cardSelectionStartTime = null;
-        game.cardSelectionEndTime = null;
-        game.autoStartEndTime = new Date(Date.now() + this.AUTO_START_DELAY);
-        await game.save({ session });
-        
-        await session.commitTransaction();
-        
-        console.log(`⏳ Rescheduling auto-start for ${game.code}`);
-        
-        setTimeout(() => {
-          this.scheduleAutoStartCheck(gameId);
-        }, this.AUTO_START_DELAY);
-        
-        return;
-      }
-      
-      // Process entry fees (with duplicate prevention)
-      const feeResult = await this.processEntryFees(gameId);
-      
-      if (feeResult.alreadyProcessed) {
-        console.log(`⚠️ Entry fees already processed for ${game.code}`);
-        await session.abortTransaction();
-        return;
-      }
-      
-      // SUCCESS - Start the game!
-      const now = new Date();
-      game.status = 'ACTIVE';
-      game.startedAt = now;
+      // Go back to waiting
+      game.status = 'WAITING_FOR_PLAYERS';
       game.cardSelectionStartTime = null;
       game.cardSelectionEndTime = null;
-      game.autoStartEndTime = null;
-      game.currentPlayers = playersWithCards;
-      
+      game.autoStartEndTime = new Date(Date.now() + this.AUTO_START_DELAY);
       await game.save({ session });
+      
       await session.commitTransaction();
       
-      console.log(`🎮 Game ${game.code} started with ${game.currentPlayers} player(s)`);
+      console.log(`⏳ Rescheduling auto-start for ${game.code}`);
       
-      this.startAutoNumberCalling(gameId);
+      setTimeout(() => {
+        this.scheduleAutoStartCheck(gameId);
+      }, this.AUTO_START_DELAY);
       
-      return game;
-      
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Start game error:', error);
-      throw error;
-    } finally {
-      session.endSession();
+      return;
     }
+    
+    // Process entry fees (with duplicate prevention)
+    const feeResult = await this.processEntryFees(gameId);
+    
+    if (feeResult.alreadyProcessed) {
+      console.log(`⚠️ Entry fees already processed for ${game.code}`);
+      await session.abortTransaction();
+      return;
+    }
+    
+    // SUCCESS - Start the game!
+    const now = new Date();
+    game.status = 'ACTIVE';
+    game.startedAt = now;
+    game.cardSelectionStartTime = null;
+    game.cardSelectionEndTime = null;
+    game.autoStartEndTime = null;
+    game.currentPlayers = playersWithCards;
+    
+    await game.save({ session });
+    await session.commitTransaction();
+    
+    console.log(`🎮 Game ${game.code} started with ${game.currentPlayers} player(s)`);
+    
+    // ✅ FIX: Add 5-second delay before starting auto-calling
+    console.log(`⏱️ Game ${game.code} will start calling numbers in 5 seconds...`);
+    setTimeout(() => {
+      this.startAutoNumberCalling(gameId);
+    }, 5000);
+    
+    return game;
+    
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Start game error:', error);
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
 
   // ==================== ENTRY FEE PROCESSING (DUPLICATE PREVENTION) ====================
 
