@@ -2000,19 +2000,183 @@ static async claimBingo(gameId, userId, patternType = 'BINGO') {
 
 // ==================== MISSING METHODS FROM ORIGINAL ====================
 
+// In GameService.js, update the getAvailableCards method:
+
 static async getAvailableCards(gameId, userId, count = 400) {
   const cards = [];
   
-  for (let i = 0; i < count; i++) {
-    const cardNumbers = GameUtils.generateBingoCard();
+  // Pre-generate all cards for caching
+  const allCards = GameUtils.generateAllCards();
+  
+  for (let cardNumber = 1; cardNumber <= count; cardNumber++) {
+    const cardNumbers = allCards.get(cardNumber) || GameUtils.generateDeterministicCard(cardNumber);
     cards.push({
-      cardIndex: i + 1,
+      cardNumber: cardNumber,  // Add card number
       numbers: cardNumbers,
       preview: this.formatCardForPreview(cardNumbers)
     });
   }
   
   return cards;
+}
+
+// Also update the selectCard method to handle deterministic cards:
+static async selectCard(gameId, userId, cardNumbers, cardNumber) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const game = await Game.findById(gameId).session(session);
+    
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    // Only allow card selection in waiting or card selection phase
+    if (game.status !== 'WAITING_FOR_PLAYERS' && game.status !== 'CARD_SELECTION') {
+      throw new Error('Cannot select card - game not accepting players');
+    }
+
+    // Check if card number is taken by another player
+    const existingCardWithNumber = await BingoCard.findOne({ 
+      gameId, 
+      cardNumber 
+    }).session(session);
+    
+    if (existingCardWithNumber && existingCardWithNumber.userId.toString() !== userId.toString()) {
+      throw new Error(`Card #${cardNumber} is already taken by another player`);
+    }
+
+    // Find or create user
+    let user;
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId).session(session);
+    } else {
+      user = await User.findOne({ telegramId: userId }).session(session);
+    }
+
+    if (!user) {
+      user = await User.create([{
+        telegramId: userId,
+        firstName: `Player_${userId.slice(0, 8)}`,
+        username: `player_${userId}`,
+        role: 'user'
+      }], { session });
+      user = user[0];
+    }
+
+    const mongoUserId = user._id;
+
+    // Auto-join player to game
+    const existingPlayer = await GamePlayer.findOne({ 
+      gameId, 
+      userId: mongoUserId 
+    }).session(session);
+    
+    if (!existingPlayer) {
+      await GamePlayer.create([{
+        userId: mongoUserId,
+        gameId: gameId,
+        isReady: true,
+        playerType: 'PLAYER',
+        joinedAt: new Date()
+      }], { session });
+      
+      game.currentPlayers += 1;
+      await game.save({ session });
+      
+      console.log(`✅ User ${userId} joined ${game.code}. Total: ${game.currentPlayers}`);
+    }
+
+    // Check if user already has a card
+    const existingCard = await BingoCard.findOne({ 
+      gameId, 
+      userId: mongoUserId 
+    }).session(session);
+    
+    if (existingCard) {
+      if (existingCard.cardNumber === cardNumber) {
+        console.log(`✅ User ${userId} already has card #${cardNumber}`);
+        
+        await session.commitTransaction();
+        
+        return { 
+          success: true, 
+          message: 'Card already selected',
+          action: 'ALREADY_SELECTED',
+          cardId: existingCard._id,
+          cardNumber: cardNumber
+        };
+      }
+      
+      // Replace existing card
+      console.log(`🔄 User ${userId} replacing card #${existingCard.cardNumber} with #${cardNumber}`);
+      
+      await BingoCard.deleteOne({ 
+        _id: existingCard._id 
+      }).session(session);
+    }
+
+    // Generate deterministic card based on card number
+    const deterministicCardNumbers = GameUtils.generateDeterministicCard(cardNumber);
+    
+    // Validate that provided card numbers match deterministic ones
+    const flatProvided = cardNumbers.flat();
+    const flatDeterministic = deterministicCardNumbers.flat();
+    
+    let isValidCard = true;
+    for (let i = 0; i < 25; i++) {
+      if (flatProvided[i] !== flatDeterministic[i]) {
+        isValidCard = false;
+        console.warn(`⚠️ Card validation failed at position ${i}: Provided=${flatProvided[i]}, Expected=${flatDeterministic[i]}`);
+        break;
+      }
+    }
+    
+    if (!isValidCard) {
+      throw new Error('Invalid card numbers provided. Card must match deterministic pattern for this card number.');
+    }
+
+    // Create new card with deterministic numbers
+    const newCard = await BingoCard.create([{
+      userId: mongoUserId,
+      gameId,
+      cardNumber: cardNumber,
+      numbers: deterministicCardNumbers,  // Use deterministic numbers
+      markedPositions: [12],  // FREE space always marked
+      isLateJoiner: game.status === 'CARD_SELECTION' || game.status === 'ACTIVE',
+      joinedAt: new Date(),
+      numbersCalledAtJoin: game.status === 'CARD_SELECTION' || game.status === 'ACTIVE' ? (game.numbersCalled || []) : []
+    }], { session });
+
+    await session.commitTransaction();
+    
+    console.log(`✅ User ${user._id} selected card #${cardNumber} for ${game.code}`);
+    
+    // Update in-memory tracking
+    this.updateCardSelection(gameId, cardNumber, mongoUserId);
+    
+    // Schedule auto-start check if needed
+    if (game.status === 'WAITING_FOR_PLAYERS') {
+      this.scheduleAutoStartCheck(gameId);
+    }
+
+    return { 
+      success: true, 
+      message: 'Card selected successfully',
+      action: existingCard ? 'REPLACED' : 'CREATED',
+      cardId: newCard[0]._id,
+      cardNumber: cardNumber,
+      cardNumbers: deterministicCardNumbers  // Return the deterministic card
+    };
+    
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Select card error:', error);
+    throw error;
+  } finally {
+    session.endSession();
+  }
 }
 
 static formatCardForPreview(cardNumbers) {
