@@ -21,12 +21,16 @@
   "author": "Defar Gobeze",
   "license": "ISC",
   "dependencies": {
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
-    "express": "^4.21.2",
+    "express": "^4.22.1",
+    "express-rate-limit": "^8.2.1",
+    "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^7.0.0",
-    "mongoose": "^8.20.0",
+    "mongoose": "^8.20.4",
+    "morgan": "^1.10.1",
     "node-cron": "^4.2.1",
     "node-telegram-bot-api": "^0.66.0",
     "telegraf": "^4.16.3"
