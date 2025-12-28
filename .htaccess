@@ -1,0 +1,13 @@
+# Create/edit .htaccess in /var/www/vhosts/atocreative.et/httpdocs/
+RewriteEngine On
+
+# Increase timeout for Apache
+<IfModule mod_proxy.c>
+    ProxyTimeout 600
+</IfModule>
+
+# Alternative: PHP timeout if using PHP-FPM
+<IfModule mod_fcgid.c>
+    FcgidIOTimeout 600
+    FcgidBusyTimeout 600
+</IfModule>
