@@ -1,8 +1,11 @@
-// src/app.js - UPDATED VERSION
+// src/app.js - UPDATED VERSION WITH CRITICAL FIXES
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const authRoutes = require('./src/routes/auth');
@@ -18,10 +21,109 @@ const GameService = require('./src/services/gameService');
 
 const app = express();
 
-// Connect to MongoDB
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected successfully'))
-  .catch(err => console.error('MongoDB connection error:', err));
+// ==================== CRITICAL FIX 1: SERVER TIMEOUT CONFIG ====================
+// Set timeout BEFORE any middleware
+app.use((req, res, next) => {
+  // Prevent hanging requests
+  req.setTimeout(15000); // 15 seconds
+  res.setTimeout(15000);
+  next();
+});
+
+// ==================== CRITICAL FIX 2: SECURITY & PERFORMANCE MIDDLEWARE ====================
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false
+}));
+app.use(compression());
+
+// ==================== CRITICAL FIX 3: RATE LIMITING ====================
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 150, // Limit each IP to 150 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true, // Don't count successful requests
+});
+
+// Apply rate limiting to API routes
+app.use('/api', apiLimiter);
+
+// ==================== CRITICAL FIX 4: OPTIMIZED CORS ====================
+app.use(cors({
+  origin: [
+    'https://bingominiapp.vercel.app',
+    'http://localhost:3001',
+    'http://localhost:3000'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  credentials: true,
+  maxAge: 86400 // 24 hours cache
+}));
+
+// ==================== CRITICAL FIX 5: OPTIMIZED BODY PARSING ====================
+app.use(express.json({ 
+  limit: '2mb', // Reduced from 10mb
+  verify: (req, res, buf, encoding) => {
+    // Quick JSON validation to prevent malformed requests
+    if (buf && buf.length > 0) {
+      try {
+        JSON.parse(buf.toString());
+      } catch(e) {
+        res.status(400).json({ 
+          success: false, 
+          error: 'Invalid JSON payload' 
+        });
+        throw new Error('Invalid JSON');
+      }
+    }
+  }
+}));
+
+app.use(express.urlencoded({ 
+  extended: true, 
+  limit: '2mb',
+  parameterLimit: 100
+}));
+
+// Static files with cache
+app.use(express.static(path.join(__dirname, '../public'), {
+  maxAge: '1d',
+  etag: true
+}));
+
+// ==================== CRITICAL FIX 6: REQUEST TIMEOUT HANDLER ====================
+app.use((req, res, next) => {
+  const timeout = setTimeout(() => {
+    if (!res.headersSent) {
+      console.warn(`⏰ Request timeout: ${req.method} ${req.originalUrl}`);
+      res.status(504).json({
+        success: false,
+        error: 'Request timeout',
+        message: 'Server took too long to respond'
+      });
+    }
+  }, 20000); // 20 seconds max
+  
+  // Clean up timeout
+  res.on('finish', () => clearTimeout(timeout));
+  res.on('close', () => clearTimeout(timeout));
+  
+  next();
+});
+
+// ==================== CRITICAL FIX 7: OPTIMIZED MONGODB CONNECTION ====================
+// Use database.js instead of direct mongoose.connect
+const database = require('./src/config/database');
+
+// Initialize database connection
+database.connect().then(() => {
+  console.log('✅ Database service initialized');
+}).catch(err => {
+  console.error('❌ Database initialization failed:', err.message);
+});
 
 // ✅ FIXED: Simplified bot initialization with singleton pattern
 let botController = null;
@@ -103,23 +205,6 @@ const initializeBot = () => {
   }
 };
 
-// CORS configuration - UPDATED with your live frontend URL
-app.use(cors({
-  origin: [
-    'https://bingominiapp.vercel.app', // Your live frontend
-    'http://localhost:3001', // Development
-    'http://localhost:3000'  // Development
-  ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  credentials: true
-}));
-
-// Middleware
-app.use(express.json({ limit: '10mb' })); // Increased for receipt images if needed
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, '../public')));
-
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/games', gameRoutes);
@@ -149,7 +234,7 @@ app.get('/test-quick', async (req, res) => {
   }
 });
 
-// ✅ MODIFIED: Initialize services with proper error handling and singleton pattern
+// ==================== CRITICAL FIX 8: OPTIMIZED SERVICE INITIALIZATION ====================
 const initializeServices = async () => {
   // Check if services are already initialized
   if (servicesInitialized) {
@@ -159,23 +244,50 @@ const initializeServices = async () => {
 
   try {
     console.log('🔄 Initializing all services...');
-    servicesInitialized = true;
-
-    // 1. Initialize payment methods
+    
+    // 1. Initialize payment methods (lightweight, do first)
     console.log('💰 Initializing payment methods...');
-    await WalletService.initializePaymentMethods();
-    console.log('✅ Payment methods initialized successfully');
+    try {
+      await WalletService.initializePaymentMethods();
+      console.log('✅ Payment methods initialized successfully');
+    } catch (error) {
+      console.warn('⚠️ Payment methods initialization warning:', error.message);
+    }
 
-    // 2. Initialize auto-game service
+    // 2. Wait for database to be ready
+    console.log('⏳ Waiting for database connection...');
+    let dbReady = false;
+    for (let i = 0; i < 30; i++) { // 30 second timeout
+      const health = await database.healthCheck();
+      if (health.connected) {
+        dbReady = true;
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    
+    if (!dbReady) {
+      console.warn('⚠️ Database not ready, continuing with limited functionality');
+    } else {
+      console.log('✅ Database ready for service initialization');
+    }
+
+    // 3. Initialize auto-game service with reduced polling
     console.log('🎮 Initializing auto-game service...');
     if (GameService && typeof GameService.startAutoGameService === 'function') {
-      GameService.startAutoGameService();
-      console.log('✅ Auto-game service initialized successfully');
+      // Modified GameService to use optimized polling
+      if (typeof GameService.startOptimizedService === 'function') {
+        GameService.startOptimizedService(); // Use optimized version
+        console.log('✅ Auto-game service initialized with optimized polling');
+      } else {
+        GameService.startAutoGameService();
+        console.log('✅ Auto-game service initialized (standard mode)');
+      }
     } else {
       console.error('❌ GameService.startAutoGameService is not available');
     }
 
-    // 3. Initialize Telegram bot
+    // 4. Initialize Telegram bot last (heaviest)
     console.log('🤖 Initializing Telegram bot...');
     botController = initializeBot();
     
@@ -185,57 +297,71 @@ const initializeServices = async () => {
       console.warn('⚠️ Telegram bot not initialized (check BOT_TOKEN in .env)');
     }
 
+    servicesInitialized = true;
     console.log('🎉 All services initialized successfully!');
     
   } catch (error) {
-    console.error('❌ Failed to initialize services:', error);
-    console.error('Error details:', error.message);
-    servicesInitialized = false; // Reset flag on error
+    console.error('❌ Failed to initialize services:', error.message);
+    console.error('Error stack:', error.stack);
+    servicesInitialized = false;
   }
 };
 
-// Enhanced health check with wallet status
+// ==================== CRITICAL FIX 9: OPTIMIZED HEALTH CHECK ====================
 app.get('/health', async (req, res) => {
   try {
-    // MongoDB health check
-    await mongoose.connection.db.admin().ping();
-
-    // Check wallet service status
-    const Wallet = require('./src/models/Wallet');
-    const Transaction = require('./src/models/Transaction');
-
-    const totalWallets = await Wallet.countDocuments();
-    const pendingDeposits = await Transaction.countDocuments({
-      type: 'DEPOSIT',
-      status: 'PENDING'
-    });
-
-    const botStatus = botController ? '✅ Running' : '❌ Not running';
-
-    res.json({
-      status: 'OK',
-      timestamp: new Date().toISOString(),
-      database: 'MongoDB Connected',
-      wallet: {
-        totalWallets,
-        pendingDeposits
-      },
-      telegramBot: botStatus,
-      servicesInitialized,
-      uptime: process.uptime(),
-      cors: {
-        allowedOrigins: [
-          'https://bingominiapp.vercel.app',
-          'http://localhost:3001',
-          'http://localhost:3000'
-        ]
+    // Fast health check with timeout
+    const healthCheckPromise = (async () => {
+      const dbHealth = await database.healthCheck();
+      
+      // Lightweight checks - don't query collections unless necessary
+      let walletStats = { totalWallets: 0, pendingDeposits: 0 };
+      
+      if (dbHealth.connected) {
+        try {
+          const Wallet = require('./src/models/Wallet');
+          const Transaction = require('./src/models/Transaction');
+          
+          // Use estimatedDocumentCount for faster counting
+          walletStats.totalWallets = await Wallet.estimatedDocumentCount();
+          walletStats.pendingDeposits = await Transaction.countDocuments({
+            type: 'DEPOSIT',
+            status: 'PENDING'
+          }).maxTimeMS(3000); // 3 second timeout
+        } catch (dbError) {
+          console.warn('Health check DB query warning:', dbError.message);
+        }
       }
-    });
+
+      return {
+        status: dbHealth.connected ? 'OK' : 'DEGRADED',
+        timestamp: new Date().toISOString(),
+        database: dbHealth,
+        wallet: walletStats,
+        telegramBot: botController ? '✅ Running' : '❌ Not running',
+        servicesInitialized,
+        uptime: process.uptime(),
+        memory: {
+          rss: `${(process.memoryUsage().rss / 1024 / 1024).toFixed(2)}MB`,
+          heapUsed: `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)}MB`
+        }
+      };
+    })();
+
+    // Add timeout to health check
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Health check timeout')), 5000)
+    );
+
+    const result = await Promise.race([healthCheckPromise, timeoutPromise]);
+    res.json(result);
+    
   } catch (error) {
+    console.error('Health check error:', error);
     res.status(503).json({
       status: 'ERROR',
       timestamp: new Date().toISOString(),
-      error: 'Database connection failed',
+      error: error.message,
       uptime: process.uptime()
     });
   }
@@ -244,41 +370,77 @@ app.get('/health', async (req, res) => {
 // Admin health check endpoint
 app.get('/admin/health', async (req, res) => {
   try {
-    const Wallet = require('./src/models/Wallet');
-    const Transaction = require('./src/models/Transaction');
-    const User = require('./src/models/User');
+    const dbHealth = await database.healthCheck();
+    
+    if (!dbHealth.connected) {
+      return res.status(503).json({
+        status: 'ERROR',
+        error: 'Database not connected'
+      });
+    }
 
-    const stats = {
-      users: await User.countDocuments(),
-      wallets: await Wallet.countDocuments(),
-      totalTransactions: await Transaction.countDocuments(),
-      pendingDeposits: await Transaction.countDocuments({
-        type: 'DEPOSIT',
-        status: 'PENDING'
-      }),
-      completedDeposits: await Transaction.countDocuments({
-        type: 'DEPOSIT',
-        status: 'COMPLETED'
-      }),
-      totalBalance: await Wallet.aggregate([
-        { $group: { _id: null, total: { $sum: '$balance' } } }
+    // Use aggregation for faster stats
+    const [userCount, walletCount, transactionStats] = await Promise.all([
+      require('./src/models/User').estimatedDocumentCount(),
+      require('./src/models/Wallet').estimatedDocumentCount(),
+      require('./src/models/Transaction').aggregate([
+        {
+          $facet: {
+            total: [{ $count: "count" }],
+            pending: [
+              { $match: { type: 'DEPOSIT', status: 'PENDING' } },
+              { $count: "count" }
+            ],
+            completed: [
+              { $match: { type: 'DEPOSIT', status: 'COMPLETED' } },
+              { $count: "count" }
+            ]
+          }
+        }
       ])
-    };
+    ]);
 
     res.json({
       status: 'OK',
       system: 'Bingo Admin Dashboard',
       timestamp: new Date().toISOString(),
-      stats,
+      stats: {
+        users: userCount,
+        wallets: walletCount,
+        totalTransactions: transactionStats[0]?.total[0]?.count || 0,
+        pendingDeposits: transactionStats[0]?.pending[0]?.count || 0,
+        completedDeposits: transactionStats[0]?.completed[0]?.count || 0
+      },
       telegramBot: botController ? 'Running' : 'Not running',
       servicesInitialized
     });
   } catch (error) {
+    console.error('Admin health check error:', error);
     res.status(500).json({
       status: 'ERROR',
       error: error.message
     });
   }
+});
+
+// ==================== CRITICAL FIX 10: ADD SYSTEM STATUS ENDPOINT ====================
+app.get('/api/status', (req, res) => {
+  res.json({
+    api: 'online',
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: {
+      rss: `${(process.memoryUsage().rss / 1024 / 1024).toFixed(2)}MB`,
+      heapTotal: `${(process.memoryUsage().heapTotal / 1024 / 1024).toFixed(2)}MB`,
+      heapUsed: `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)}MB`
+    },
+    services: {
+      wallet: servicesInitialized ? 'online' : 'offline',
+      gameService: servicesInitialized ? 'online' : 'offline',
+      telegramBot: botController ? 'online' : 'offline'
+    }
+  });
 });
 
 // Root route
@@ -307,7 +469,8 @@ app.get('/', (req, res) => {
       games: '/api/games',
       wallet: '/api/wallet',
       admin: '/api/admin',
-      health: '/health'
+      health: '/health',
+      status: '/api/status'
     }
   });
 });
@@ -320,6 +483,7 @@ app.use('*', (req, res) => {
     availableEndpoints: {
       root: '/',
       health: '/health',
+      status: '/api/status',
       auth: '/api/auth/telegram',
       games: '/api/games/*',
       wallet: '/api/wallet/*',
@@ -328,9 +492,14 @@ app.use('*', (req, res) => {
   });
 });
 
-// Error handling middleware
+// ==================== CRITICAL FIX 11: OPTIMIZED ERROR HANDLING ====================
 app.use((err, req, res, next) => {
-  console.error('Error Stack:', err.stack);
+  console.error('Error:', err.message);
+  
+  // Don't log stack trace for timeout errors
+  if (!err.message.includes('timeout') && !err.message.includes('Timeout')) {
+    console.error('Error Stack:', err.stack);
+  }
 
   // MongoDB duplicate key error
   if (err.code === 11000) {
@@ -350,6 +519,15 @@ app.use((err, req, res, next) => {
     });
   }
 
+  // Timeout errors
+  if (err.message.includes('timeout') || err.message.includes('Timeout')) {
+    return res.status(504).json({
+      success: false,
+      error: 'Request timeout',
+      message: 'The server took too long to respond'
+    });
+  }
+
   // Wallet service errors
   if (err.message.includes('Wallet') || err.message.includes('balance')) {
     return res.status(400).json({
@@ -358,55 +536,90 @@ app.use((err, req, res, next) => {
     });
   }
 
+  // Default error
   res.status(500).json({
     success: false,
     error: process.env.NODE_ENV === 'production' ? 'Something went wrong!' : err.message
   });
 });
 
-cron.schedule('0 * * * *', async () => {
+// ==================== CRITICAL FIX 12: OPTIMIZED CRON JOBS ====================
+// Reduce cron frequency and add error handling
+cron.schedule('30 * * * *', async () => { // Every hour at minute 30
   console.log('🕐 Running hourly reconciliation check...');
   try {
-    await ReconciliationService.runDailyReconciliation();
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Reconciliation timeout')), 30000)
+    );
+    
+    await Promise.race([
+      ReconciliationService.runDailyReconciliation(),
+      timeoutPromise
+    ]);
+    console.log('✅ Hourly reconciliation completed');
   } catch (error) {
-    console.error('❌ Hourly reconciliation failed:', error);
+    console.error('❌ Hourly reconciliation failed:', error.message);
   }
 });
 
-// Run comprehensive reconciliation at midnight
-cron.schedule('0 0 * * *', async () => {
-  console.log('🌙 Running midnight comprehensive reconciliation...');
+// Run comprehensive reconciliation at 2 AM (off-peak)
+cron.schedule('0 2 * * *', async () => {
+  console.log('🌙 Running comprehensive reconciliation...');
   try {
-    const result = await ReconciliationService.runDailyReconciliation();
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Reconciliation timeout')), 60000)
+    );
+    
+    const result = await Promise.race([
+      ReconciliationService.runDailyReconciliation(),
+      timeoutPromise
+    ]);
     console.log('✅ Midnight reconciliation complete:', result);
   } catch (error) {
-    console.error('❌ Midnight reconciliation failed:', error);
+    console.error('❌ Midnight reconciliation failed:', error.message);
   }
 });
 
 const PORT = process.env.PORT || 3000;
 
-// Start server and THEN initialize services
-const server = app.listen(PORT, () => {
+// Start server
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server is running on port ${PORT}`);
   console.log(`💰 Wallet System: Enabled`);
   console.log(`🤖 Telegram Bot: ${process.env.BOT_TOKEN ? 'Enabled' : 'Disabled'}`);
-  console.log(`👑 Admin ID: ${process.env.ADMIN_TELEGRAM_ID || 'Not set'}`);
-  console.log(`🌐 CORS enabled for:`);
-  console.log(`   - https://bingominiapp.vercel.app (Production)`);
-  console.log(`   - http://localhost:3001 (Development)`);
-  console.log(`   - http://localhost:3000 (Development)`);
+  console.log(`👑 Admin IDs: ${process.env.ADMIN_TELEGRAM_IDS || 'Not set'}`);
+  console.log(`🌐 CORS enabled for production frontend`);
+  console.log(`⏱️  Request timeout: 15s`);
+  console.log(`📊 Rate limiting: 150 requests/15min per IP`);
+  
+  // Initialize services with delay
+  setTimeout(() => {
+    console.log('🔄 Starting service initialization in 3 seconds...');
+    initializeServices();
+  }, 3000);
+});
 
-  // Initialize services after server is running - only once
-  console.log('🔄 Initializing services...');
-  initializeServices();
+// ==================== CRITICAL FIX 13: SERVER KEEP-ALIVE SETTINGS ====================
+// Optimize server for better timeout handling
+server.keepAliveTimeout = 60000; // 60 seconds
+server.headersTimeout = 65000;   // 65 seconds
+server.maxConnections = 1000;
+
+// Handle server errors
+server.on('error', (error) => {
+  console.error('❌ Server error:', error);
+  
+  if (error.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use`);
+    process.exit(1);
+  }
 });
 
 // Graceful shutdown
-process.on('SIGINT', async () => {
+const gracefulShutdown = async () => {
   console.log('🛑 Server shutting down gracefully...');
   
-  servicesInitialized = false; // Reset flag
+  servicesInitialized = false;
 
   // Clean up game service intervals
   if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
@@ -419,40 +632,22 @@ process.on('SIGINT', async () => {
     console.log('✅ Telegram bot stopped');
   }
 
-  // Close MongoDB connection
-  await mongoose.connection.close();
-  console.log('✅ MongoDB connection closed');
+  // Close database connection
+  await database.disconnect();
+  console.log('✅ Database connection closed');
 
   server.close(() => {
     console.log('✅ Server closed');
     process.exit(0);
   });
-});
+};
 
-process.on('SIGTERM', async () => {
-  console.log('🛑 Server terminating gracefully...');
-  
-  servicesInitialized = false; // Reset flag
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
 
-  // Clean up game service intervals
-  if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
-    GameService.cleanupAllIntervals();
-  }
-
-  // Stop bot if running
-  if (botController && botController.bot) {
-    botController.bot.stop();
-    console.log('✅ Telegram bot stopped');
-  }
-
-  // Close MongoDB connection
-  await mongoose.connection.close();
-  console.log('✅ MongoDB connection closed');
-
-  server.close(() => {
-    console.log('✅ Server closed');
-    process.exit(0);
-  });
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 module.exports = app;

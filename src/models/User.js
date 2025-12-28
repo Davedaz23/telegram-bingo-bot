@@ -81,7 +81,7 @@ const userSchema = new mongoose.Schema({
 });
 
 // Index for better performance
-userSchema.index({ telegramId: 1 });
+// userSchema.index({ telegramId: 1 });
 userSchema.index({ role: 1 });
 userSchema.index({ isAdmin: 1 });
 userSchema.index({ isModerator: 1 });
