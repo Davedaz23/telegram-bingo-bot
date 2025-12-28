@@ -11,18 +11,21 @@ router.get('/:gameId/available-cards/:userId', async (req, res) => {
     const { gameId, userId } = req.params;
     const { count = 3 } = req.query;
     
-    console.log(`📋 Get available cards request: gameId=${gameId}, userId=${userId}, count=${count}`);
+    console.log(`📋 [1] Get available cards request: gameId=${gameId}, userId=${userId}, count=${count}`);
     
     if (!userId) {
+      console.log(`❌ [2] userId validation failed`);
       return res.status(400).json({
         success: false,
         error: 'userId is required'
       });
     }
 
+    console.log(`📋 [3] Calling GameService.getAvailableCards...`);
+    
     const cards = await GameService.getAvailableCards(gameId, userId, parseInt(count));
     
-    console.log(`✅ Generated ${cards.length} available cards for user ${userId}`);
+    console.log(`✅ [4] Generated ${cards.length} available cards for user ${userId}`);
     
     res.json({
       success: true,
@@ -30,7 +33,8 @@ router.get('/:gameId/available-cards/:userId', async (req, res) => {
       count: cards.length
     });
   } catch (error) {
-    console.error('❌ Get available cards error:', error);
+    console.error('❌ [ERROR] Get available cards error:', error);
+    console.error('❌ [ERROR] Full error details:', error.stack);
     res.status(400).json({
       success: false,
       error: error.message
