@@ -1,4 +1,4 @@
-// utils/gameUtils.js - CONSTANT BINGO CARDS ONLY
+// utils/gameUtils.js - DETERMINISTIC CARD GENERATION
 class GameUtils {
   static generateGameCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -9,51 +9,46 @@ class GameUtils {
     return code;
   }
 
-  // Generate a fixed bingo card based on card number
-  // Same card number will always produce the same bingo card
   static generateBingoCard(cardNumber = 1) {
-    // Convert cardNumber to a stable string
-    const seed = `bingo_card_${cardNumber}`;
+    // Use cardNumber as seed for deterministic generation
+    return this.generateDeterministicCard(cardNumber);
+  }
+
+  static generateDeterministicCard(cardNumber) {
+    // Validate card number
+    if (!cardNumber || cardNumber < 1 || cardNumber > 400) {
+      cardNumber = 1; // Default to card #1 if invalid
+    }
     
-    // Use deterministic algorithm to generate numbers
+    // Seed the random generator with card number
+    const seed = this.generateSeed(cardNumber);
+    
     const ranges = [
-      { min: 1, max: 15, letter: 'B' },    // B
-      { min: 16, max: 30, letter: 'I' },   // I
-      { min: 31, max: 45, letter: 'N' },   // N
-      { min: 46, max: 60, letter: 'G' },   // G
-      { min: 61, max: 75, letter: 'O' }    // O
+      { min: 1, max: 15 },   // B
+      { min: 16, max: 30 },  // I
+      { min: 31, max: 45 },  // N
+      { min: 46, max: 60 },  // G
+      { min: 61, max: 75 }   // O
     ];
 
     const card = [];
     
-    // Generate numbers for each column
     for (let col = 0; col < 5; col++) {
-      const columnNumbers = [];
-      const range = ranges[col];
+      const numbers = new Set();
       
-      // Create a list of all numbers in this column's range
-      const allNumbers = [];
-      for (let num = range.min; num <= range.max; num++) {
-        allNumbers.push(num);
+      // Generate deterministic numbers for this column
+      const colSeed = seed + col * 1000;
+      
+      while (numbers.size < 5) {
+        const num = this.deterministicRandom(colSeed + numbers.size, ranges[col].min, ranges[col].max);
+        numbers.add(num);
       }
       
-      // Sort all numbers first for consistency
-      allNumbers.sort((a, b) => a - b);
-      
-      // Use cardNumber to select 5 numbers from this column
-      // This ensures same cardNumber always gets same numbers
-      for (let i = 0; i < 5; i++) {
-        // Use a deterministic index based on cardNumber and position
-        const index = ((cardNumber * 100) + (col * 20) + (i * 7)) % allNumbers.length;
-        columnNumbers.push(allNumbers[index]);
-      }
-      
-      // Sort the selected numbers
-      columnNumbers.sort((a, b) => a - b);
-      card.push(columnNumbers);
+      const sortedNumbers = Array.from(numbers).sort((a, b) => a - b);
+      card.push(sortedNumbers);
     }
 
-    // Convert column-major to row-major format
+    // Transpose columns to rows
     const rows = [];
     for (let row = 0; row < 5; row++) {
       const currentRow = [];
@@ -63,21 +58,42 @@ class GameUtils {
       rows.push(currentRow);
     }
 
-    // Set the free space (center)
+    // Set FREE space (middle of card)
     rows[2][2] = 'FREE';
     
     return rows;
   }
 
-  // Helper to get card numbers as flat array for win checking
-  static getCardNumbersArray(card) {
-    const numbers = [];
-    for (let row = 0; row < 5; row++) {
-      for (let col = 0; col < 5; col++) {
-        numbers.push(card[row][col]);
-      }
+  static generateSeed(cardNumber) {
+    // Create a deterministic seed from card number
+    let seed = 0;
+    const str = cardNumber.toString();
+    
+    for (let i = 0; i < str.length; i++) {
+      seed = (seed * 31 + str.charCodeAt(i)) % 2147483647;
     }
-    return numbers;
+    
+    return seed;
+  }
+
+  static deterministicRandom(seed, min, max) {
+    // Simple deterministic pseudo-random number generator
+    let x = Math.sin(seed) * 10000;
+    let random = x - Math.floor(x);
+    
+    return Math.floor(random * (max - min + 1)) + min;
+  }
+
+  // Generate all 400 deterministic cards at once (for caching)
+  static generateAllCards() {
+    const allCards = new Map();
+    
+    for (let cardNumber = 1; cardNumber <= 400; cardNumber++) {
+      const card = this.generateDeterministicCard(cardNumber);
+      allCards.set(cardNumber, card);
+    }
+    
+    return allCards;
   }
 
   static checkWinCondition(cardNumbers, markedPositions) {
@@ -250,25 +266,6 @@ class GameUtils {
     console.log(`Marked: ${markedPositions.length}/25 positions`);
     console.log('-----------------\n');
   }
-
-  
-  
-  // Get a list of pre-defined constant cards
-  static getConstantCards(count = 100) {
-    const cards = [];
-    for (let i = 1; i <= count; i++) {
-      cards.push({
-        id: i,
-        card: this.generateBingoCard(i),
-        numbers: this.getCardNumbersArray(this.generateBingoCard(i))
-      });
-    }
-    return cards;
-  }
 }
 
-//dfsdfsd
-
 module.exports = GameUtils;
-
-//Defar
