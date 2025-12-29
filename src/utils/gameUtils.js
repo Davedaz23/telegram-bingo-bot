@@ -1,4 +1,4 @@
-// utils/gameUtils.js - COMPLETE FIXED VERSION
+// utils/gameUtils.js - CONSTANT BINGO CARDS ONLY
 class GameUtils {
   static generateGameCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -9,29 +9,51 @@ class GameUtils {
     return code;
   }
 
-  static generateBingoCard() {
+  // Generate a fixed bingo card based on card number
+  // Same card number will always produce the same bingo card
+  static generateBingoCard(cardNumber = 1) {
+    // Convert cardNumber to a stable string
+    const seed = `bingo_card_${cardNumber}`;
+    
+    // Use deterministic algorithm to generate numbers
     const ranges = [
-      { min: 1, max: 15 },   // B
-      { min: 16, max: 30 },  // I
-      { min: 31, max: 45 },  // N
-      { min: 46, max: 60 },  // G
-      { min: 61, max: 75 }   // O
+      { min: 1, max: 15, letter: 'B' },    // B
+      { min: 16, max: 30, letter: 'I' },   // I
+      { min: 31, max: 45, letter: 'N' },   // N
+      { min: 46, max: 60, letter: 'G' },   // G
+      { min: 61, max: 75, letter: 'O' }    // O
     ];
 
     const card = [];
     
+    // Generate numbers for each column
     for (let col = 0; col < 5; col++) {
-      const numbers = new Set();
+      const columnNumbers = [];
+      const range = ranges[col];
       
-      while (numbers.size < 5) {
-        const num = Math.floor(Math.random() * (ranges[col].max - ranges[col].min + 1)) + ranges[col].min;
-        numbers.add(num);
+      // Create a list of all numbers in this column's range
+      const allNumbers = [];
+      for (let num = range.min; num <= range.max; num++) {
+        allNumbers.push(num);
       }
       
-      const sortedNumbers = Array.from(numbers).sort((a, b) => a - b);
-      card.push(sortedNumbers);
+      // Sort all numbers first for consistency
+      allNumbers.sort((a, b) => a - b);
+      
+      // Use cardNumber to select 5 numbers from this column
+      // This ensures same cardNumber always gets same numbers
+      for (let i = 0; i < 5; i++) {
+        // Use a deterministic index based on cardNumber and position
+        const index = ((cardNumber * 100) + (col * 20) + (i * 7)) % allNumbers.length;
+        columnNumbers.push(allNumbers[index]);
+      }
+      
+      // Sort the selected numbers
+      columnNumbers.sort((a, b) => a - b);
+      card.push(columnNumbers);
     }
 
+    // Convert column-major to row-major format
     const rows = [];
     for (let row = 0; row < 5; row++) {
       const currentRow = [];
@@ -41,9 +63,21 @@ class GameUtils {
       rows.push(currentRow);
     }
 
+    // Set the free space (center)
     rows[2][2] = 'FREE';
     
     return rows;
+  }
+
+  // Helper to get card numbers as flat array for win checking
+  static getCardNumbersArray(card) {
+    const numbers = [];
+    for (let row = 0; row < 5; row++) {
+      for (let col = 0; col < 5; col++) {
+        numbers.push(card[row][col]);
+      }
+    }
+    return numbers;
   }
 
   static checkWinCondition(cardNumbers, markedPositions) {
@@ -215,6 +249,19 @@ class GameUtils {
     
     console.log(`Marked: ${markedPositions.length}/25 positions`);
     console.log('-----------------\n');
+  }
+  
+  // Get a list of pre-defined constant cards
+  static getConstantCards(count = 100) {
+    const cards = [];
+    for (let i = 1; i <= count; i++) {
+      cards.push({
+        id: i,
+        card: this.generateBingoCard(i),
+        numbers: this.getCardNumbersArray(this.generateBingoCard(i))
+      });
+    }
+    return cards;
   }
 }
 
