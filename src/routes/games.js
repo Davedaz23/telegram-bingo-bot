@@ -9,7 +9,7 @@ const Game = require('../models/Game');
 router.get('/:gameId/available-cards/:userId', async (req, res) => {
   try {
     const { gameId, userId } = req.params;
-    const { count = 3 } = req.query;
+    const { count = 400 } = req.query;
     
     console.log(`📋 [1] Get available cards request: gameId=${gameId}, userId=${userId}, count=${count}`);
     
