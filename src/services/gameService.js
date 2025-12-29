@@ -2009,7 +2009,7 @@ static async getAvailableCards(gameId, userId, count = 400) {
   const allCards = GameUtils.generateAllCards();
   
   for (let cardNumber = 1; cardNumber <= count; cardNumber++) {
-    const cardNumbers = allCards.get(cardNumber) || GameUtils.generateDeterministicCard(cardNumber);
+    const cardNumbers = allCards.get(cardNumber) ;
     cards.push({
       cardNumber: cardNumber,  // Add card number
       numbers: cardNumbers,
