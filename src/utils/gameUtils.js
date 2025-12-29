@@ -1,4 +1,4 @@
-// utils/gameUtils.js - COMPLETE FIXED VERSION
+// utils/gameUtils.js - CONSTANT BINGO CARDS ONLY (FIXED)
 class GameUtils {
   static generateGameCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -9,29 +9,48 @@ class GameUtils {
     return code;
   }
 
-  static generateBingoCard() {
+  // Generate a fixed bingo card based on card number
+  // Same card number will always produce the same bingo card
+  static generateBingoCard(cardNumber = 1) {
+    // Ensure cardNumber is within valid range
+    if (cardNumber < 1) cardNumber = 1;
+    if (cardNumber > 400) cardNumber = 400;
+    
+    // Use a deterministic algorithm to shuffle numbers
+    const seed = cardNumber; // Use cardNumber as seed
+    
     const ranges = [
-      { min: 1, max: 15 },   // B
-      { min: 16, max: 30 },  // I
-      { min: 31, max: 45 },  // N
-      { min: 46, max: 60 },  // G
-      { min: 61, max: 75 }   // O
+      { min: 1, max: 15, letter: 'B' },    // B
+      { min: 16, max: 30, letter: 'I' },   // I
+      { min: 31, max: 45, letter: 'N' },   // N
+      { min: 46, max: 60, letter: 'G' },   // G
+      { min: 61, max: 75, letter: 'O' }    // O
     ];
 
     const card = [];
     
+    // Generate numbers for each column
     for (let col = 0; col < 5; col++) {
-      const numbers = new Set();
+      const range = ranges[col];
       
-      while (numbers.size < 5) {
-        const num = Math.floor(Math.random() * (ranges[col].max - ranges[col].min + 1)) + ranges[col].min;
-        numbers.add(num);
+      // Create a list of all numbers in this column's range
+      const allNumbers = [];
+      for (let num = range.min; num <= range.max; num++) {
+        allNumbers.push(num);
       }
       
-      const sortedNumbers = Array.from(numbers).sort((a, b) => a - b);
-      card.push(sortedNumbers);
+      // Deterministic shuffle based on cardNumber and column
+      const shuffledNumbers = this.deterministicShuffle([...allNumbers], seed + col * 1000);
+      
+      // Take first 5 unique numbers from the shuffled list
+      const columnNumbers = shuffledNumbers.slice(0, 5);
+      
+      // Sort the selected numbers (ascending)
+      columnNumbers.sort((a, b) => a - b);
+      card.push(columnNumbers);
     }
 
+    // Convert column-major to row-major format
     const rows = [];
     for (let row = 0; row < 5; row++) {
       const currentRow = [];
@@ -41,9 +60,53 @@ class GameUtils {
       rows.push(currentRow);
     }
 
+    // Set the free space (center)
     rows[2][2] = 'FREE';
     
     return rows;
+  }
+
+  // Deterministic shuffle function
+  static deterministicShuffle(array, seed) {
+    const result = [...array];
+    let currentSeed = seed;
+    
+    // Simple deterministic PRNG
+    function deterministicRandom() {
+      const x = Math.sin(currentSeed++) * 10000;
+      return x - Math.floor(x);
+    }
+    
+    // Fisher-Yates shuffle with deterministic random
+    for (let i = result.length - 1; i > 0; i--) {
+      const j = Math.floor(deterministicRandom() * (i + 1));
+      [result[i], result[j]] = [result[j], result[i]];
+    }
+    
+    return result;
+  }
+
+  // Helper to get card numbers as flat array for win checking
+  static getCardNumbersArray(card) {
+    const numbers = [];
+    for (let row = 0; row < 5; row++) {
+      for (let col = 0; col < 5; col++) {
+        numbers.push(card[row][col]);
+      }
+    }
+    return numbers;
+  }
+
+  // Pre-generate all 400 cards for better performance
+  static generateAllCards() {
+    const allCards = new Map();
+    
+    for (let cardNumber = 1; cardNumber <= 400; cardNumber++) {
+      const card = this.generateBingoCard(cardNumber);
+      allCards.set(cardNumber, card);
+    }
+    
+    return allCards;
   }
 
   static checkWinCondition(cardNumbers, markedPositions) {
@@ -164,6 +227,8 @@ class GameUtils {
   static validateBingoCard(card) {
     if (!Array.isArray(card) || card.length !== 5) return false;
     
+    // Check for duplicate numbers (excluding FREE space)
+    const allNumbers = new Set();
     for (let i = 0; i < 5; i++) {
       if (!Array.isArray(card[i]) || card[i].length !== 5) return false;
       
@@ -173,8 +238,38 @@ class GameUtils {
           if (value !== 'FREE') return false;
         } else {
           if (typeof value !== 'number' || value < 1 || value > 75) return false;
+          
+          // Check for duplicates
+          if (allNumbers.has(value)) {
+            console.warn(`Duplicate number detected: ${value} at position (${i},${j})`);
+            return false;
+          }
+          allNumbers.add(value);
         }
       }
+    }
+    
+    // Verify each column has numbers within correct range
+    for (let col = 0; col < 5; col++) {
+      const column = [];
+      for (let row = 0; row < 5; row++) {
+        if (row === 2 && col === 2) continue; // Skip FREE space
+        column.push(card[row][col]);
+      }
+      
+      // Sort column for range checking
+      column.sort((a, b) => a - b);
+      
+      // Check B column (1-15)
+      if (col === 0 && (column.some(n => n < 1 || n > 15))) return false;
+      // Check I column (16-30)
+      if (col === 1 && (column.some(n => n < 16 || n > 30))) return false;
+      // Check N column (31-45)
+      if (col === 2 && (column[column.length-1] < 31 || column[0] > 45)) return false;
+      // Check G column (46-60)
+      if (col === 3 && (column.some(n => n < 46 || n > 60))) return false;
+      // Check O column (61-75)
+      if (col === 4 && (column.some(n => n < 61 || n > 75))) return false;
     }
     
     return true;
@@ -216,6 +311,22 @@ class GameUtils {
     console.log(`Marked: ${markedPositions.length}/25 positions`);
     console.log('-----------------\n');
   }
+  
+  // Get a list of pre-defined constant cards
+  static getConstantCards(count = 400) {
+    const cards = [];
+    for (let i = 1; i <= count; i++) {
+      const card = this.generateBingoCard(i);
+      cards.push({
+        id: i,
+        card: card,
+        numbers: this.getCardNumbersArray(card)
+      });
+    }
+    return cards;
+  }
+  
+
 }
 
 module.exports = GameUtils;
