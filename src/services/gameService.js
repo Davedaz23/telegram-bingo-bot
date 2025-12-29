@@ -2004,7 +2004,8 @@ static async getAvailableCards(gameId, userId, count = 400) {
   const cards = [];
   
   for (let i = 0; i < count; i++) {
-    const cardNumbers = GameUtils.generateBingoCard();
+    // Pass the card index to generate unique cards
+    const cardNumbers = GameUtils.generateBingoCard(i + 1); // ← PASS THE INDEX!
     cards.push({
       cardIndex: i + 1,
       numbers: cardNumbers,
@@ -2014,7 +2015,6 @@ static async getAvailableCards(gameId, userId, count = 400) {
   
   return cards;
 }
-
 static formatCardForPreview(cardNumbers) {
   const letters = ['B', 'I', 'N', 'G', 'O'];
   const preview = {};

@@ -1,4 +1,4 @@
-// utils/gameUtils.js - FIXED VERSION
+// utils/gameUtils.js - CONSTANT BINGO CARDS ONLY
 class GameUtils {
   static generateGameCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -10,47 +10,52 @@ class GameUtils {
   }
 
   // Generate a fixed bingo card based on card number
+  // Same card number will always produce the same bingo card
   static generateBingoCard(cardNumber = 1) {
-    // Ranges for B, I, N, G, O columns
+    // Define the ranges for each column (B, I, N, G, O)
     const ranges = [
-      { min: 1, max: 15, letter: 'B' },    // B: 1-15
-      { min: 16, max: 30, letter: 'I' },   // I: 16-30
-      { min: 31, max: 45, letter: 'N' },   // N: 31-45
-      { min: 46, max: 60, letter: 'G' },   // G: 46-60
-      { min: 61, max: 75, letter: 'O' }    // O: 61-75
+      { min: 1, max: 15, count: 5 },    // B
+      { min: 16, max: 30, count: 5 },   // I
+      { min: 31, max: 45, count: 5 },   // N
+      { min: 46, max: 60, count: 5 },   // G
+      { min: 61, max: 75, count: 5 }    // O
     ];
 
-    // Initialize card as 5x5 grid
+    // Initialize empty card (5x5 grid)
     const card = [];
-    
-    // For each column (B, I, N, G, O)
+
+    // For each column, generate 5 unique numbers
     for (let col = 0; col < 5; col++) {
       const range = ranges[col];
-      const numbers = new Set(); // Use Set to ensure uniqueness
+      const numbers = [];
       
-      // Create a pseudo-random number generator seeded with cardNumber
-      let seed = cardNumber * 100 + col;
+      // Create a seeded random generator for this column
+      const seed = cardNumber * 100 + col;
       
       // Generate 5 unique numbers for this column
-      while (numbers.size < 5) {
-        // Simple deterministic hash function
-        seed = (seed * 9301 + 49297) % 233280;
-        const rand = seed / 233280;
+      for (let i = 0; i < 5; i++) {
+        let num;
+        let attempts = 0;
         
-        // Calculate number within range
-        const num = range.min + Math.floor(rand * (range.max - range.min + 1));
+        do {
+          // Use deterministic "random" based on seed
+          const pseudoRandom = Math.sin(seed + i + attempts * 100) * 10000;
+          const offset = Math.floor((pseudoRandom - Math.floor(pseudoRandom)) * (range.max - range.min + 1));
+          num = range.min + offset;
+          attempts++;
+          
+          if (attempts > 100) {
+            // Fallback: sequential numbers
+            num = range.min + i * 3;
+          }
+        } while (numbers.includes(num));
         
-        numbers.add(num);
-        
-        // Prevent infinite loop
-        if (numbers.size >= (range.max - range.min + 1)) {
-          break;
-        }
+        numbers.push(num);
       }
       
-      // Convert Set to Array and sort
-      const sortedNumbers = Array.from(numbers).sort((a, b) => a - b);
-      card.push(sortedNumbers);
+      // Sort the numbers ascending
+      numbers.sort((a, b) => a - b);
+      card.push(numbers);
     }
 
     // Convert from column-major to row-major (5 rows)
@@ -69,7 +74,7 @@ class GameUtils {
     return rows;
   }
 
-  // Helper to get card numbers as flat array
+  // Helper to get card numbers as flat array for win checking
   static getCardNumbersArray(card) {
     const numbers = [];
     for (let row = 0; row < 5; row++) {
@@ -81,29 +86,31 @@ class GameUtils {
   }
 
   static checkWinCondition(cardNumbers, markedPositions) {
-    if (!cardNumbers || !markedPositions) return false;
+    if (!cardNumbers || !markedPositions) {
+      return false;
+    }
 
-    // Always count FREE space as marked (position 12)
+    // Always count FREE space as marked
     const effectiveMarked = [...new Set([...markedPositions, 12])];
     
     const winningPatterns = [
       // Rows
-      [0, 1, 2, 3, 4],
-      [5, 6, 7, 8, 9],
-      [10, 11, 12, 13, 14],
-      [15, 16, 17, 18, 19],
-      [20, 21, 22, 23, 24],
+      [0, 1, 2, 3, 4],      // Row 1
+      [5, 6, 7, 8, 9],      // Row 2
+      [10, 11, 12, 13, 14], // Row 3 (includes FREE)
+      [15, 16, 17, 18, 19], // Row 4
+      [20, 21, 22, 23, 24], // Row 5
       
       // Columns
-      [0, 5, 10, 15, 20],
-      [1, 6, 11, 16, 21],
-      [2, 7, 12, 17, 22],
-      [3, 8, 13, 18, 23],
-      [4, 9, 14, 19, 24],
+      [0, 5, 10, 15, 20],   // Col 1 (B)
+      [1, 6, 11, 16, 21],   // Col 2 (I)
+      [2, 7, 12, 17, 22],   // Col 3 (N)
+      [3, 8, 13, 18, 23],   // Col 4 (G)
+      [4, 9, 14, 19, 24],   // Col 5 (O)
       
       // Diagonals
-      [0, 6, 12, 18, 24],
-      [4, 8, 12, 16, 20]
+      [0, 6, 12, 18, 24],   // Diagonal top-left to bottom-right
+      [4, 8, 12, 16, 20]    // Diagonal top-right to bottom-left
     ];
 
     for (const pattern of winningPatterns) {
@@ -130,7 +137,7 @@ class GameUtils {
 
   static getWinningPattern(markedPositions) {
     const effectiveMarked = [...new Set([...markedPositions, 12])];
-    
+
     const winningPatterns = [
       { type: 'ROW', positions: [0, 1, 2, 3, 4] },
       { type: 'ROW', positions: [5, 6, 7, 8, 9] },
@@ -155,9 +162,23 @@ class GameUtils {
     return null;
   }
 
+  // Validate bingo card structure
+  static validateBingoCard(card) {
+    if (!Array.isArray(card) || card.length !== 5) return false;
+    
+    for (let i = 0; i < 5; i++) {
+      if (!Array.isArray(card[i]) || card[i].length !== 5) return false;
+    }
+    
+    // Check FREE space
+    if (card[2][2] !== 'FREE') return false;
+    
+    return true;
+  }
+
   // Print card for debugging
-  static printCard(card, cardNumber = 1) {
-    console.log(`\n🎯 Card #${cardNumber}:`);
+  static printCard(card) {
+    console.log('\n🎯 Bingo Card:');
     console.log(' B   I   N   G   O');
     console.log('-------------------');
     
@@ -170,32 +191,10 @@ class GameUtils {
       }
       console.log(rowStr);
     }
-    
-    // Validate each column
-    for (let col = 0; col < 5; col++) {
-      const columnNumbers = [];
-      for (let row = 0; row < 5; row++) {
-        if (card[row][col] !== 'FREE') {
-          columnNumbers.push(card[row][col]);
-        }
-      }
-      const uniqueCount = new Set(columnNumbers).size;
-      console.log(`Column ${['B','I','N','G','O'][col]}: ${columnNumbers.join(', ')} ${uniqueCount === 5 ? '✓' : '✗ (duplicates!)'}`);
-    }
     console.log('-------------------\n');
   }
-
-  // Test function
-  static testCardGeneration(count = 5) {
-    console.log(`🧪 Testing ${count} bingo cards...\n`);
-    
-    for (let i = 1; i <= count; i++) {
-      const card = this.generateBingoCard(i);
-      this.printCard(card, i);
-    }
-  }
-
-  // Get multiple unique cards
+  
+  // Get multiple constant cards
   static getConstantCards(count = 100) {
     const cards = [];
     for (let i = 1; i <= count; i++) {
@@ -207,6 +206,34 @@ class GameUtils {
       });
     }
     return cards;
+  }
+
+  // Test function to verify card generation
+  static testCardGeneration() {
+    console.log('\n🧪 Testing Bingo Card Generation...');
+    
+    for (let cardNum = 1; cardNum <= 3; cardNum++) {
+      console.log(`\n📋 Card #${cardNum}:`);
+      const card = this.generateBingoCard(cardNum);
+      this.printCard(card);
+      
+      // Validate no duplicates in columns
+      for (let col = 0; col < 5; col++) {
+        const columnNumbers = [];
+        for (let row = 0; row < 5; row++) {
+          if (card[row][col] !== 'FREE') {
+            columnNumbers.push(card[row][col]);
+          }
+        }
+        
+        const uniqueNumbers = [...new Set(columnNumbers)];
+        if (uniqueNumbers.length !== columnNumbers.length) {
+          console.log(`❌ Card #${cardNum} has duplicates in column ${col}`);
+        } else {
+          console.log(`✅ Card #${cardNum} column ${col}: ${columnNumbers.sort((a,b)=>a-b).join(', ')}`);
+        }
+      }
+    }
   }
 }
 
