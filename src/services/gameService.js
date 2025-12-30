@@ -1075,30 +1075,31 @@ class GameService {
     return preview;
   }
 
-  static async getUserBingoCard(gameId, userId) {
-    try {
-      let user;
-      if (mongoose.Types.ObjectId.isValid(userId)) {
-        user = await User.findById(userId);
-      } else {
-        user = await User.findOne({ telegramId: userId });
-      }
-      
-      if (!user) {
-        return null;
-      }
-      
-      const query = { gameId, userId: user._id };
-      
-      const bingoCard = await BingoCard.findOne(query)
-        .populate('userId', 'username firstName telegramId');
-      
-      return bingoCard;
-    } catch (error) {
-      console.error('❌ Error in getUserBingoCard:', error);
-      throw error;
+  
+static async getUserBingoCard(gameId, userId) {
+  try {
+    let user;
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId);
+    } else {
+      user = await User.findOne({ telegramId: userId });
     }
+    
+    if (!user) {
+      return null;
+    }
+    
+    const query = { gameId, userId: user._id };
+    
+    const bingoCard = await BingoCard.findOne(query)
+      .populate('userId', 'username firstName telegramId');
+    
+    return bingoCard;
+  } catch (error) {
+    console.error('❌ Error in getUserBingoCard:', error);
+    throw error;
   }
+}
 
   static async findByCode(code) {
     const game = await Game.findOne({ code })
