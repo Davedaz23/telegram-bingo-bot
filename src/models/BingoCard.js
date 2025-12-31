@@ -37,6 +37,16 @@ const bingoCardSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
+   isDisqualified: {
+    type: Boolean,
+    default: false
+  },
+  disqualifiedAt: {
+    type: Date
+  },
+  disqualificationReason: {
+    type: String
+  },
   // Track which numbers were already called when they joined
   numbersCalledAtJoin: {
     type: [Number],

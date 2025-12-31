@@ -20,6 +20,19 @@ const gamePlayerSchema = new mongoose.Schema({
     type: String,
     enum: ['PLAYER', 'SPECTATOR'],
     default: 'PLAYER'
+  },
+    disqualified: {
+    type: Boolean,
+    default: false
+  },
+  disqualifiedAt: {
+    type: Date
+  },
+  disqualificationReason: {
+    type: String
+  },
+  disqualificationDetails: {
+    type: mongoose.Schema.Types.Mixed
   }
 }, {
   timestamps: { createdAt: 'joinedAt', updatedAt: false }
