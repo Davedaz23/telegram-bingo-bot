@@ -1,8 +1,9 @@
-// src/app.js - UPDATED VERSION
+// src/app.js - UPDATED VERSION WITH WEBSOCKET
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
+const http = require('http'); // Add HTTP for WebSocket
 require('dotenv').config();
 
 const authRoutes = require('./src/routes/auth');
@@ -10,6 +11,7 @@ const gameRoutes = require('./src/routes/games');
 const walletRoutes = require('./src/routes/wallet');
 const testRoutes = require('./src/routes/test');
 const cron = require('node-cron');
+const WebSocketService = require('./src/services/webSocketService');  
 const ReconciliationService = require('./src/services/reconciliationService');
 // Import WalletService to initialize payment methods
 const WalletService = require('./src/services/walletService');
@@ -17,6 +19,9 @@ const WalletService = require('./src/services/walletService');
 const GameService = require('./src/services/gameService');
 
 const app = express();
+
+// Create HTTP server for WebSocket
+const server = http.createServer(app);
 
 // Connect to MongoDB
 mongoose.connect(process.env.MONGODB_URI)
@@ -26,6 +31,7 @@ mongoose.connect(process.env.MONGODB_URI)
 // ✅ FIXED: Simplified bot initialization with singleton pattern
 let botController = null;
 let servicesInitialized = false; // Add flag to track initialization
+let webSocketService = null; // WebSocket service instance
 
 const AdminUtils = {
   adminIds: [],
@@ -104,16 +110,20 @@ const initializeBot = () => {
 };
 
 // CORS configuration - UPDATED with your live frontend URL
-app.use(cors({
+const corsOptions = {
   origin: [
     'https://bingominiapp.vercel.app', // Your live frontend
     'http://localhost:3001', // Development
-    'http://localhost:3000'  // Development
+    'http://localhost:3000', // Development
+    'ws://localhost:3000',   // WebSocket for development
+    'ws://localhost:3001'    // WebSocket for development
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   credentials: true
-}));
+};
+
+app.use(cors(corsOptions));
 
 // Middleware
 app.use(express.json({ limit: '10mb' })); // Increased for receipt images if needed
@@ -127,6 +137,34 @@ app.use('/api/wallet', walletRoutes);
 app.use('/api', testRoutes);
 // ✅ ADD: Admin routes for wallet management
 app.use('/api/admin', require('./src/routes/admin'));
+
+// WebSocket info endpoint
+app.get('/ws/info', (req, res) => {
+  res.json({
+    success: true,
+    webSocketEnabled: true,
+    wsUrl: process.env.NODE_ENV === 'production' 
+      ? `wss://${req.headers.host}` 
+      : `ws://${req.headers.host}`,
+    endpoints: {
+      game: '/ws/game',
+      notifications: '/ws/notifications',
+      admin: '/ws/admin'
+    },
+    events: [
+      'CONNECTED',
+      'ERROR',
+      'TAKEN_CARDS_UPDATE',
+      'GAME_STATUS_UPDATE',
+      'NUMBER_CALLED',
+      'BINGO_CLAIMED',
+      'USER_JOINED',
+      'USER_LEFT',
+      'WALLET_UPDATE',
+      'ADMIN_NOTIFICATION'
+    ]
+  });
+});
 
 app.get('/test-sms', (req, res) => {
   res.sendFile(path.join(__dirname, 'public/test-sms.html'));
@@ -161,12 +199,23 @@ const initializeServices = async () => {
     console.log('🔄 Initializing all services...');
     servicesInitialized = true;
 
-    // 1. Initialize payment methods
+    // 1. Initialize WebSocket service
+    console.log('🔗 Initializing WebSocket service...');
+    webSocketService = new WebSocketService(server);
+    console.log('✅ WebSocket service initialized successfully');
+
+    // 2. Initialize GameService with WebSocket service
+    if (GameService && typeof GameService.setWebSocketService === 'function') {
+      GameService.setWebSocketService(webSocketService);
+      console.log('✅ WebSocket service injected into GameService');
+    }
+
+    // 3. Initialize payment methods
     console.log('💰 Initializing payment methods...');
     await WalletService.initializePaymentMethods();
     console.log('✅ Payment methods initialized successfully');
 
-    // 2. Initialize auto-game service
+    // 4. Initialize auto-game service
     console.log('🎮 Initializing auto-game service...');
     if (GameService && typeof GameService.startAutoGameService === 'function') {
       GameService.startAutoGameService();
@@ -175,7 +224,7 @@ const initializeServices = async () => {
       console.error('❌ GameService.startAutoGameService is not available');
     }
 
-    // 3. Initialize Telegram bot
+    // 5. Initialize Telegram bot
     console.log('🤖 Initializing Telegram bot...');
     botController = initializeBot();
     
@@ -194,7 +243,7 @@ const initializeServices = async () => {
   }
 };
 
-// Enhanced health check with wallet status
+// Enhanced health check with wallet status and WebSocket
 app.get('/health', async (req, res) => {
   try {
     // MongoDB health check
@@ -211,6 +260,8 @@ app.get('/health', async (req, res) => {
     });
 
     const botStatus = botController ? '✅ Running' : '❌ Not running';
+    const webSocketStatus = webSocketService ? '✅ Running' : '❌ Not running';
+    const activeConnections = webSocketService ? webSocketService.getConnectionCount() : 0;
 
     res.json({
       status: 'OK',
@@ -221,14 +272,15 @@ app.get('/health', async (req, res) => {
         pendingDeposits
       },
       telegramBot: botStatus,
+      webSocket: {
+        status: webSocketStatus,
+        activeConnections,
+        gameRooms: webSocketService ? webSocketService.getGameRoomCount() : 0
+      },
       servicesInitialized,
       uptime: process.uptime(),
       cors: {
-        allowedOrigins: [
-          'https://bingominiapp.vercel.app',
-          'http://localhost:3001',
-          'http://localhost:3000'
-        ]
+        allowedOrigins: corsOptions.origin
       }
     });
   } catch (error) {
@@ -265,12 +317,20 @@ app.get('/admin/health', async (req, res) => {
       ])
     };
 
+    const webSocketStats = webSocketService ? {
+      activeConnections: webSocketService.getConnectionCount(),
+      gameRooms: webSocketService.getGameRoomCount(),
+      messagesSent: webSocketService.getMessagesSent(),
+      messagesReceived: webSocketService.getMessagesReceived()
+    } : null;
+
     res.json({
       status: 'OK',
       system: 'Bingo Admin Dashboard',
       timestamp: new Date().toISOString(),
       stats,
       telegramBot: botController ? 'Running' : 'Not running',
+      webSocket: webSocketStats,
       servicesInitialized
     });
   } catch (error) {
@@ -284,13 +344,15 @@ app.get('/admin/health', async (req, res) => {
 // Root route
 app.get('/', (req, res) => {
   const botStatus = botController ? '✅ Running' : '❌ Not running';
+  const webSocketStatus = webSocketService ? '✅ Running' : '❌ Not running';
   
   res.json({
     message: 'Bingo API Server with Wallet System',
-    version: '2.0.0',
+    version: '3.0.0',
     timestamp: new Date().toISOString(),
     status: {
       telegramBot: botStatus,
+      webSocket: webSocketStatus,
       walletSystem: '✅ Enabled',
       gameService: '✅ Active',
       servicesInitialized
@@ -298,16 +360,29 @@ app.get('/', (req, res) => {
     features: [
       'Telegram Authentication',
       'Real-time Bingo Games',
+      'WebSocket Support',
       'Wallet System with Ethiopian Payments',
       'Admin Dashboard'
     ],
     frontend: 'https://bingominiapp.vercel.app',
+    webSocketInfo: {
+      enabled: true,
+      endpoint: '/ws/game',
+      supportedEvents: [
+        'TAKEN_CARDS_UPDATE',
+        'GAME_STATUS_UPDATE',
+        'NUMBER_CALLED',
+        'BINGO_CLAIMED'
+      ]
+    },
     endpoints: {
+      root: '/',
+      health: '/health',
+      wsInfo: '/ws/info',
       auth: '/api/auth/telegram',
-      games: '/api/games',
-      wallet: '/api/wallet',
-      admin: '/api/admin',
-      health: '/health'
+      games: '/api/games/*',
+      wallet: '/api/wallet/*',
+      admin: '/api/admin/*'
     }
   });
 });
@@ -320,6 +395,7 @@ app.use('*', (req, res) => {
     availableEndpoints: {
       root: '/',
       health: '/health',
+      wsInfo: '/ws/info',
       auth: '/api/auth/telegram',
       games: '/api/games/*',
       wallet: '/api/wallet/*',
@@ -384,18 +460,29 @@ cron.schedule('0 0 * * *', async () => {
   }
 });
 
+// WebSocket connection cleanup every hour
+cron.schedule('0 * * * *', () => {
+  if (webSocketService && typeof webSocketService.cleanupStaleConnections === 'function') {
+    console.log('🧹 Cleaning up stale WebSocket connections...');
+    const cleaned = webSocketService.cleanupStaleConnections();
+    console.log(`✅ Cleaned up ${cleaned} stale connections`);
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 // Start server and THEN initialize services
-const server = app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`🚀 Server is running on port ${PORT}`);
   console.log(`💰 Wallet System: Enabled`);
+  console.log(`🔗 WebSocket: Enabled`);
   console.log(`🤖 Telegram Bot: ${process.env.BOT_TOKEN ? 'Enabled' : 'Disabled'}`);
   console.log(`👑 Admin ID: ${process.env.ADMIN_TELEGRAM_ID || 'Not set'}`);
   console.log(`🌐 CORS enabled for:`);
   console.log(`   - https://bingominiapp.vercel.app (Production)`);
   console.log(`   - http://localhost:3001 (Development)`);
   console.log(`   - http://localhost:3000 (Development)`);
+  console.log(`   - WebSocket support enabled`);
 
   // Initialize services after server is running - only once
   console.log('🔄 Initializing services...');
@@ -411,6 +498,13 @@ process.on('SIGINT', async () => {
   // Clean up game service intervals
   if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
     GameService.cleanupAllIntervals();
+  }
+
+  // Clean up WebSocket connections
+  if (webSocketService && typeof webSocketService.closeAllConnections === 'function') {
+    console.log('🔌 Closing all WebSocket connections...');
+    webSocketService.closeAllConnections();
+    console.log('✅ All WebSocket connections closed');
   }
 
   // Stop bot if running
@@ -439,6 +533,13 @@ process.on('SIGTERM', async () => {
     GameService.cleanupAllIntervals();
   }
 
+  // Clean up WebSocket connections
+  if (webSocketService && typeof webSocketService.closeAllConnections === 'function') {
+    console.log('🔌 Closing all WebSocket connections...');
+    webSocketService.closeAllConnections();
+    console.log('✅ All WebSocket connections closed');
+  }
+
   // Stop bot if running
   if (botController && botController.bot) {
     botController.bot.stop();
@@ -455,4 +556,26 @@ process.on('SIGTERM', async () => {
   });
 });
 
-module.exports = app;
+// WebSocket upgrade handling for express routes
+server.on('upgrade', (request, socket, head) => {
+  const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+  
+  // Route WebSocket connections based on path
+  if (pathname.startsWith('/ws/')) {
+    // Let WebSocketService handle the upgrade
+    if (webSocketService && webSocketService.wss) {
+      webSocketService.wss.handleUpgrade(request, socket, head, (ws) => {
+        webSocketService.wss.emit('connection', ws, request);
+      });
+    } else {
+      console.warn('⚠️ WebSocket service not ready, rejecting connection');
+      socket.destroy();
+    }
+  } else {
+    // Not a WebSocket path, close connection
+    socket.destroy();
+  }
+});
+
+// Export for use in other files
+module.exports = { app, server, webSocketService };
