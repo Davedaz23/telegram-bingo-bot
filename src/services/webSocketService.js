@@ -1,19 +1,17 @@
 const WebSocket = require('ws');
-// OR for Socket.io
-// const { Server } = require('socket.io');
+const GameService = require('./gameService'); // Make sure to import GameService
 
 class WebSocketService {
-constructor(server) {
-    // Check if already initialized
+  constructor(server) {
     if (WebSocketService.instance) {
       return WebSocketService.instance;
     }
     
     this.wss = new WebSocket.Server({ 
       server,
-      // Add these options to prevent duplicate handling
+      path: '/ws', // Add path to avoid conflicts
       verifyClient: (info, cb) => {
-        // Add verification logic if needed
+        console.log('🔗 WebSocket connection attempt:', info.req.url);
         cb(true);
       }
     });
@@ -22,30 +20,16 @@ constructor(server) {
     this.gameRooms = new Map();
     
     this.setupWebSocket();
-    console.log('✅ WebSocket server started');
+    console.log('✅ WebSocket server started on /ws path');
     
-    // Save instance
     WebSocketService.instance = this;
   }
 
-  // For Socket.io alternative (uncomment if using Socket.io)
-  /*
-  constructor(server) {
-    this.io = new Server(server, {
-      cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-      }
-    });
-    this.setupSocketIO();
-  }
-  */
-
   setupWebSocket() {
     this.wss.on('connection', (ws, req) => {
-      console.log('🔗 New WebSocket connection');
+      console.log('🔗 New WebSocket connection:', req.url);
       
-      // Extract userId from query params
+      // Extract userId and gameId from query params
       const url = new URL(req.url, `http://${req.headers.host}`);
       const userId = url.searchParams.get('userId');
       const gameId = url.searchParams.get('gameId');
@@ -57,6 +41,9 @@ constructor(server) {
       
       if (gameId) {
         this.joinGameRoom(gameId, ws, userId);
+        
+        // Send initial taken cards when user joins
+        this.sendInitialTakenCards(gameId, userId, ws);
       }
       
       ws.on('message', (message) => {
@@ -70,39 +57,55 @@ constructor(server) {
       ws.on('error', (error) => {
         console.error('WebSocket error:', error);
       });
+      
+      // Send welcome message
+      ws.send(JSON.stringify({
+        type: 'CONNECTED',
+        userId,
+        gameId,
+        timestamp: new Date().toISOString(),
+        message: 'Connected to Bingo WebSocket server'
+      }));
     });
   }
 
-  // For Socket.io setup (alternative)
-  /*
-  setupSocketIO() {
-    this.io.on('connection', (socket) => {
-      console.log('🔗 New Socket.io connection:', socket.id);
+  async sendInitialTakenCards(gameId, userId, ws) {
+    try {
+      // Get taken cards from GameService
+      const databaseTakenCards = await GameService.getTakenCards(gameId);
+      const realTimeTakenCards = GameService.getRealTimeTakenCards(gameId);
+      const allTakenCards = [...databaseTakenCards, ...realTimeTakenCards];
+      const uniqueTakenCards = allTakenCards.filter((card, index, self) => 
+        index === self.findIndex(c => c.cardNumber === card.cardNumber)
+      );
       
-      const { userId, gameId } = socket.handshake.query;
+      // Get available cards
+      const availableCards = await GameService.getAvailableCards(gameId, userId, 400);
       
-      socket.join(`user:${userId}`);
-      if (gameId) {
-        socket.join(`game:${gameId}`);
-        console.log(`🎮 User ${userId} joined game ${gameId}`);
+      // Send to the connecting user
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'CARD_AVAILABILITY_UPDATE',
+          takenCards: uniqueTakenCards,
+          availableCards: availableCards.map(card => card.cardIndex || card.cardNumber),
+          totalTakenCards: uniqueTakenCards.length,
+          totalAvailableCards: availableCards.length,
+          timestamp: new Date().toISOString()
+        }));
       }
       
-      socket.on('join-game', ({ gameId, userId }) => {
-        socket.join(`game:${gameId}`);
-        console.log(`🎮 User ${userId} joined game ${gameId} via event`);
+      // Broadcast to all users in the room
+      this.broadcastToGame(gameId, {
+        type: 'TAKEN_CARDS_UPDATE',
+        takenCards: uniqueTakenCards,
+        totalTakenCards: uniqueTakenCards.length,
+        timestamp: new Date().toISOString()
       });
       
-      socket.on('leave-game', ({ gameId, userId }) => {
-        socket.leave(`game:${gameId}`);
-        console.log(`🎮 User ${userId} left game ${gameId}`);
-      });
-      
-      socket.on('disconnect', () => {
-        console.log('🔌 Socket disconnected:', socket.id);
-      });
-    });
+    } catch (error) {
+      console.error('Error sending initial taken cards:', error);
+    }
   }
-  */
 
   joinGameRoom(gameId, ws, userId) {
     if (!this.gameRooms.has(gameId)) {
@@ -143,6 +146,10 @@ constructor(server) {
           this.handleCardSelected(data);
           break;
           
+        case 'GET_CARD_AVAILABILITY':
+          this.handleGetCardAvailability(data, ws);
+          break;
+          
         case 'NUMBER_CALLED':
           this.broadcastToGame(data.gameId, {
             type: 'NUMBER_CALLED',
@@ -173,9 +180,89 @@ constructor(server) {
         case 'PING':
           ws.send(JSON.stringify({ type: 'PONG', timestamp: new Date().toISOString() }));
           break;
+          
+        default:
+          console.log('Unknown message type:', data.type);
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
+    }
+  }
+
+  async handleCardSelected(data) {
+    try {
+      const { gameId, userId, cardNumber } = data;
+      console.log(`🎯 Card selected: User ${userId} selected card ${cardNumber} in game ${gameId}`);
+      
+      // Get updated taken cards from GameService
+      const databaseTakenCards = await GameService.getTakenCards(gameId);
+      const realTimeTakenCards = GameService.getRealTimeTakenCards(gameId);
+      const allTakenCards = [...databaseTakenCards, ...realTimeTakenCards];
+      const uniqueTakenCards = allTakenCards.filter((card, index, self) => 
+        index === self.findIndex(c => c.cardNumber === card.cardNumber)
+      );
+      
+      // Broadcast to ALL users in the game room
+      this.broadcastToGame(gameId, {
+        type: 'CARD_SELECTED',
+        userId,
+        cardNumber,
+        takenCards: uniqueTakenCards,
+        totalTakenCards: uniqueTakenCards.length,
+        timestamp: new Date().toISOString(),
+        message: `Card ${cardNumber} has been selected by user ${userId}`
+      });
+      
+      // Also send individual card selection event
+      this.broadcastToGame(gameId, {
+        type: 'CARD_SELECTED_WITH_NUMBER',
+        userId,
+        cardNumber,
+        timestamp: new Date().toISOString()
+      });
+      
+      // Update taken cards for all users
+      this.broadcastToGame(gameId, {
+        type: 'TAKEN_CARDS_UPDATE',
+        takenCards: uniqueTakenCards,
+        totalTakenCards: uniqueTakenCards.length,
+        timestamp: new Date().toISOString()
+      });
+      
+    } catch (error) {
+      console.error('Error handling card selected:', error);
+    }
+  }
+
+  async handleGetCardAvailability(data, ws) {
+    try {
+      const { gameId, userId } = data;
+      
+      if (!gameId) return;
+      
+      const databaseTakenCards = await GameService.getTakenCards(gameId);
+      const realTimeTakenCards = GameService.getRealTimeTakenCards(gameId);
+      const allTakenCards = [...databaseTakenCards, ...realTimeTakenCards];
+      const uniqueTakenCards = allTakenCards.filter((card, index, self) => 
+        index === self.findIndex(c => c.cardNumber === card.cardNumber)
+      );
+      
+      // Get available cards
+      const availableCards = await GameService.getAvailableCards(gameId, userId || 'unknown', 400);
+      
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'CARD_AVAILABILITY_UPDATE',
+          takenCards: uniqueTakenCards,
+          availableCards: availableCards.map(card => card.cardIndex || card.cardNumber),
+          totalTakenCards: uniqueTakenCards.length,
+          totalAvailableCards: availableCards.length,
+          timestamp: new Date().toISOString()
+        }));
+      }
+      
+    } catch (error) {
+      console.error('Error getting card availability:', error);
     }
   }
 
@@ -211,18 +298,22 @@ constructor(server) {
   }
 
   // Broadcast to all users in a game room
-broadcastToGame(gameId, message, excludeWs = null) {
-  const room = this.gameRooms.get(gameId);
-  if (!room) return;
-  
-  const messageStr = JSON.stringify(message);
-  
-  room.forEach(client => {
-    if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
-      client.send(messageStr);
-    }
-  });
-}
+  broadcastToGame(gameId, message, excludeWs = null) {
+    const room = this.gameRooms.get(gameId);
+    if (!room) return;
+    
+    const messageStr = JSON.stringify(message);
+    let sentCount = 0;
+    
+    room.forEach(client => {
+      if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
+        client.send(messageStr);
+        sentCount++;
+      }
+    });
+    
+    console.log(`📤 Broadcast to game ${gameId}: ${message.type} sent to ${sentCount} clients`);
+  }
 
   // Send to specific user
   sendToUser(userId, message) {
@@ -236,13 +327,13 @@ broadcastToGame(gameId, message, excludeWs = null) {
 
   // Broadcast taken cards update
   broadcastTakenCards(gameId, takenCards) {
-  this.broadcastToGame(gameId, {
-    type: 'TAKEN_CARDS_UPDATE',
-    takenCards,
-    count: takenCards.length,
-    timestamp: new Date().toISOString()
-  });
-}
+    this.broadcastToGame(gameId, {
+      type: 'TAKEN_CARDS_UPDATE',
+      takenCards,
+      count: takenCards.length,
+      timestamp: new Date().toISOString()
+    });
+  }
 
   // Broadcast game status update
   broadcastGameStatus(gameId, gameStatus) {
@@ -264,6 +355,32 @@ broadcastToGame(gameId, message, excludeWs = null) {
         client.send(messageStr);
       }
     });
+  }
+
+  // Helper methods for debugging
+  getConnectionCount() {
+    return this.clients.size;
+  }
+
+  getGameRoomCount() {
+    return this.gameRooms.size;
+  }
+
+  getTotalConnections() {
+    let count = 0;
+    this.wss.clients.forEach(() => count++);
+    return count;
+  }
+
+  cleanupStaleConnections() {
+    let cleaned = 0;
+    this.clients.forEach((ws, userId) => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        this.clients.delete(userId);
+        cleaned++;
+      }
+    });
+    return cleaned;
   }
 }
 
