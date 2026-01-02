@@ -902,19 +902,24 @@ static async checkCardSelectionEnd(gameId) {
     const game = await Game.findById(gameId);
     
     if (!game || game.status !== 'CARD_SELECTION') {
-      console.log(`⚠️ Game ${gameId} not in CARD_SELECTION state`);
+      console.log(`⚠️ Game ${gameId} not in CARD_SELECTION state (status: ${game?.status})`);
       return;
     }
     
     const now = new Date();
+    console.log(`🕒 Current time: ${now}, Card selection end time: ${game.cardSelectionEndTime}`);
     
     // Check if card selection time has expired
     if (game.cardSelectionEndTime && game.cardSelectionEndTime > now) {
-      console.log(`⏳ Card selection not yet ended for ${game.code}`);
+      const timeRemaining = Math.max(0, game.cardSelectionEndTime - now);
+      console.log(`⏳ Card selection not yet ended for ${game.code}, ends in ${Math.floor(timeRemaining/1000)} seconds`);
       return;
     }
     
+    console.log(`⏰ Card selection time HAS EXPIRED for ${game.code}`);
+    
     const playersWithCards = await BingoCard.countDocuments({ gameId });
+    console.log(`👥 Players with cards: ${playersWithCards}, Minimum required: ${this.MIN_PLAYERS_TO_START}`);
     
     if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
       console.log(`✅ Starting game ${game.code} with ${playersWithCards} players`);
