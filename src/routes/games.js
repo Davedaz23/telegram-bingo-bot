@@ -27,14 +27,24 @@ router.get('/:gameId/available-cards/:userId', async (req, res) => {
     
     console.log(`✅ [4] Generated ${cards.length} available cards for user ${userId}`);
     
+    // Get current taken cards to send back
+    const databaseTakenCards = await GameService.getTakenCards(gameId);
+    const realTimeTakenCards = GameService.getRealTimeTakenCards(gameId);
+    const allTakenCards = [...databaseTakenCards, ...realTimeTakenCards];
+    const uniqueTakenCards = allTakenCards.filter((card, index, self) => 
+      index === self.findIndex(c => c.cardNumber === card.cardNumber)
+    );
+    
     res.json({
       success: true,
       cards,
-      count: cards.length
+      count: cards.length,
+      takenCards: uniqueTakenCards, // Include taken cards in response
+      totalTakenCards: uniqueTakenCards.length,
+      websocketAvailable: !!req.app.get('websocket') // Indicate if WebSocket is available
     });
   } catch (error) {
     console.error('❌ [ERROR] Get available cards error:', error);
-    console.error('❌ [ERROR] Full error details:', error.stack);
     res.status(400).json({
       success: false,
       error: error.message
@@ -77,7 +87,6 @@ router.get('/:gameId/taken-cards', async (req, res) => {
 });
 
 // Check and auto-start game if conditions are met
-// routes/gameRoutes.js - ADD THIS NEW ROUTE
 router.post('/:gameId/check-auto-start', async (req, res) => {
   try {
     const { gameId } = req.params;
@@ -165,6 +174,34 @@ router.post('/:gameId/select-card-with-number', async (req, res) => {
 
     const result = await GameService.selectCard(gameId, userId, cardNumbers, cardNumber);
     
+    // ✅ Broadcast taken cards update via WebSocket
+    try {
+      if (req.app.get('websocket')) {
+        const wsService = req.app.get('websocket');
+        
+        // Get updated taken cards
+        const databaseTakenCards = await GameService.getTakenCards(gameId);
+        const realTimeTakenCards = GameService.getRealTimeTakenCards(gameId);
+        const allTakenCards = [...databaseTakenCards, ...realTimeTakenCards];
+        const uniqueTakenCards = allTakenCards.filter((card, index, self) => 
+          index === self.findIndex(c => c.cardNumber === card.cardNumber)
+        );
+        
+        // Broadcast updates
+        wsService.broadcastTakenCards(gameId, uniqueTakenCards);
+        
+        wsService.broadcastToGame(gameId, {
+          type: 'CARD_SELECTED_WITH_NUMBER',
+          userId,
+          cardNumber,
+          takenCardsCount: uniqueTakenCards.length,
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (wsError) {
+      console.warn('⚠️ WebSocket broadcast error:', wsError);
+    }
+    
     res.json({
       success: true,
       ...result
@@ -181,7 +218,7 @@ router.post('/:gameId/select-card-with-number', async (req, res) => {
 router.post('/:gameId/select-card', async (req, res) => {
   try {
     const { gameId } = req.params;
-    const { userId, cardNumbers } = req.body;
+    const { userId, cardNumbers, cardNumber } = req.body;
     
     console.log(`🎯 Card selection request: gameId=${gameId}, userId=${userId}`);
     
@@ -209,7 +246,49 @@ router.post('/:gameId/select-card', async (req, res) => {
       }
     }
 
-    const result = await GameService.selectCard(gameId, userId, cardNumbers);
+    const result = await GameService.selectCard(gameId, userId, cardNumbers, cardNumber);
+    
+    // ✅ IMPORTANT: Get updated taken cards and broadcast via WebSocket
+    try {
+      // Get all taken cards after this selection
+      const databaseTakenCards = await GameService.getTakenCards(gameId);
+      
+      // Get real-time taken cards
+      const realTimeTakenCards = GameService.getRealTimeTakenCards(gameId);
+      
+      // Merge both sources
+      const allTakenCards = [...databaseTakenCards, ...realTimeTakenCards];
+      
+      // Remove duplicates
+      const uniqueTakenCards = allTakenCards.filter((card, index, self) => 
+        index === self.findIndex(c => c.cardNumber === card.cardNumber)
+      );
+      
+      // Broadcast to all users in the game room
+      if (req.app.get('websocket')) {
+        const wsService = req.app.get('websocket');
+        
+        // Broadcast taken cards update
+        wsService.broadcastTakenCards(gameId, uniqueTakenCards);
+        
+        // Also broadcast card selection event
+        wsService.broadcastToGame(gameId, {
+          type: 'CARD_SELECTED',
+          userId,
+          cardNumber: result.cardNumber || result.cardNumber || 'custom',
+          takenCardsCount: uniqueTakenCards.length,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Also send back taken cards in response
+      result.takenCards = uniqueTakenCards;
+      result.totalTakenCards = uniqueTakenCards.length;
+      
+    } catch (wsError) {
+      console.warn('⚠️ WebSocket broadcast error (non-critical):', wsError);
+      // Don't fail the main request if WebSocket fails
+    }
     
     res.json({
       success: true,

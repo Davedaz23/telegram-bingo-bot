@@ -3,15 +3,29 @@ const WebSocket = require('ws');
 // const { Server } = require('socket.io');
 
 class WebSocketService {
-  constructor(server) {
-    // Using native WebSocket
-    this.wss = new WebSocket.Server({ server });
-    this.clients = new Map(); // userId -> WebSocket
-    this.gameRooms = new Map(); // gameId -> Set of user WebSockets
+constructor(server) {
+    // Check if already initialized
+    if (WebSocketService.instance) {
+      return WebSocketService.instance;
+    }
+    
+    this.wss = new WebSocket.Server({ 
+      server,
+      // Add these options to prevent duplicate handling
+      verifyClient: (info, cb) => {
+        // Add verification logic if needed
+        cb(true);
+      }
+    });
+    
+    this.clients = new Map();
+    this.gameRooms = new Map();
     
     this.setupWebSocket();
-    
     console.log('✅ WebSocket server started');
+    
+    // Save instance
+    WebSocketService.instance = this;
   }
 
   // For Socket.io alternative (uncomment if using Socket.io)
@@ -197,18 +211,18 @@ class WebSocketService {
   }
 
   // Broadcast to all users in a game room
-  broadcastToGame(gameId, message, excludeWs = null) {
-    const room = this.gameRooms.get(gameId);
-    if (!room) return;
-    
-    const messageStr = JSON.stringify(message);
-    
-    room.forEach(client => {
-      if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
-        client.send(messageStr);
-      }
-    });
-  }
+broadcastToGame(gameId, message, excludeWs = null) {
+  const room = this.gameRooms.get(gameId);
+  if (!room) return;
+  
+  const messageStr = JSON.stringify(message);
+  
+  room.forEach(client => {
+    if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
+      client.send(messageStr);
+    }
+  });
+}
 
   // Send to specific user
   sendToUser(userId, message) {
@@ -222,13 +236,13 @@ class WebSocketService {
 
   // Broadcast taken cards update
   broadcastTakenCards(gameId, takenCards) {
-    this.broadcastToGame(gameId, {
-      type: 'TAKEN_CARDS_UPDATE',
-      takenCards,
-      count: takenCards.length,
-      timestamp: new Date().toISOString()
-    });
-  }
+  this.broadcastToGame(gameId, {
+    type: 'TAKEN_CARDS_UPDATE',
+    takenCards,
+    count: takenCards.length,
+    timestamp: new Date().toISOString()
+  });
+}
 
   // Broadcast game status update
   broadcastGameStatus(gameId, gameStatus) {
