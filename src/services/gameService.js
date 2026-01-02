@@ -157,8 +157,11 @@ class GameService {
       this.processingGames.delete(lockKey);
     }
   }
+// ==================== GET CURRENT GAME STATE ====================
 
-  static async getCurrentGameState() {
+ static async getCurrentGameState() {
+  try {
+    // First, check for active game
     let game = await this.findActiveGame();
     
     if (game) {
@@ -166,6 +169,7 @@ class GameService {
       return game;
     }
     
+    // Check for waiting or card selection game
     game = await this.findWaitingOrCardSelectionGame();
     
     if (game) {
@@ -173,45 +177,68 @@ class GameService {
       return game;
     }
     
-    game = await this.findCooldownGameForRestart();
+    // Check for games that need to be restarted (finished games)
+    game = await Game.findOne({
+      status: { $in: ['FINISHED', 'NO_WINNER'] },
+      archived: { $ne: true }
+    }).sort({ endedAt: -1 });
     
     if (game) {
-      console.log(`🔄 Creating new game from cooldown: ${game.code}`);
+      console.log(`🔄 Creating new game after finished game: ${game.code}`);
       return await this.createNewGameAfterCooldown(game._id);
     }
     
+    // No game exists at all - create brand new one
     console.log('🎮 Creating brand new game...');
     return await this.createNewGame();
-  }
-
-  static async findActiveGame() {
-    const game = await Game.findOne({
-      status: 'ACTIVE',
-      archived: { $ne: true }
-    }).sort({ createdAt: -1 });
     
-    if (game) {
-      if (game.numbersCalled && game.numbersCalled.length >= 75) {
-        console.log(`⚠️ Game ${game.code} has all 75 numbers. Ending...`);
-        await this.endGameDueToNoWinner(game._id);
-        
-        const updatedGame = await Game.findById(game._id);
-        if (updatedGame.status === 'ACTIVE') {
-          return updatedGame;
-        }
-        return null;
-      }
+  } catch (error) {
+    console.error('❌ Error in getCurrentGameState:', error);
+    
+    // Try to create new game as fallback
+    try {
+      return await this.createNewGame();
+    } catch (createError) {
+      console.error('❌ Fallback game creation failed:', createError);
+      throw error;
+    }
+  }
+}
+
+// ==================== FIND ACTIVE GAME ====================
+static async findActiveGame() {
+  const game = await Game.findOne({
+    status: 'ACTIVE',
+    archived: { $ne: true }
+  }).sort({ createdAt: -1 });
+  
+  if (game) {
+    // Check if game should end due to all numbers called
+    if (game.numbersCalled && game.numbersCalled.length >= 75) {
+      console.log(`⚠️ Game ${game.code} has all 75 numbers. Ending...`);
       
-      if (!this.activeIntervals.has(game._id.toString())) {
-        console.log(`🔄 Restarting auto-calling for ${game.code}`);
-        this.startAutoNumberCalling(game._id);
-      }
+      // End the game and create new one
+      await this.endGameDueToNoWinner(game._id);
       
-      return game;
+      // Return the newly created game instead
+      const newGame = await Game.findOne({
+        status: 'WAITING_FOR_PLAYERS',
+        archived: { $ne: true }
+      }).sort({ createdAt: -1 });
+      
+      return newGame;
     }
     
-    return null;
+    if (!this.activeIntervals.has(game._id.toString())) {
+      console.log(`🔄 Restarting auto-calling for ${game.code}`);
+      this.startAutoNumberCalling(game._id);
+    }
+    
+    return game;
   }
+  
+  return null;
+}
 
   // Add method to check if player can join a game
   static async canPlayerJoinGame(gameId, userId) {
@@ -608,127 +635,146 @@ class GameService {
 
   // ==================== GAME CREATION & CLEANUP ====================
 
-  static async createNewGame() {
-    const lockKey = 'game_creation';
-    
-    if (this.gameCreationLock.has(lockKey)) {
-      console.log('⏳ Game creation in progress, waiting...');
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      return this.getCurrentGameState();
-    }
-
-    try {
-      this.gameCreationLock.set(lockKey, true);
-      
-      await this.ensureNoActiveGames();
-      
-      const gameCode = GameUtils.generateGameCode();
-      const now = new Date();
-      
-      const game = new Game({
-        code: gameCode,
-        maxPlayers: 10,
-        isPrivate: false,
-        numbersCalled: [],
-        status: 'WAITING_FOR_PLAYERS',
-        currentPlayers: 0,
-        isAutoCreated: true,
-        autoStartEndTime: new Date(now.getTime() + this.AUTO_START_DELAY)
-      });
-
-      await game.save();
-      console.log(`🎯 Created new game: ${gameCode}`);
-      
-      // Broadcast new game created
-      this.broadcastToGame(game._id, {
-        type: 'NEW_GAME_CREATED',
-        gameId: game._id,
-        gameCode: game.code,
-        status: game.status,
-        timestamp: new Date().toISOString()
-      });
-      
-      // Schedule auto-start check
-      setTimeout(() => {
-        this.scheduleAutoStartCheck(game._id);
-      }, this.AUTO_START_DELAY);
-      
-      return game;
-      
-    } catch (error) {
-      console.error('❌ Error creating new game:', error);
-      throw error;
-    } finally {
-      this.gameCreationLock.delete(lockKey);
-    }
+static async createNewGame() {
+  const lockKey = 'game_creation';
+  
+  if (this.gameCreationLock.has(lockKey)) {
+    console.log('⏳ Game creation in progress, waiting...');
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    return this.getCurrentGameState();
   }
 
-  static async createNewGameAfterCooldown(previousGameId) {
-    const session = await mongoose.startSession();
+  try {
+    this.gameCreationLock.set(lockKey, true);
+    
+    // Don't check for existing games - always create if no active/waiting game exists
+    const existingGame = await Game.findOne({
+      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+      archived: { $ne: true }
+    });
+    
+    if (existingGame) {
+      console.log(`🎮 Existing game found: ${existingGame.code} (${existingGame.status})`);
+      return existingGame;
+    }
+    
+    const gameCode = GameUtils.generateGameCode();
+    const now = new Date();
+    
+    const game = new Game({
+      code: gameCode,
+      maxPlayers: 400, // Increase max players
+      isPrivate: false,
+      numbersCalled: [],
+      status: 'WAITING_FOR_PLAYERS',
+      currentPlayers: 0,
+      isAutoCreated: true,
+      autoStartEndTime: new Date(now.getTime() + this.AUTO_START_DELAY),
+      createdAt: now,
+      updatedAt: now
+    });
+
+    await game.save();
+    console.log(`🎯 Created new game: ${gameCode} (ID: ${game._id})`);
+    
+    // Broadcast new game created
+    this.broadcastToGame(game._id, {
+      type: 'NEW_GAME_CREATED',
+      gameId: game._id,
+      gameCode: game.code,
+      status: game.status,
+      autoStartTime: game.autoStartEndTime,
+      timestamp: new Date().toISOString()
+    });
+    
+    // Schedule auto-start check
+    this.scheduleAutoStartCheck(game._id);
+    
+    return game;
+    
+  } catch (error) {
+    console.error('❌ Error creating new game:', error);
+    throw error;
+  } finally {
+    this.gameCreationLock.delete(lockKey);
+  }
+}
+
+static async createNewGameAfterCooldown(previousGameId) {
+  const session = await mongoose.startSession();
+  
+  try {
     session.startTransaction();
+    
+    // Archive the old game
+    const oldGame = await Game.findById(previousGameId).session(session);
+    if (oldGame) {
+      oldGame.archived = true;
+      oldGame.archivedAt = new Date();
+      oldGame.archivedReason = 'Game ended - replaced by new game';
+      await oldGame.save({ session });
+      console.log(`📦 Archived game ${oldGame.code}`);
+    }
 
-    try {
-      // Archive the old game
-      const oldGame = await Game.findById(previousGameId).session(session);
-      if (oldGame) {
-        oldGame.archived = true;
-        oldGame.archivedAt = new Date();
-        await oldGame.save({ session });
-        console.log(`📦 Archived game ${oldGame.code}`);
-      }
+    // Create new game
+    const gameCode = GameUtils.generateGameCode();
+    const now = new Date();
+    
+    const newGame = new Game({
+      code: gameCode,
+      maxPlayers: 400,
+      isPrivate: false,
+      numbersCalled: [],
+      status: 'WAITING_FOR_PLAYERS',
+      currentPlayers: 0,
+      isAutoCreated: true,
+      autoStartEndTime: new Date(now.getTime() + this.AUTO_START_DELAY),
+      previousGameId: previousGameId,
+      createdAt: now,
+      updatedAt: now
+    });
 
-      // Create new game
-      const gameCode = GameUtils.generateGameCode();
-      const now = new Date();
-      
-      const newGame = new Game({
-        code: gameCode,
-        maxPlayers: 400,
-        isPrivate: false,
-        numbersCalled: [],
-        status: 'WAITING_FOR_PLAYERS',
-        currentPlayers: 0,
-        isAutoCreated: true,
-        autoStartEndTime: new Date(now.getTime() + this.AUTO_START_DELAY),
-        previousGameId: previousGameId
-      });
-
-      await newGame.save({ session });
-      await session.commitTransaction();
-      
-      console.log(`🎯 Created new game from cooldown: ${gameCode}`);
-      
-      // Broadcast new game created
-      this.broadcastToGame(newGame._id, {
-        type: 'NEW_GAME_CREATED',
-        gameId: newGame._id,
-        gameCode: newGame.code,
-        status: newGame.status,
-        timestamp: new Date().toISOString()
-      });
-      
-      // Schedule auto-start check
-      setTimeout(() => {
-        this.scheduleAutoStartCheck(newGame._id);
-      }, this.AUTO_START_DELAY);
-      
-      return newGame;
-      
-    } catch (error) {
+    await newGame.save({ session });
+    await session.commitTransaction();
+    
+    console.log(`🎯 Created new game after cooldown: ${gameCode} (ID: ${newGame._id})`);
+    
+    // Broadcast new game created
+    this.broadcastToGame(newGame._id, {
+      type: 'NEW_GAME_CREATED',
+      gameId: newGame._id,
+      gameCode: newGame.code,
+      status: newGame.status,
+      autoStartTime: newGame.autoStartEndTime,
+      timestamp: new Date().toISOString()
+    });
+    
+    // Schedule auto-start check
+    this.scheduleAutoStartCheck(newGame._id);
+    
+    return newGame;
+    
+  } catch (error) {
+    if (session && session.inTransaction()) {
       await session.abortTransaction();
-      console.error('❌ Error creating new game after cooldown:', error);
-      
-      // Fallback
-      try {
-        return await this.createNewGame();
-      } catch (fallbackError) {
-        console.error('❌ Fallback game creation failed:', fallbackError);
-        throw fallbackError;
-      }
-    } finally {
+    }
+    
+    console.error('❌ Error creating new game after cooldown:', error);
+    
+    // Fallback: try to create a simple new game
+    try {
+      console.log('🔄 Trying fallback game creation...');
+      return await this.createNewGame();
+    } catch (fallbackError) {
+      console.error('❌ Fallback game creation failed:', fallbackError);
+      throw error;
+    }
+  } finally {
+    if (session) {
       session.endSession();
     }
   }
+}
 
   static async cleanupDuplicateGames() {
     const session = await mongoose.startSession();
@@ -1785,91 +1831,99 @@ class GameService {
   // ==================== NO WINNER & REFUNDS ====================
 
   static async endGameDueToNoWinner(gameId) {
-    const lockKey = `no_winner_${gameId}`;
+  const lockKey = `no_winner_${gameId}`;
+  
+  if (this.processingGames.has(lockKey)) {
+    console.log(`⏳ Game ${gameId} already being processed for no-winner ending`);
+    return;
+  }
+
+  try {
+    this.processingGames.add(lockKey);
     
-    if (this.processingGames.has(lockKey)) {
-      console.log(`⏳ Game ${gameId} already being processed for no-winner ending`);
+    const game = await Game.findById(gameId);
+    
+    if (!game) {
+      console.log(`⚠️ Game ${gameId} not found`);
       return;
     }
 
+    if (game.winnerId) {
+      console.log(`✅ Game ${game.code} already has winner ${game.winnerId}`);
+      
+      if (game.status !== 'FINISHED') {
+        game.status = 'FINISHED';
+        game.endedAt = game.endedAt || new Date();
+        await game.save();
+      }
+      
+      this.winnerDeclared.add(gameId.toString());
+      this.stopAutoNumberCalling(gameId);
+      
+      // IMPORTANT: Start new game immediately
+      await this.createNewGameAfterCooldown(game._id);
+      return;
+    }
+
+    if (game.status !== 'ACTIVE') {
+      console.log(`⚠️ Game ${gameId} is not active (${game.status})`);
+      return;
+    }
+
+    if (game.numbersCalled.length < 75) {
+      console.log(`⏳ Game ${game.code} has ${game.numbersCalled.length}/75 numbers`);
+      return;
+    }
+
+    console.log(`🏁 Ending game ${game.code} - no winner after ALL 75 numbers`);
+    
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
-      this.processingGames.add(lockKey);
+      const gameInSession = await Game.findById(gameId).session(session);
       
-      const game = await Game.findById(gameId);
-      
-      if (!game) {
-        console.log(`⚠️ Game ${gameId} not found`);
+      if (!gameInSession) {
+        await session.abortTransaction();
         return;
       }
 
-      if (game.winnerId) {
-        console.log(`✅ Game ${game.code} already has winner ${game.winnerId}`);
+      // Check again if winner declared during transaction
+      if (gameInSession.winnerId) {
+        gameInSession.status = 'FINISHED';
+        gameInSession.endedAt = gameInSession.endedAt || new Date();
+        await gameInSession.save({ session });
         
-        if (game.status !== 'FINISHED') {
-          game.status = 'FINISHED';
-          game.endedAt = game.endedAt || new Date();
-          await game.save();
-        }
+        await session.commitTransaction();
         
         this.winnerDeclared.add(gameId.toString());
         this.stopAutoNumberCalling(gameId);
-        await this.setNextGameCountdown(gameId);
-        return;
-      }
-
-      if (game.status !== 'ACTIVE') {
-        console.log(`⚠️ Game ${gameId} is not active (${game.status})`);
-        return;
-      }
-
-      if (game.numbersCalled.length < 75) {
-        console.log(`⏳ Game ${game.code} has ${game.numbersCalled.length}/75 numbers`);
-        return;
-      }
-
-      console.log(`🏁 Ending game ${game.code} - no winner after ALL 75 numbers`);
-      
-      const session = await mongoose.startSession();
-      session.startTransaction();
-
-      try {
-        const gameInSession = await Game.findById(gameId).session(session);
         
-        if (!gameInSession) {
-          await session.abortTransaction();
-          return;
-        }
+        // IMPORTANT: Start new game immediately
+        await this.createNewGameAfterCooldown(game._id);
+        return;
+      }
 
-        if (gameInSession.winnerId) {
-          gameInSession.status = 'FINISHED';
+      const existingReconciliation = await Reconciliation.findOne({ 
+        gameId: gameInSession._id,
+        status: 'NO_WINNER_REFUNDED'
+      }).session(session);
+      
+      if (existingReconciliation) {
+        console.log(`✅ Refunds already processed for ${gameInSession.code}`);
+        
+        if (gameInSession.status !== 'NO_WINNER') {
+          gameInSession.status = 'NO_WINNER';
           gameInSession.endedAt = gameInSession.endedAt || new Date();
           await gameInSession.save({ session });
-          
-          await session.commitTransaction();
-          
-          this.winnerDeclared.add(gameId.toString());
-          this.stopAutoNumberCalling(gameId);
-          await this.setNextGameCountdown(gameId);
-          return;
         }
-
-        const existingReconciliation = await Reconciliation.findOne({ 
-          gameId: gameInSession._id,
-          status: 'NO_WINNER_REFUNDED'
-        }).session(session);
         
-        if (existingReconciliation) {
-          console.log(`✅ Refunds already processed for ${gameInSession.code}`);
-          
-          if (gameInSession.status !== 'NO_WINNER') {
-            gameInSession.status = 'NO_WINNER';
-            gameInSession.endedAt = gameInSession.endedAt || new Date();
-            await gameInSession.save({ session });
-          }
-          
-          await session.commitTransaction();
-          return;
-        }
+        await session.commitTransaction();
+        
+        // IMPORTANT: Start new game immediately
+        await this.createNewGameAfterCooldown(game._id);
+        return;
+      }
 
         const bingoCards = await BingoCard.find({ gameId: gameInSession._id }).session(session);
         
@@ -1970,139 +2024,141 @@ class GameService {
           }
         }
 
-        const now = new Date();
-        
-        gameInSession.status = 'NO_WINNER';
-        gameInSession.endedAt = now;
-        gameInSession.refunded = true;
-        gameInSession.refundedAt = now;
-        gameInSession.totalRefunded = Array.from(userCardsMap.values())
-          .reduce((sum, user) => sum + user.totalRefund, 0);
-        gameInSession.uniquePlayersRefunded = userCardsMap.size;
-        
-        await gameInSession.save({ session });
-        
-        const reconciliation = new Reconciliation({
-          gameId: gameInSession._id,
-          status: 'NO_WINNER_REFUNDED',
-          totalPot: gameInSession.totalRefunded,
-          platformFee: 0,
-          winnerAmount: 0,
-          debitTotal: gameInSession.totalRefunded,
-          creditTotal: gameInSession.totalRefunded,
-          completedAt: now,
-          transactions: refundTransactions
-        });
-        
-        await reconciliation.save({ session });
-        await session.commitTransaction();
-        
-        console.log(`✅ Game ${gameInSession.code} ended as NO_WINNER. Refunded ${userCardsMap.size} users, total: $${gameInSession.totalRefunded}`);
-        
-        // Broadcast no winner
-        this.broadcastToGame(gameId, {
-          type: 'NO_WINNER',
-          gameId: gameInSession._id,
-          gameCode: gameInSession.code,
-          reason: 'All 75 numbers called without winner',
-          refundedAmount: gameInSession.totalRefunded,
-          refundedPlayers: userCardsMap.size,
-          endedAt: now.toISOString(),
-          timestamp: new Date().toISOString()
-        });
-        
-        this.winnerDeclared.add(gameId.toString());
-        this.stopAutoNumberCalling(gameId);
-        await this.setNextGameCountdown(gameId);
-
-      } catch (error) {
-        console.error('❌ Transaction error in endGameDueToNoWinner:', error);
-        if (session && session.inTransaction()) {
-          await session.abortTransaction();
-        }
-        throw error;
-      } finally {
-        if (session) {
-          session.endSession();
-        }
-      }
+          const now = new Date();
+      
+      gameInSession.status = 'NO_WINNER';
+      gameInSession.endedAt = now;
+      gameInSession.refunded = true;
+      gameInSession.refundedAt = now;
+      
+      await gameInSession.save({ session });
+      
+      // Create reconciliation record
+      const reconciliation = new Reconciliation({
+        gameId: gameInSession._id,
+        status: 'NO_WINNER_REFUNDED',
+        totalPot: 0,
+        platformFee: 0,
+        winnerAmount: 0,
+        debitTotal: 0,
+        creditTotal: 0,
+        completedAt: now
+      });
+      
+      await reconciliation.save({ session });
+      await session.commitTransaction();
+      
+      console.log(`✅ Game ${gameInSession.code} ended as NO_WINNER`);
+      
+      // Broadcast no winner
+      this.broadcastToGame(gameId, {
+        type: 'NO_WINNER',
+        gameId: gameInSession._id,
+        gameCode: gameInSession.code,
+        reason: 'All 75 numbers called without winner',
+        endedAt: now.toISOString(),
+        timestamp: new Date().toISOString()
+      });
+      
+      this.winnerDeclared.add(gameId.toString());
+      this.stopAutoNumberCalling(gameId);
+      
+      // IMPORTANT: Create new game immediately (no cooldown)
+      console.log(`🔄 Creating new game after ${gameInSession.code} ended`);
+      await this.createNewGameAfterCooldown(game._id);
 
     } catch (error) {
-      console.error('❌ Error in endGameDueToNoWinner:', error);
+      console.error('❌ Transaction error in endGameDueToNoWinner:', error);
+      if (session && session.inTransaction()) {
+        await session.abortTransaction();
+      }
+      
+      // Even on error, try to create new game
+      try {
+        await this.createNewGameAfterCooldown(game._id);
+      } catch (createError) {
+        console.error('❌ Failed to create new game after error:', createError);
+      }
+      
       throw error;
     } finally {
-      this.processingGames.delete(lockKey);
+      if (session) {
+        session.endSession();
+      }
     }
+
+  } catch (error) {
+    console.error('❌ Error in endGameDueToNoWinner:', error);
+    
+    // Try to create new game anyway
+    try {
+      await this.createNewGameAfterCooldown(gameId);
+    } catch (createError) {
+      console.error('❌ Failed to create new game after endGameDueToNoWinner error:', createError);
+    }
+    
+    throw error;
+  } finally {
+    this.processingGames.delete(lockKey);
   }
+}
 
   // ==================== NEXT GAME COUNTDOWN ====================
 
   static async setNextGameCountdown(gameId) {
-    await new Promise(resolve => setTimeout(resolve, 1000));
+  try {
+    const game = await Game.findById(gameId);
     
-    const activeGameExists = await Game.findOne({
-      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
-      archived: { $ne: true },
-      _id: { $ne: gameId }
-    });
-    
-    if (activeGameExists) {
-      console.log(`⚠️ Active game already exists (${activeGameExists.code}), skipping countdown`);
-      return;
+    if (!game) {
+      console.log(`⚠️ Game ${gameId} not found, creating new game`);
+      return await this.createNewGame();
     }
-    
-    const session = await mongoose.startSession();
-    session.startTransaction();
 
-    try {
-      const game = await Game.findById(gameId).session(session);
+    if (game.status !== 'FINISHED' && game.status !== 'NO_WINNER') {
+      console.log(`⚠️ Game ${game.code} not finished (${game.status}), checking for active game`);
       
-      if (!game) {
-        throw new Error('Game not found');
-      }
-
-      if (game.status !== 'FINISHED' && game.status !== 'NO_WINNER') {
-        console.log(`⚠️ Game ${game.code} not finished (${game.status}), skipping countdown`);
-        await session.abortTransaction();
-        return;
-      }
-
-      const now = new Date();
-      const cooldownDuration = 30000;
-      game.cooldownEndTime = new Date(now.getTime() + cooldownDuration);
-      
-      await game.save({ session });
-      await session.commitTransaction();
-      
-      console.log(`⏰ Next game countdown set for ${game.code}. New game in ${cooldownDuration/1000}s`);
-      
-      // Broadcast cooldown start
-      this.broadcastToGame(gameId, {
-        type: 'COOLDOWN_STARTED',
-        gameId: game._id,
-        gameCode: game.code,
-        cooldownEndTime: game.cooldownEndTime.toISOString(),
-        cooldownDuration: cooldownDuration,
-        timestamp: new Date().toISOString()
+      // Check if there's already an active/waiting game
+      const activeGame = await Game.findOne({
+        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+        archived: { $ne: true },
+        _id: { $ne: gameId }
       });
       
-      setTimeout(async () => {
-        try {
-          await this.createNewGameAfterCooldown(gameId);
-        } catch (error) {
-          console.error('❌ Failed to create new game after countdown:', error);
-        }
-      }, cooldownDuration);
-      
-    } catch (error) {
-      if (session.inTransaction()) {
-        await session.abortTransaction();
+      if (activeGame) {
+        console.log(`✅ Active game exists: ${activeGame.code}`);
+        return activeGame;
       }
-      console.error('❌ Error setting next game countdown:', error);
-    } finally {
-      session.endSession();
+      
+      // No active game, create new one
+      return await this.createNewGame();
+    }
+
+    console.log(`🔄 Setting up next game after ${game.code}...`);
+    
+    // Archive the finished game immediately
+    game.archived = true;
+    game.archivedAt = new Date();
+    game.archivedReason = 'Game finished - preparing for new game';
+    await game.save();
+    
+    console.log(`📦 Archived finished game ${game.code}`);
+    
+    // Create new game immediately (no cooldown wait)
+    return await this.createNewGameAfterCooldown(gameId);
+    
+  } catch (error) {
+    console.error('❌ Error setting next game countdown:', error);
+    
+    // Try to create new game anyway
+    try {
+      return await this.createNewGame();
+    } catch (createError) {
+      console.error('❌ Failed to create new game after setNextGameCountdown error:', createError);
+      throw error;
     }
   }
+}
+
 
   // ==================== GAME QUERIES & UTILITIES ====================
 
@@ -2270,30 +2326,119 @@ class GameService {
 
   // ==================== SERVICE MANAGEMENT ====================
 
-  static startAutoGameService() {
-    this.cleanupAllIntervals();
-    
-    const interval = setInterval(async () => {
-      try {
-        await this.manageGameLifecycle();
-      } catch (error) {
-        console.error('❌ Game service error:', error);
-      }
-    }, 30000);
+static startAutoGameService() {
+  this.cleanupAllIntervals();
+  
+  // Check for existing game every 10 seconds
+  const interval = setInterval(async () => {
+    try {
+      await this.ensureActiveGameExists();
+    } catch (error) {
+      console.error('❌ Game service error:', error);
+    }
+  }, 10000);
 
-    console.log('🚀 Game Service Started');
-    
-    setTimeout(async () => {
-      try {
-        await this.getMainGame();
-      } catch (error) {
-        console.error('❌ Initial game setup failed:', error);
-      }
-    }, 5000);
+  console.log('🚀 Game Service Started');
+  
+  // Initial game creation
+  setTimeout(async () => {
+    try {
+      await this.ensureActiveGameExists();
+    } catch (error) {
+      console.error('❌ Initial game setup failed:', error);
+    }
+  }, 2000);
 
-    return interval;
+  return interval;
+}
+
+static async ensureActiveGameExists() {
+  try {
+    const game = await Game.findOne({
+      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+      archived: { $ne: true }
+    });
+    
+    if (!game) {
+      console.log('⚠️ No active/waiting game found. Creating new one...');
+      await this.createNewGame();
+    } else {
+      console.log(`✅ Active game exists: ${game.code} (${game.status})`);
+    }
+  } catch (error) {
+    console.error('❌ Error ensuring active game exists:', error);
+  }
+}
+static async ensureNoActiveGames() {
+  const activeGame = await Game.findOne({
+    status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+    archived: { $ne: true }
+  });
+
+  if (activeGame) {
+    console.log(`⚠️ Game ${activeGame.code} (${activeGame.status}) already exists`);
+    return false;
   }
 
+  return true;
+}
+
+static async findWaitingOrCardSelectionGame() {
+  const game = await Game.findOne({
+    status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION'] },
+    archived: { $ne: true }
+  }).sort({ createdAt: -1 });
+  
+  if (game) {
+    await this.ensureSingleWaitingGame();
+    return game;
+  }
+  
+  return null;
+}
+
+static async ensureSingleWaitingGame() {
+  const session = await mongoose.startSession();
+  
+  try {
+    session.startTransaction();
+    
+    const waitingGames = await Game.find({
+      status: 'WAITING_FOR_PLAYERS',
+      archived: { $ne: true }
+    }).session(session).sort({ createdAt: -1 });
+
+    if (waitingGames.length <= 1) {
+      await session.abortTransaction();
+      return;
+    }
+
+    console.warn(`⚠️ Found ${waitingGames.length} waiting games`);
+    
+    const newestGame = waitingGames[0];
+    
+    for (let i = 1; i < waitingGames.length; i++) {
+      const oldGame = waitingGames[i];
+      oldGame.archived = true;
+      oldGame.archivedAt = new Date();
+      oldGame.archivedReason = 'Duplicate waiting game';
+      await oldGame.save({ session });
+    }
+
+    await session.commitTransaction();
+    console.log('✅ Ensured single waiting game');
+    
+  } catch (error) {
+    if (session && session.inTransaction()) {
+      await session.abortTransaction();
+    }
+    console.error('❌ Error ensuring single waiting game:', error);
+  } finally {
+    if (session) {
+      session.endSession();
+    }
+  }
+}
   static async manageGameLifecycle() {
     try {
       const now = new Date();
