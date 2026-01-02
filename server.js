@@ -557,25 +557,25 @@ process.on('SIGTERM', async () => {
 });
 
 // WebSocket upgrade handling for express routes
-server.on('upgrade', (request, socket, head) => {
-  const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+// server.on('upgrade', (request, socket, head) => {
+//   const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
   
-  // Route WebSocket connections based on path
-  if (pathname.startsWith('/ws/')) {
-    // Let WebSocketService handle the upgrade
-    if (webSocketService && webSocketService.wss) {
-      webSocketService.wss.handleUpgrade(request, socket, head, (ws) => {
-        webSocketService.wss.emit('connection', ws, request);
-      });
-    } else {
-      console.warn('⚠️ WebSocket service not ready, rejecting connection');
-      socket.destroy();
-    }
-  } else {
-    // Not a WebSocket path, close connection
-    socket.destroy();
-  }
-});
+//   // Route WebSocket connections based on path
+//   if (pathname.startsWith('/ws/')) {
+//     // Let WebSocketService handle the upgrade
+//     if (webSocketService && webSocketService.wss) {
+//       webSocketService.wss.handleUpgrade(request, socket, head, (ws) => {
+//         webSocketService.wss.emit('connection', ws, request);
+//       });
+//     } else {
+//       console.warn('⚠️ WebSocket service not ready, rejecting connection');
+//       socket.destroy();
+//     }
+//   } else {
+//     // Not a WebSocket path, close connection
+//     socket.destroy();
+//   }
+// });
 
 // Export for use in other files
 module.exports = { app, server, webSocketService };
