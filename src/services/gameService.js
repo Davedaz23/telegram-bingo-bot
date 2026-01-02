@@ -2408,16 +2408,30 @@ static startAutoGameService() {
 
 static async ensureActiveGameExists() {
   try {
-    const game = await Game.findOne({
-      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
-      archived: { $ne: true }
-    });
+    // Get the current game state which includes logic for handling stuck games
+    const game = await this.getCurrentGameState();
     
     if (!game) {
       console.log('⚠️ No active/waiting game found. Creating new one...');
       await this.createNewGame();
     } else {
       console.log(`✅ Active game exists: ${game.code} (${game.status})`);
+      
+      // Additional check for stuck CARD_SELECTION games
+      if (game.status === 'CARD_SELECTION' && game.cardSelectionEndTime) {
+        const now = new Date();
+        if (game.cardSelectionEndTime <= now) {
+          console.log(`🔄 Game ${game.code} has expired card selection, checking...`);
+          await this.checkCardSelectionEnd(game._id);
+          
+          // Re-check after handling
+          const updatedGame = await Game.findById(game._id);
+          if (updatedGame && updatedGame.status !== 'CARD_SELECTION') {
+            // If game state changed, we might need a new game
+            await this.createNewGame();
+          }
+        }
+      }
     }
   } catch (error) {
     console.error('❌ Error ensuring active game exists:', error);
