@@ -75,36 +75,39 @@ class GameService {
   }
   
   static broadcastTakenCardsUpdate(gameId, takenCards) {
-    if (!this.webSocketService) return;
-    
-    try {
-      this.webSocketService.broadcastTakenCards(gameId.toString(), takenCards);
-      console.log(`📤 Broadcast taken cards update for game ${gameId}: ${takenCards.length} cards`);
-    } catch (error) {
-      console.error('❌ Error broadcasting taken cards:', error);
-    }
+  if (!this.webSocketService) return;
+  
+  try {
+    // Call the correct method name - broadcastTakenCards
+    this.webSocketService.broadcastTakenCards(gameId.toString(), takenCards);
+    console.log(`📤 Broadcast taken cards update for game ${gameId}: ${takenCards.length} cards`);
+  } catch (error) {
+    console.error('❌ Error broadcasting taken cards:', error);
   }
+}
+
   
   static broadcastGameStatus(gameId, gameData) {
-    if (!this.webSocketService) return;
+  if (!this.webSocketService) return;
+  
+  try {
+    const statusUpdate = {
+      type: 'GAME_STATUS_UPDATE',
+      gameId: gameId.toString(),
+      status: gameData.status,
+      currentNumber: gameData.currentNumber || null,
+      calledNumbers: gameData.calledNumbers || [],
+      totalCalled: (gameData.calledNumbers || []).length,
+      message: this.getGameStatusMessage(gameData.status)
+    };
     
-    try {
-      const statusUpdate = {
-        type: 'GAME_STATUS_UPDATE',
-        gameId: gameId.toString(),
-        status: gameData.status,
-        currentNumber: gameData.currentNumber || null,
-        calledNumbers: gameData.calledNumbers || [],
-        totalCalled: (gameData.calledNumbers || []).length,
-        message: this.getGameStatusMessage(gameData.status)
-      };
-      
-      this.webSocketService.broadcastGameStatus(gameId.toString(), statusUpdate);
-      console.log(`📤 Broadcast game status for ${gameId}: ${gameData.status}`);
-    } catch (error) {
-      console.error('❌ Error broadcasting game status:', error);
-    }
+    // Call the correct method - broadcastGameStatus
+    this.webSocketService.broadcastGameStatus(gameId.toString(), statusUpdate);
+    console.log(`📤 Broadcast game status for ${gameId}: ${gameData.status}`);
+  } catch (error) {
+    console.error('❌ Error broadcasting game status:', error);
   }
+}
   
   static getGameStatusMessage(status) {
     switch (status) {

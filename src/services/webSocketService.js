@@ -223,6 +223,66 @@ class WebSocketService {
       console.error('Error handling WebSocket message:', error);
     }
   }
+  // Add this method to the WebSocketService class, after the handleMessage method:
+
+handleDisconnection(ws, userId, gameId) {
+  console.log(`🔌 WebSocket disconnected for user ${userId}, game ${gameId}`);
+  
+  // Clean up user from clients map
+  if (userId) {
+    this.clients.delete(userId);
+  }
+  
+  // Remove from game room
+  if (gameId) {
+    const room = this.gameRooms.get(gameId);
+    if (room) {
+      room.delete(ws);
+      
+      // Broadcast user left
+      if (userId) {
+        this.broadcastToGame(gameId, {
+          type: 'USER_LEFT',
+          userId,
+          timestamp: new Date().toISOString(),
+          message: `User ${userId} left the game`
+        });
+      }
+      
+      // Clean up empty room
+      if (room.size === 0) {
+        this.gameRooms.delete(gameId);
+      }
+    }
+  }
+  
+  // Clean up client state
+  const clientKey = `${gameId}_${userId || 'anonymous'}`;
+  this.clientStates.delete(clientKey);
+}
+
+// Also add this method to clean up all connections gracefully:
+closeAllConnections() {
+  console.log('🔌 Closing all WebSocket connections...');
+  
+  // Notify all clients
+  const disconnectMessage = JSON.stringify({
+    type: 'SERVER_SHUTDOWN',
+    message: 'Server is shutting down',
+    timestamp: new Date().toISOString()
+  });
+  
+  this.wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(disconnectMessage);
+      client.close();
+    }
+  });
+  
+  this.clients.clear();
+  this.gameRooms.clear();
+  this.clientStates.clear();
+}
 
   // NEW: Handle game status requests
   async handleGetGameStatus(data, ws) {
@@ -332,42 +392,44 @@ class WebSocketService {
   }
 
   // NEW: External method to broadcast game status (called by GameService)
-  broadcastGameStatusUpdate(gameId, gameData) {
-    console.log(`📤 WebSocket: Broadcasting game status for ${gameId}: ${gameData.status}`);
+broadcastGameStatusUpdate(gameId, gameData) {
+  console.log(`📤 WebSocket: Broadcasting game status for ${gameId}: ${gameData.status}`);
+  
+  const statusUpdate = {
+    type: 'GAME_STATUS_UPDATE',
+    gameId: gameData._id || gameId,
+    status: gameData.status,
+    currentNumber: gameData.currentNumber || null,
+    calledNumbers: gameData.numbersCalled || [],
+    totalCalled: (gameData.numbersCalled || []).length,
+    currentPlayers: gameData.currentPlayers || 0,
+    timestamp: new Date().toISOString()
+  };
+  
+  this.broadcastToGame(gameId, statusUpdate);
+  
+  // Special broadcasts for important status changes
+  if (gameData.status === 'ACTIVE') {
+    console.log(`🚀 WebSocket: Game ${gameData.code} is now ACTIVE - broadcasting to all users`);
     
     this.broadcastToGame(gameId, {
-      type: 'GAME_STATUS_UPDATE',
+      type: 'GAME_STARTED',
       gameId: gameData._id,
-      status: gameData.status,
-      currentNumber: gameData.currentNumber || null,
-      calledNumbers: gameData.numbersCalled || [],
-      totalCalled: (gameData.numbersCalled || []).length,
-      currentPlayers: gameData.currentPlayers || 0,
+      gameCode: gameData.code,
+      startedAt: gameData.startedAt || new Date().toISOString(),
+      playerCount: gameData.currentPlayers || 0,
       timestamp: new Date().toISOString()
     });
-    
-    // Special broadcasts for important status changes
-    if (gameData.status === 'ACTIVE') {
-      console.log(`🚀 WebSocket: Game ${gameData.code} is now ACTIVE - broadcasting to all users`);
-      
-      this.broadcastToGame(gameId, {
-        type: 'GAME_STARTED',
-        gameId: gameData._id,
-        gameCode: gameData.code,
-        startedAt: gameData.startedAt || new Date().toISOString(),
-        playerCount: gameData.currentPlayers || 0,
-        timestamp: new Date().toISOString()
-      });
-    } else if (gameData.status === 'CARD_SELECTION') {
-      this.broadcastToGame(gameId, {
-        type: 'CARD_SELECTION_STARTED',
-        gameId: gameData._id,
-        endTime: gameData.cardSelectionEndTime?.toISOString() || new Date(Date.now() + 30000).toISOString(),
-        duration: 30000,
-        timestamp: new Date().toISOString()
-      });
-    }
+  } else if (gameData.status === 'CARD_SELECTION') {
+    this.broadcastToGame(gameId, {
+      type: 'CARD_SELECTION_STARTED',
+      gameId: gameData._id,
+      endTime: gameData.cardSelectionEndTime?.toISOString() || new Date(Date.now() + 30000).toISOString(),
+      duration: 30000,
+      timestamp: new Date().toISOString()
+    });
   }
+}
 
   // NEW: Broadcast to all users in a game
   broadcastToGame(gameId, message, excludeWs = null) {
@@ -398,7 +460,23 @@ class WebSocketService {
     
     console.log(`📤 Broadcast to game ${gameId}: ${message.type} sent to ${sentCount} clients`);
   }
-
+// Broadcast taken cards update
+broadcastTakenCards(gameId, takenCards) {
+  console.log(`📤 Broadcasting taken cards for game ${gameId}: ${takenCards.length} cards`);
+  
+  this.broadcastToGame(gameId, {
+    type: 'TAKEN_CARDS_UPDATE',
+    takenCards,
+    totalTakenCards: takenCards.length,
+    timestamp: new Date().toISOString()
+  });
+}
+// Broadcast game status
+broadcastGameStatus(gameId, statusUpdate) {
+  console.log(`📤 Broadcasting game status for ${gameId}: ${statusUpdate.status}`);
+  
+  this.broadcastToGame(gameId, statusUpdate);
+}
   // Send to specific user
   sendToUser(userId, message) {
     const ws = this.clients.get(userId);
