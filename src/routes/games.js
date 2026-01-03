@@ -4,7 +4,90 @@ const GameService = require('../services/gameService');
 const Game = require('../models/Game');
 
 // ==================== CARD SELECTION ROUTES ====================
+// Add to your routes (games.js)
+router.get('/:id/sync', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { clientSequence } = req.query;
+    
+    const syncState = await GameService.getGameSyncState(id);
+    
+    if (!syncState) {
+      return res.status(404).json({ success: false, error: 'Game not found' });
+    }
+    
+    // Check if client needs sync
+    const needsFullSync = parseInt(clientSequence || 0) < syncState.sequence;
+    
+    res.json({
+      success: true,
+      syncState,
+      needsFullSync,
+      serverTime: Date.now()
+    });
+  } catch (error) {
+    console.error('Sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
+// Add health check with sync info
+router.get('/:id/sync-health', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const game = await Game.findById(id);
+    
+    if (!game) {
+      return res.status(404).json({ success: false, error: 'Game not found' });
+    }
+    
+    const serverState = GameService.gameStates.get(id.toString());
+    const wsService = require('../services/webSocketService').instance;
+    
+    let clientCount = 0;
+    let clientStates = [];
+    
+    if (wsService && wsService.gameRooms.has(id.toString())) {
+      const room = wsService.gameRooms.get(id.toString());
+      clientCount = room.size;
+      
+      // Get sample of client states
+      room.forEach(client => {
+        if (client.userId) {
+          const clientKey = `${id}_${client.userId}`;
+          const state = wsService.clientStates.get(clientKey);
+          clientStates.push({
+            userId: client.userId,
+            lastSequence: state?.lastSequence || 0,
+            lag: state ? Date.now() - state.lastSync : -1
+          });
+        }
+      });
+    }
+    
+    res.json({
+      success: true,
+      game: {
+        id: game._id,
+        code: game.code,
+        status: game.status,
+        calledNumbers: game.numbersCalled?.length || 0
+      },
+      serverState: serverState || null,
+      clients: {
+        count: clientCount,
+        sample: clientStates.slice(0, 10) // Sample of 10 clients
+      },
+      syncInfo: {
+        serverTime: Date.now(),
+        sequence: serverState?.sequence || 0
+      }
+    });
+  } catch (error) {
+    console.error('Sync health error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 // Get available cards for user to choose from
 router.get('/:gameId/available-cards/:userId', async (req, res) => {
   try {

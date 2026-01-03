@@ -30,7 +30,8 @@ class GameService {
   static NUMBER_CALL_INTERVAL = 5000;
   static GAME_RESTART_COOLDOWN = 60000;
   static ENTRY_FEE = 10;
-  
+  static gameStates = new Map(); // gameId -> { calledNumbers, status, currentNumber, lastUpdate }
+
   // ==================== WEBSOCKET INTEGRATION ====================
   
   static setWebSocketService(service) {
@@ -1122,64 +1123,76 @@ static async checkCardSelectionEnd(gameId) {
     }
   }
 
-  static async callNumber(gameId) {
-    try {
-      const game = await Game.findById(gameId);
+ static async callNumber(gameId) {
+  try {
+    const game = await Game.findById(gameId);
 
-      if (!game || game.status !== 'ACTIVE') {
-        throw new Error('Game not active');
-      }
-
-      if (this.winnerDeclared.has(gameId.toString())) {
-        return;
-      }
-
-      const calledNumbers = game.numbersCalled || [];
-      
-      if (calledNumbers.length >= 75) {
-        await this.endGameDueToNoWinner(gameId);
-        return;
-      }
-
-      let newNumber;
-      let attempts = 0;
-      do {
-        newNumber = Math.floor(Math.random() * 75) + 1;
-        attempts++;
-        if (attempts > 100) {
-          throw new Error('Could not find unused number after 100 attempts');
-        }
-      } while (calledNumbers.includes(newNumber));
-
-      calledNumbers.push(newNumber);
-      game.numbersCalled = calledNumbers;
-      game.updatedAt = new Date();
-      await game.save();
-
-      console.log(`🔢 Called number: ${newNumber} for ${game.code}. Total: ${calledNumbers.length}`);
-      
-      // Broadcast number called
-      this.broadcastToGame(gameId, {
-        type: 'NUMBER_CALLED',
-        gameId: game._id,
-        number: newNumber,
-        letter: GameUtils.getNumberLetter(newNumber),
-        totalCalled: calledNumbers.length,
-        calledNumbers: calledNumbers,
-        timestamp: new Date().toISOString()
-      });
-      
-      return { 
-        number: newNumber, 
-        letter: GameUtils.getNumberLetter(newNumber),
-        calledNumbers,
-        totalCalled: calledNumbers.length 
-      };
-    } catch (error) {
-      console.error('❌ Call number error:', error);
-      throw error;
+    if (!game || game.status !== 'ACTIVE') {
+      throw new Error('Game not active');
     }
+
+    if (this.winnerDeclared.has(gameId.toString())) {
+      return;
+    }
+
+    const calledNumbers = game.numbersCalled || [];
+    
+    if (calledNumbers.length >= 75) {
+      await this.endGameDueToNoWinner(gameId);
+      return;
+    }
+
+    let newNumber;
+    let attempts = 0;
+    do {
+      newNumber = Math.floor(Math.random() * 75) + 1;
+      attempts++;
+      if (attempts > 100) {
+        throw new Error('Could not find unused number after 100 attempts');
+      }
+    } while (calledNumbers.includes(newNumber));
+
+    calledNumbers.push(newNumber);
+    game.numbersCalled = calledNumbers;
+    game.updatedAt = new Date();
+    await game.save();
+
+    console.log(`🔢 Called number: ${newNumber} for ${game.code}. Total: ${calledNumbers.length}`);
+    
+    // ✅ CRITICAL: Store synchronized state
+    this.gameStates.set(gameId.toString(), {
+      calledNumbers,
+      currentNumber: newNumber,
+      letter: GameUtils.getNumberLetter(newNumber),
+      timestamp: Date.now(),
+      sequence: calledNumbers.length
+    });
+
+    // ✅ Broadcast with sequence number for ordering
+    this.broadcastToGame(gameId, {
+      type: 'NUMBER_CALLED',
+      gameId: game._id,
+      number: newNumber,
+      letter: GameUtils.getNumberLetter(newNumber),
+      totalCalled: calledNumbers.length,
+      calledNumbers: calledNumbers,
+      sequence: calledNumbers.length, // Add sequence number
+      timestamp: Date.now(), // Use Unix timestamp
+      serverTime: Date.now() // Add server timestamp
+    });
+    
+    return { 
+      number: newNumber, 
+      letter: GameUtils.getNumberLetter(newNumber),
+      calledNumbers,
+      totalCalled: calledNumbers.length,
+      sequence: calledNumbers.length
+    };
+  } catch (error) {
+    console.error('❌ Call number error:', error);
+    throw error;
   }
+}
 
   // ==================== WINNER DECLARATION ====================
 
@@ -2348,7 +2361,28 @@ static async checkCardSelectionEnd(gameId) {
 
     return this.formatGameForFrontend(game);
   }
-
+static async getGameSyncState(gameId) {
+  try {
+    const game = await Game.findById(gameId);
+    if (!game) return null;
+    
+    const currentState = this.gameStates.get(gameId.toString());
+    
+    return {
+      gameId: game._id,
+      status: game.status,
+      calledNumbers: game.numbersCalled || [],
+      totalCalled: (game.numbersCalled || []).length,
+      currentNumber: currentState?.currentNumber || null,
+      sequence: currentState?.sequence || 0,
+      serverTime: Date.now(),
+      lastUpdate: currentState?.timestamp || Date.now()
+    };
+  } catch (error) {
+    console.error('❌ Get sync state error:', error);
+    return null;
+  }
+}
   static async getTakenCards(gameId) {
     try {
       const bingoCards = await BingoCard.find({ gameId });
