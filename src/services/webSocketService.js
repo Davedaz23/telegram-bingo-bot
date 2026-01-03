@@ -50,9 +50,10 @@ class WebSocketService {
         this.handleMessage(ws, message);
       });
       
-      ws.on('close', () => {
-        this.handleDisconnection(ws, userId, gameId);
-      });
+     ws.on('close', () => {
+  console.log(`🔌 WebSocket closed: user ${userId}, game ${gameId}`);
+  this.handleDisconnection(ws, userId, gameId);
+});
       
       ws.on('error', (error) => {
         console.error('WebSocket error:', error);
@@ -154,12 +155,32 @@ class WebSocketService {
       message: `User ${userId} joined the game`
     }, ws);
   }
+getMessagesSent() {
+  let total = 0;
+  this.wss.clients.forEach(client => {
+    if (client.messagesSent) {
+      total += client.messagesSent;
+    }
+  });
+  return total;
+}
 
+getMessagesReceived() {
+  let total = 0;
+  this.wss.clients.forEach(client => {
+    if (client.messagesReceived) {
+      total += client.messagesReceived;
+    }
+  });
+  return total;
+}
   handleMessage(ws, message) {
     try {
       const data = JSON.parse(message);
       console.log('📨 WebSocket message:', data.type);
-      
+        // Track messages received
+    if (!ws.messagesReceived) ws.messagesReceived = 0;
+    ws.messagesReceived++;
       switch (data.type) {
         case 'JOIN_GAME':
           this.joinGameRoom(data.gameId, ws, data.userId);
@@ -432,34 +453,38 @@ broadcastGameStatusUpdate(gameId, gameData) {
 }
 
   // NEW: Broadcast to all users in a game
-  broadcastToGame(gameId, message, excludeWs = null) {
-    const room = this.gameRooms.get(gameId);
-    if (!room) {
-      console.log(`⚠️ No room found for game ${gameId}`);
-      return;
-    }
-    
-    const messageStr = JSON.stringify(message);
-    let sentCount = 0;
-    
-    room.forEach(client => {
-      if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
-        client.send(messageStr);
-        sentCount++;
-        
-        // Update client state
-        if (message.sequence) {
-          const clientKey = `${gameId}_${client.userId || 'anonymous'}`;
-          this.clientStates.set(clientKey, {
-            lastSequence: message.sequence,
-            lastSync: Date.now()
-          });
-        }
-      }
-    });
-    
-    console.log(`📤 Broadcast to game ${gameId}: ${message.type} sent to ${sentCount} clients`);
+ broadcastToGame(gameId, message, excludeWs = null) {
+  const room = this.gameRooms.get(gameId);
+  if (!room) {
+    console.log(`⚠️ No room found for game ${gameId}`);
+    return;
   }
+  
+  const messageStr = JSON.stringify(message);
+  let sentCount = 0;
+  
+  room.forEach(client => {
+    if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
+      client.send(messageStr);
+      sentCount++;
+      
+      // Track messages sent
+      if (!client.messagesSent) client.messagesSent = 0;
+      client.messagesSent++;
+      
+      // Update client state
+      if (message.sequence) {
+        const clientKey = `${gameId}_${client.userId || 'anonymous'}`;
+        this.clientStates.set(clientKey, {
+          lastSequence: message.sequence,
+          lastSync: Date.now()
+        });
+      }
+    }
+  });
+  
+  console.log(`📤 Broadcast to game ${gameId}: ${message.type} sent to ${sentCount} clients`);
+}
 // Broadcast taken cards update
 broadcastTakenCards(gameId, takenCards) {
   console.log(`📤 Broadcasting taken cards for game ${gameId}: ${takenCards.length} cards`);
