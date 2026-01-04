@@ -125,41 +125,101 @@ class GameService {
 
   // ==================== CORE GAME LIFECYCLE ====================
 
-  static async getMainGame() {
-    const lockKey = 'get_main_game';
-    
-    if (this.processingGames.has(lockKey)) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      return this.getMainGame();
-    }
+ static async getMainGame() {
+  const lockKey = 'get_main_game';
+  
+  if (this.processingGames.has(lockKey)) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    return this.getMainGame(); // Recursive retry
+  }
 
-    try {
-      this.processingGames.add(lockKey);
+  try {
+    this.processingGames.add(lockKey);
+    
+    console.log('🎮 getMainGame() - Starting...');
+    
+    // CRITICAL FIX 1: FIRST, enforce single game with atomic operation
+    await this.enforceSingleGameAtomic();
+    
+    // CRITICAL FIX 2: Get game with proper state ordering
+    let game = await Game.findOne({
+      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+      archived: { $ne: true }
+    })
+    .sort({ 
+      // Priority: ACTIVE > CARD_SELECTION > WAITING_FOR_PLAYERS, then newest
+      statusOrder: {
+        $cond: [
+          { $eq: ['$status', 'ACTIVE'] }, 1,
+          { $cond: [
+            { $eq: ['$status', 'CARD_SELECTION'] }, 2,
+            { $cond: [
+              { $eq: ['$status', 'WAITING_FOR_PLAYERS'] }, 3,
+              4
+            ]}
+          ]}
+        ]
+      },
+      createdAt: -1 
+    });
+
+    if (game) {
+      console.log(`✅ Found game: ${game.code} (${game.status})`);
       
-      console.log('🎮 getMainGame() - Checking game state...');
+      // Handle stuck states
+      if (game.status === 'CARD_SELECTION' && game.cardSelectionEndTime) {
+        const now = new Date();
+        if (game.cardSelectionEndTime <= now) {
+          console.log(`🔄 Game ${game.code} stuck in CARD_SELECTION, checking...`);
+          await this.checkCardSelectionEnd(game._id);
+          game = await Game.findById(game._id); // Refresh game
+        }
+      }
       
-      // CRITICAL: FIRST clean up any duplicate/conflicting games
-      await this.cleanupDuplicateGames();
-      
-      // Get current game state
-      const game = await this.getCurrentGameState();
-      
-      console.log(`✅ Main game: ${game.code} (Status: ${game.status})`);
-      
-      // Broadcast if WebSocket is available
-      if (this.webSocketService && game.status) {
-        this.broadcastGameStatus(game._id, game);
+      // If game is ACTIVE, ensure auto-calling is running
+      if (game.status === 'ACTIVE' && !this.activeIntervals.has(game._id.toString())) {
+        console.log(`🔄 Restarting auto-calling for ${game.code}`);
+        this.startAutoNumberCalling(game._id);
       }
       
       return this.formatGameForFrontend(game);
-      
-    } catch (error) {
-      console.error('❌ Error in getMainGame:', error);
-      throw error;
-    } finally {
-      this.processingGames.delete(lockKey);
     }
+    
+    // No game found - check for finished games to restart
+    const finishedGame = await Game.findOne({
+      status: { $in: ['FINISHED', 'NO_WINNER'] },
+      archived: { $ne: true }
+    }).sort({ endedAt: -1 });
+    
+    if (finishedGame) {
+      console.log(`🔄 Creating new game after finished game: ${finishedGame.code}`);
+      return await this.createNewGameAfterCooldown(finishedGame._id);
+    }
+    
+    // Absolutely no games exist - create brand new one
+    console.log('🎮 Creating brand new game...');
+    return await this.createNewGame();
+    
+  } catch (error) {
+    console.error('❌ Error in getMainGame:', error);
+    
+    // Emergency fallback - try to get any game
+    try {
+      const emergencyGame = await Game.findOne({ archived: { $ne: true } }).sort({ createdAt: -1 });
+      if (emergencyGame) {
+        return this.formatGameForFrontend(emergencyGame);
+      }
+      
+      // Last resort - create game
+      return await this.createNewGame();
+    } catch (fallbackError) {
+      console.error('❌ Fallback game creation failed:', fallbackError);
+      throw error;
+    }
+  } finally {
+    this.processingGames.delete(lockKey);
   }
+}
 
   // ==================== GET CURRENT GAME STATE ====================
 
@@ -261,53 +321,80 @@ class GameService {
   }
 
   // ==================== CRITICAL: ENSURE SINGLE ACTIVE GAME ====================
-  static async ensureSingleActiveGame() {
+ static async enforceSingleGameAtomic() {
+  const lockKey = 'enforce_single_game';
+  
+  if (this.processingGames.has(lockKey)) {
+    return; // Already being processed
+  }
+
+  try {
+    this.processingGames.add(lockKey);
+    
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
-      // Find ALL games in active states (WAITING_FOR_PLAYERS, CARD_SELECTION, ACTIVE)
+      // Find ALL active games in one query WITH LOCK
       const activeGames = await Game.find({
         status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
         archived: { $ne: true }
-      }).session(session).sort({ createdAt: -1 });
+      })
+      .session(session)
+      .sort({ 
+        // Priority order for keeping which game
+        status: 1, // ACTIVE first, then CARD_SELECTION, then WAITING_FOR_PLAYERS
+        createdAt: -1 // Newest first
+      })
+      .readConcern('majority')
+      .writeConcern({ w: 'majority' });
 
       if (activeGames.length <= 1) {
         await session.abortTransaction();
+        console.log('✅ Single game check: OK');
         return;
       }
 
       console.warn(`⚠️ CRITICAL: Found ${activeGames.length} active games!`);
       console.warn(`⚠️ Game states: ${activeGames.map(g => `${g.code}:${g.status}`).join(', ')}`);
       
-      // Keep the newest game and archive all others
-      const newestGame = activeGames[0];
-      console.log(`✅ Keeping newest game: ${newestGame.code} (${newestGame.status})`);
+      // Keep only the first one (highest priority)
+      const gameToKeep = activeGames[0];
+      console.log(`✅ Keeping game: ${gameToKeep.code} (${gameToKeep.status})`);
 
+      // Archive all others
       for (let i = 1; i < activeGames.length; i++) {
-        const oldGame = activeGames[i];
-        console.log(`🗑️ Archiving duplicate game: ${oldGame.code} (${oldGame.status})`);
+        const gameToArchive = activeGames[i];
+        console.log(`🗑️ Archiving duplicate: ${gameToArchive.code} (${gameToArchive.status})`);
         
-        oldGame.archived = true;
-        oldGame.archivedAt = new Date();
-        oldGame.archivedReason = `Multiple active games detected. Keeping only ${newestGame.code}`;
-        await oldGame.save({ session });
+        gameToArchive.archived = true;
+        gameToArchive.archivedAt = new Date();
+        gameToArchive.archivedReason = `Multiple active games detected. Keeping only ${gameToKeep.code}`;
+        await gameToArchive.save({ session });
         
-        // Stop intervals for archived games
-        this.stopAutoNumberCalling(oldGame._id);
-        this.clearAutoStartTimer(oldGame._id);
+        // Clean up intervals
+        this.stopAutoNumberCalling(gameToArchive._id);
+        this.clearAutoStartTimer(gameToArchive._id);
       }
 
       await session.commitTransaction();
-      console.log('✅ Ensured single active game');
+      console.log('✅ Enforced single active game');
       
     } catch (error) {
       await session.abortTransaction();
-      console.error('❌ Error ensuring single active game:', error);
+      console.error('❌ Error enforcing single game:', error);
+      // Don't throw - we don't want to break everything
     } finally {
-      session.endSession();
+      if (session) {
+        session.endSession();
+      }
     }
+    
+  } finally {
+    this.processingGames.delete(lockKey);
   }
+}
+
 
   // ==================== FIND WAITING OR CARD SELECTION GAME ====================
   static async findWaitingOrCardSelectionGame() {
@@ -321,49 +408,75 @@ class GameService {
 
   // ==================== GAME CREATION & CLEANUP ====================
 
-  static async createNewGame() {
-    const lockKey = 'game_creation';
+ 
+static async createNewGame() {
+  const lockKey = 'create_new_game';
+  
+  if (this.gameCreationLock.has(lockKey)) {
+    console.log('⏳ Game creation in progress, waiting...');
+    await new Promise(resolve => setTimeout(resolve, 500));
     
-    if (this.gameCreationLock.has(lockKey)) {
-      console.log('⏳ Game creation in progress, waiting...');
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      return this.getCurrentGameState();
+    // Instead of recursive call, check if game was created
+    const existingGame = await Game.findOne({
+      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+      archived: { $ne: true }
+    }).sort({ createdAt: -1 });
+    
+    if (existingGame) {
+      console.log(`✅ Game already created: ${existingGame.code}`);
+      return existingGame;
     }
+    
+    // If still no game, retry creation
+    return this.createNewGame();
+  }
 
-    try {
-      this.gameCreationLock.set(lockKey, true);
-      
-      // CRITICAL: Check if there's already an active/waiting game
-      const existingGame = await Game.findOne({
-        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
-        archived: { $ne: true }
-      });
-      
-      if (existingGame) {
-        console.log(`⚠️ Cannot create new game: ${existingGame.code} (${existingGame.status}) already exists`);
-        return existingGame;
-      }
-      
-      const gameCode = GameUtils.generateGameCode();
-      const now = new Date();
-      
-      const game = new Game({
-        code: gameCode,
-        maxPlayers: 400,
-        isPrivate: false,
-        numbersCalled: [],
-        status: 'WAITING_FOR_PLAYERS',
-        currentPlayers: 0,
-        isAutoCreated: true,
-        autoStartEndTime: new Date(now.getTime() + this.AUTO_START_DELAY),
-        createdAt: now,
-        updatedAt: now
-      });
+  try {
+    this.gameCreationLock.set(lockKey, true);
+    
+    // CRITICAL: Check with lock if there's already an active/waiting game
+    const existingGame = await Game.findOne({
+      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+      archived: { $ne: true }
+    });
+    
+    if (existingGame) {
+      console.log(`⏭️ Skipping creation: ${existingGame.code} (${existingGame.status}) already exists`);
+      return existingGame;
+    }
+    
+    // Also check for recently created games (last 5 seconds)
+    const recentGame = await Game.findOne({
+      createdAt: { $gte: new Date(Date.now() - 5000) },
+      archived: { $ne: true }
+    });
+    
+    if (recentGame) {
+      console.log(`⏭️ Recent game exists: ${recentGame.code}, skipping creation`);
+      return recentGame;
+    }
+    
+    const gameCode = GameUtils.generateGameCode();
+    const now = new Date();
+    
+    const game = new Game({
+      code: gameCode,
+      maxPlayers: 400,
+      isPrivate: false,
+      numbersCalled: [],
+      status: 'WAITING_FOR_PLAYERS',
+      currentPlayers: 0,
+      isAutoCreated: true,
+      autoStartEndTime: new Date(now.getTime() + this.AUTO_START_DELAY),
+      createdAt: now,
+      updatedAt: now
+    });
 
-      await game.save();
-      console.log(`🎯 Created new game: ${gameCode} (ID: ${game._id})`);
-      
-      // Broadcast new game created
+    await game.save();
+    console.log(`🎯 Created new game: ${gameCode} (ID: ${game._id})`);
+    
+    // Broadcast new game created
+    if (this.webSocketService) {
       this.broadcastToGame(game._id, {
         type: 'NEW_GAME_CREATED',
         gameId: game._id,
@@ -372,19 +485,35 @@ class GameService {
         autoStartTime: game.autoStartEndTime,
         timestamp: new Date().toISOString()
       });
-      
-      // Schedule auto-start check
-      this.scheduleAutoStartCheck(game._id);
-      
-      return game;
-      
-    } catch (error) {
-      console.error('❌ Error creating new game:', error);
-      throw error;
-    } finally {
-      this.gameCreationLock.delete(lockKey);
     }
+    
+    // Schedule auto-start check with delay to avoid immediate checks
+    setTimeout(() => {
+      this.scheduleAutoStartCheck(game._id);
+    }, 3000);
+    
+    return game;
+    
+  } catch (error) {
+    console.error('❌ Error creating new game:', error);
+    
+    // On error, check if game was created anyway
+    const existingGame = await Game.findOne({
+      status: 'WAITING_FOR_PLAYERS',
+      archived: { $ne: true }
+    }).sort({ createdAt: -1 });
+    
+    if (existingGame) {
+      console.log(`🔄 Found game after error: ${existingGame.code}`);
+      return existingGame;
+    }
+    
+    throw error;
+  } finally {
+    this.gameCreationLock.delete(lockKey);
   }
+}
+
 
   static async createNewGameAfterCooldown(previousGameId) {
     const session = await mongoose.startSession();
@@ -2216,21 +2345,46 @@ class GameService {
 
   // ==================== GAME QUERIES & UTILITIES ====================
 
-  static async getActiveGames() {
-    try {
-      const game = await this.findActiveGame();
+ static async getActiveGames() {
+  try {
+    // Use the same logic as getMainGame but return array
+    await this.enforceSingleGameAtomic();
+    
+    const games = await Game.find({
+      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+      archived: { $ne: true }
+    })
+    .sort({ 
+      status: 1,
+      createdAt: -1 
+    })
+    .limit(1); // Only return 1 game maximum
+    
+    console.log(`🔍 GET /api/games/active: Found ${games.length} games`);
+    
+    if (games.length === 0) {
+      // No active game - check if we need to create one
+      const finishedGame = await Game.findOne({
+        status: { $in: ['FINISHED', 'NO_WINNER'] },
+        archived: { $ne: true }
+      }).sort({ endedAt: -1 });
       
-      if (game) {
-        const formattedGame = await this.formatGameForFrontend(game);
-        return [formattedGame];
+      if (finishedGame) {
+        console.log(`🔄 Auto-creating new game after finished game`);
+        const newGame = await this.createNewGameAfterCooldown(finishedGame._id);
+        return [await this.formatGameForFrontend(newGame)];
       }
       
       return [];
-    } catch (error) {
-      console.error('❌ Error in getActiveGames:', error);
-      return [];
     }
+    
+    return [await this.formatGameForFrontend(games[0])];
+    
+  } catch (error) {
+    console.error('❌ Error in getActiveGames:', error);
+    return [];
   }
+}
 
   static async getWaitingGames() {
     try {
@@ -2430,36 +2584,63 @@ class GameService {
   }
 
   static async ensureActiveGameExists() {
-    try {
-      // Get the current game state which includes logic for handling stuck games
-      const game = await this.getCurrentGameState();
+  const lockKey = 'ensure_active_game';
+  
+  if (this.processingGames.has(lockKey)) {
+    return;
+  }
+
+  try {
+    this.processingGames.add(lockKey);
+    
+    console.log('🔍 ensureActiveGameExists() - Checking...');
+    
+    // First, clean up any duplicates
+    await this.enforceSingleGameAtomic();
+    
+    // Check for existing game
+    const existingGame = await Game.findOne({
+      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+      archived: { $ne: true }
+    });
+    
+    if (existingGame) {
+      console.log(`✅ Game exists: ${existingGame.code} (${existingGame.status})`);
       
-      if (!game) {
-        console.log('⚠️ No active/waiting game found. Creating new one...');
-        await this.createNewGame();
-      } else {
-        console.log(`✅ Active game exists: ${game.code} (${game.status})`);
-        
-        // Additional check for stuck CARD_SELECTION games
-        if (game.status === 'CARD_SELECTION' && game.cardSelectionEndTime) {
-          const now = new Date();
-          if (game.cardSelectionEndTime <= now) {
-            console.log(`🔄 Game ${game.code} has expired card selection, checking...`);
-            await this.checkCardSelectionEnd(game._id);
-            
-            // Re-check after handling
-            const updatedGame = await Game.findById(game._id);
-            if (updatedGame && updatedGame.status !== 'CARD_SELECTION') {
-              // If game state changed, we might need a new game
-              await this.createNewGame();
-            }
-          }
+      // Handle stuck states
+      if (existingGame.status === 'CARD_SELECTION' && existingGame.cardSelectionEndTime) {
+        const now = new Date();
+        if (existingGame.cardSelectionEndTime <= now) {
+          console.log(`🔄 Game ${existingGame.code} has expired card selection`);
+          await this.checkCardSelectionEnd(existingGame._id);
         }
       }
-    } catch (error) {
-      console.error('❌ Error ensuring active game exists:', error);
+      
+      return;
     }
+    
+    // No game exists - check for finished games
+    const finishedGame = await Game.findOne({
+      status: { $in: ['FINISHED', 'NO_WINNER'] },
+      archived: { $ne: true }
+    }).sort({ endedAt: -1 });
+    
+    if (finishedGame) {
+      console.log(`🔄 Creating new game after finished: ${finishedGame.code}`);
+      await this.createNewGameAfterCooldown(finishedGame._id);
+      return;
+    }
+    
+    // Create brand new game
+    console.log('🎮 Creating brand new game...');
+    await this.createNewGame();
+    
+  } catch (error) {
+    console.error('❌ Error ensuring active game exists:', error);
+  } finally {
+    this.processingGames.delete(lockKey);
   }
+}
 
   static async manageGameLifecycle() {
     try {
