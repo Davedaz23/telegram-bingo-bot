@@ -480,11 +480,12 @@ static async findActiveGame() {
       
       return {
         success: true,
-        message: 'Bingo claim successful! You are the winner!',
+        message: ' claim successful! You are the winner!',
         patternType: winResult.patternType,
         winningPositions: winResult.winningPositions,
         autoMarkedPositions: winResult.autoMarkedPositions || [],
-        manuallyMarked: manuallyMarkedPositions.length
+        manuallyMarked: manuallyMarkedPositions.length,
+        winningPatterns: winResult.winningPatterns || []
       };
       
     } catch (error) {
