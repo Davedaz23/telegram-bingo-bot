@@ -189,7 +189,14 @@ getMessagesReceived() {
         case 'LEAVE_GAME':
           this.leaveGameRoom(data.gameId, ws);
           break;
-          
+          case 'CARD_RELEASED':
+  this.broadcastToGame(data.gameId, {
+    type: 'CARD_RELEASED',
+    userId: data.userId,
+    cardNumber: data.cardNumber,
+    timestamp: new Date().toISOString()
+  });
+  break;
         case 'CARD_SELECTED':
           this.handleCardSelected(data);
           break;
