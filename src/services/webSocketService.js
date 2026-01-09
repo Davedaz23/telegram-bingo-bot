@@ -134,7 +134,36 @@ class WebSocketService {
       console.error('Error sending initial taken cards:', error);
     }
   }
-
+// Handle winner info requests
+async handleGetWinnerInfo(data, ws) {
+  try {
+    const { gameId } = data;
+    
+    if (!gameId) return;
+    
+    // Get winner info from GameService
+    const winnerInfo = await GameService.getWinnerInfo(gameId);
+    
+    if (winnerInfo && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'WINNER_INFO',
+        ...winnerInfo,
+        timestamp: new Date().toISOString()
+      }));
+    }
+  } catch (error) {
+    console.error('Error getting winner info:', error);
+    
+    // Send error response
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'WINNER_INFO_ERROR',
+        error: error.message,
+        timestamp: new Date().toISOString()
+      }));
+    }
+  }
+}
   joinGameRoom(gameId, ws, userId) {
     if (!this.gameRooms.has(gameId)) {
       this.gameRooms.set(gameId, new Set());
@@ -217,6 +246,9 @@ getMessagesReceived() {
             timestamp: new Date().toISOString()
           });
           break;
+          case 'GET_WINNER_INFO':
+  this.handleGetWinnerInfo(data, ws);
+  break;
           
         case 'MARK_NUMBER':
           this.broadcastToGame(data.gameId, {
@@ -457,6 +489,51 @@ broadcastGameStatusUpdate(gameId, gameData) {
       timestamp: new Date().toISOString()
     });
   }
+}
+
+// Broadcast winner info to all players in game
+broadcastWinnerInfo(gameId, winnerInfo) {
+  console.log(`🏆 WebSocket: Broadcasting winner info for game ${gameId}`);
+  
+  const message = {
+    type: 'WINNER_INFO',
+    gameId: gameId.toString(),
+    winner: winnerInfo.winner || { _id: 'no-winner', username: 'No Winner', firstName: 'No Winner' },
+    gameCode: winnerInfo.gameCode || 'N/A',
+    endedAt: winnerInfo.endedAt || new Date().toISOString(),
+    totalPlayers: winnerInfo.totalPlayers || 0,
+    numbersCalled: winnerInfo.numbersCalled || 0,
+    winningPattern: winnerInfo.winningPattern || null,
+    winningCard: winnerInfo.winningCard || null,
+    timestamp: new Date().toISOString(),
+    message: winnerInfo.message || 'Game ended'
+  };
+  
+  this.broadcastToGame(gameId.toString(), message);
+  
+  console.log(`📤 Winner info broadcast sent for game ${gameId}`);
+}
+
+// Also add this method for WINNER_DECLARED events
+broadcastWinnerDeclared(gameId, winnerData) {
+  console.log(`🏆 WebSocket: Broadcasting winner declared for game ${gameId}`);
+  
+  const message = {
+    type: 'WINNER_DECLARED',
+    gameId: gameId.toString(),
+    winnerId: winnerData.winnerId,
+    winnerPrize: winnerData.winnerPrize,
+    totalPlayers: winnerData.totalPlayers,
+    patternType: winnerData.patternType,
+    endedAt: winnerData.endedAt || new Date().toISOString(),
+    timestamp: new Date().toISOString(),
+    // Include winning positions if available
+    winningPositions: winnerData.winningPositions || []
+  };
+  
+  this.broadcastToGame(gameId.toString(), message);
+  
+  console.log(`📤 Winner declared broadcast sent for game ${gameId}`);
 }
 
   // NEW: Broadcast to all users in a game
