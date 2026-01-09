@@ -1245,6 +1245,21 @@ static async cleanupStuckGames() {
     }
   }
 
+// In GameService.js, add this method:
+static broadcastWinnerInfo(gameId, winnerInfo) {
+  if (!this.webSocketService) {
+    console.log('⚠️ WebSocket service not available for winner info broadcast');
+    return;
+  }
+  
+  try {
+    this.webSocketService.broadcastWinnerInfo(gameId.toString(), winnerInfo);
+    console.log(`📤 Broadcast winner info to all players for game ${gameId}`);
+  } catch (error) {
+    console.error('❌ Error broadcasting winner info:', error);
+  }
+}
+
   // ==================== WINNER DECLARATION ====================
 
 static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions) {
@@ -1322,28 +1337,34 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
     // Get winner info for broadcasting
     const winnerInfo = await this.getWinnerInfo(gameId);
     
-    // Broadcast winner declared with WebSocket
+    // Broadcast winner declared with WebSocket - SEND WINNING POSITIONS TO ALL
     if (this.webSocketService) {
-      // Send winner declared message
       this.webSocketService.broadcastWinnerDeclared(gameId, {
         winnerId: winningUserId,
         winnerPrize: winnerPrize,
         totalPlayers: totalUniquePlayers,
         patternType: winningCard.winningPatternType || 'BINGO',
         endedAt: now.toISOString(),
-        winningPositions: winningPositions || winningCard.winningPatternPositions || []
+        winningPositions: winningPositions || winningCard.winningPatternPositions || [], // SEND TO ALL
+        winningCard: winnerInfo?.winningCard // SEND WINNING CARD INFO TO ALL
       });
       
-      // Also send detailed winner info
-      setTimeout(() => {
-        if (winnerInfo) {
-          this.webSocketService.broadcastWinnerInfo(gameId, winnerInfo);
-        }
-      }, 1000);
+      // Also send detailed winner info with winning positions
+      if (winnerInfo) {
+        setTimeout(() => {
+          this.webSocketService.broadcastWinnerInfo(gameId, {
+            ...winnerInfo,
+            // Ensure winning positions are included
+            winningCard: winnerInfo.winningCard ? {
+              ...winnerInfo.winningCard,
+              winningPatternPositions: winningPositions || winningCard.winningPatternPositions || []
+            } : null
+          });
+        }, 1000);
+      }
     }
     
     // Also send traditional broadcast
-    //
     this.broadcastToGame(gameId, {
       type: 'WINNER_DECLARED',
       gameId: game._id,
@@ -1352,7 +1373,11 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
       winnerPrize: winnerPrize,
       totalPlayers: totalUniquePlayers,
       patternType: winningCard.winningPatternType || 'BINGO',
-      winningPositions: winningPositions || winningCard.winningPatternPositions || [],
+      winningPositions: winningPositions || winningCard.winningPatternPositions || [], // SEND TO ALL
+      winningCard: winnerInfo?.winningCard ? {
+        ...winnerInfo.winningCard,
+        winningPatternPositions: winningPositions || winningCard.winningPatternPositions || []
+      } : null,
       endedAt: now.toISOString(),
       timestamp: new Date().toISOString()
     });
@@ -3443,7 +3468,8 @@ static async getWinnerInfo(gameId) {
     if (game.winnerId) {
       const bingoCard = await BingoCard.findOne({ 
         gameId, 
-        userId: game.winnerId._id 
+        userId: game.winnerId._id,
+        isWinner: true
       });
       
       if (bingoCard) {
@@ -3471,12 +3497,12 @@ static async getWinnerInfo(gameId) {
       totalPlayers: totalPlayers,
       numbersCalled: game.numbersCalled?.length || 0,
       winningPattern: winningPattern,
+      // CRITICAL: Always include winning card with positions for ALL players
       winningCard: winningCard ? {
         cardNumber: winningCard.cardNumber,
         numbers: winningCard.numbers,
         markedPositions: winningCard.markedPositions,
-        // CRITICAL: Always include winning pattern positions for ALL players to see
-        winningPatternPositions: winningPatternPositions
+        winningPatternPositions: winningPatternPositions // Always include positions
       } : null,
       message: game.winnerId ? 'Game finished with a winner!' : 'Game ended without winner'
     };

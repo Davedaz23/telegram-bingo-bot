@@ -492,8 +492,9 @@ broadcastGameStatusUpdate(gameId, gameData) {
 }
 
 // Broadcast winner info to all players in game
+// Broadcast winner info to all players in game
 broadcastWinnerInfo(gameId, winnerInfo) {
-  console.log(`🏆 WebSocket: Broadcasting winner info for game ${gameId}`);
+  console.log(`🏆 WebSocket: Broadcasting winner info for game ${gameId} to ALL players`);
   
   const message = {
     type: 'WINNER_INFO',
@@ -504,14 +505,47 @@ broadcastWinnerInfo(gameId, winnerInfo) {
     totalPlayers: winnerInfo.totalPlayers || 0,
     numbersCalled: winnerInfo.numbersCalled || 0,
     winningPattern: winnerInfo.winningPattern || null,
-    winningCard: winnerInfo.winningCard || null,
+    // CRITICAL: Always include winning card with positions for ALL players
+    winningCard: winnerInfo.winningCard ? {
+      cardNumber: winnerInfo.winningCard.cardNumber,
+      numbers: winnerInfo.winningCard.numbers,
+      markedPositions: winnerInfo.winningCard.markedPositions,
+      winningPatternPositions: winnerInfo.winningCard.winningPatternPositions || [] // Ensure positions are included
+    } : null,
     timestamp: new Date().toISOString(),
     message: winnerInfo.message || 'Game ended'
   };
   
   this.broadcastToGame(gameId.toString(), message);
   
-  console.log(`📤 Winner info broadcast sent for game ${gameId}`);
+  console.log(`📤 Winner info broadcast sent for game ${gameId} to ALL players`);
+}
+
+// Also add this method for WINNER_DECLARED events
+broadcastWinnerDeclared(gameId, winnerData) {
+  console.log(`🏆 WebSocket: Broadcasting winner declared for game ${gameId} to ALL players`);
+  
+  const message = {
+    type: 'WINNER_DECLARED',
+    gameId: gameId.toString(),
+    winnerId: winnerData.winnerId,
+    winnerPrize: winnerData.winnerPrize,
+    totalPlayers: winnerData.totalPlayers,
+    patternType: winnerData.patternType,
+    endedAt: winnerData.endedAt || new Date().toISOString(),
+    timestamp: new Date().toISOString(),
+    // CRITICAL: Include winning positions for ALL players
+    winningPositions: winnerData.winningPositions || [],
+    // CRITICAL: Include winning card info for ALL players
+    winningCard: winnerData.winningCard ? {
+      ...winnerData.winningCard,
+      winningPatternPositions: winnerData.winningPositions || winnerData.winningCard.winningPatternPositions || []
+    } : null
+  };
+  
+  this.broadcastToGame(gameId.toString(), message);
+  
+  console.log(`📤 Winner declared broadcast sent for game ${gameId} to ALL players`);
 }
 
 // Also add this method for WINNER_DECLARED events
@@ -536,39 +570,39 @@ broadcastWinnerDeclared(gameId, winnerData) {
   console.log(`📤 Winner declared broadcast sent for game ${gameId}`);
 }
 
-  // NEW: Broadcast to all users in a game
- broadcastToGame(gameId, message, excludeWs = null) {
-  const room = this.gameRooms.get(gameId);
-  if (!room) {
-    console.log(`⚠️ No room found for game ${gameId}`);
-    return;
-  }
+//   // NEW: Broadcast to all users in a game
+//  broadcastToGame(gameId, message, excludeWs = null) {
+//   const room = this.gameRooms.get(gameId);
+//   if (!room) {
+//     console.log(`⚠️ No room found for game ${gameId}`);
+//     return;
+//   }
   
-  const messageStr = JSON.stringify(message);
-  let sentCount = 0;
+//   const messageStr = JSON.stringify(message);
+//   let sentCount = 0;
   
-  room.forEach(client => {
-    if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
-      client.send(messageStr);
-      sentCount++;
+//   room.forEach(client => {
+//     if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
+//       client.send(messageStr);
+//       sentCount++;
       
-      // Track messages sent
-      if (!client.messagesSent) client.messagesSent = 0;
-      client.messagesSent++;
+//       // Track messages sent
+//       if (!client.messagesSent) client.messagesSent = 0;
+//       client.messagesSent++;
       
-      // Update client state
-      if (message.sequence) {
-        const clientKey = `${gameId}_${client.userId || 'anonymous'}`;
-        this.clientStates.set(clientKey, {
-          lastSequence: message.sequence,
-          lastSync: Date.now()
-        });
-      }
-    }
-  });
+//       // Update client state
+//       if (message.sequence) {
+//         const clientKey = `${gameId}_${client.userId || 'anonymous'}`;
+//         this.clientStates.set(clientKey, {
+//           lastSequence: message.sequence,
+//           lastSync: Date.now()
+//         });
+//       }
+//     }
+//   });
   
-  console.log(`📤 Broadcast to game ${gameId}: ${message.type} sent to ${sentCount} clients`);
-}
+//   console.log(`📤 Broadcast to game ${gameId}: ${message.type} sent to ${sentCount} clients`);
+// }
 // Broadcast taken cards update
 broadcastTakenCards(gameId, takenCards) {
   console.log(`📤 Broadcasting taken cards for game ${gameId}: ${takenCards.length} cards`);
