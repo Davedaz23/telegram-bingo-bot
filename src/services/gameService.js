@@ -1262,7 +1262,7 @@ static broadcastWinnerInfo(gameId, winnerInfo) {
 
   // ==================== WINNER DECLARATION ====================
 
-static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions) {
+static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions, winningPositionIndex = null) {
   const session = await mongoose.startSession();
   let transactionInProgress = false;
   
@@ -1296,6 +1296,8 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
     card.isWinner = true;
     card.winningPatternPositions = winningPositions || winningCard.winningPatternPositions || [];
     card.winningPatternType = winningCard.winningPatternType || 'BINGO';
+      card.winningPositionIndex = winningPositionIndex || winningCard.winningPositionIndex || null; 
+
     await card.save({ session });
     
     const reconciliation = new Reconciliation({
@@ -1365,22 +1367,24 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
     }
     
     // Also send traditional broadcast
-    this.broadcastToGame(gameId, {
-      type: 'WINNER_DECLARED',
-      gameId: game._id,
-      gameCode: game.code,
-      winnerId: winningUserId,
-      winnerPrize: winnerPrize,
-      totalPlayers: totalUniquePlayers,
-      patternType: winningCard.winningPatternType || 'BINGO',
-      winningPositions: winningPositions || winningCard.winningPatternPositions || [], // SEND TO ALL
-      winningCard: winnerInfo?.winningCard ? {
-        ...winnerInfo.winningCard,
-        winningPatternPositions: winningPositions || winningCard.winningPatternPositions || []
-      } : null,
-      endedAt: now.toISOString(),
-      timestamp: new Date().toISOString()
-    });
+this.broadcastToGame(gameId, {
+  type: 'WINNER_DECLARED',
+  gameId: game._id,
+  gameCode: game.code,
+  winnerId: winningUserId,
+  winnerPrize: winnerPrize,
+  totalPlayers: totalUniquePlayers,
+  patternType: winningCard.winningPatternType || 'BINGO',
+  winningPositions: winningPositions || winningCard.winningPatternPositions || [],
+  winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null, // NEW
+  winningCard: winnerInfo?.winningCard ? {
+    ...winnerInfo.winningCard,
+    winningPatternPositions: winningPositions || winningCard.winningPatternPositions || [],
+    winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null // NEW
+  } : null,
+  endedAt: now.toISOString(),
+  timestamp: new Date().toISOString()
+});
     
     this.stopAutoNumberCalling(gameId);
     
@@ -1389,6 +1393,7 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
     return {
       reconciliation,
       winningPositions: winningPositions || winningCard.winningPatternPositions || [],
+      winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null,
       winnerInfo
     };
     
@@ -1579,9 +1584,12 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
         { 
           ...bingoCard.toObject(), 
           winningPatternType: winResult.patternType,
-          winningPatternPositions: winResult.winningPositions
+          winningPatternPositions: winResult.winningPositions,
+              winningPositionIndex: winResult.winningPositionIndex 
+
         }, 
-        winResult.winningPositions
+        winResult.winningPositions,
+        winResult.winningPositionIndex
       );
       
       // Broadcast bingo claim success
@@ -1597,7 +1605,8 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
         success: true,
         message: 'Bingo claim successful! You are the winner!',
         patternType: winResult.patternType,
-        winningPositions: winResult.winningPositions,
+        winningPositions: winResult.winningPositions, 
+         winningPositionIndex: winResult.winningPositionIndex, 
         autoMarkedPositions: winResult.autoMarkedPositions || [],
         manuallyMarked: manuallyMarkedPositions.length
       };
@@ -1665,11 +1674,17 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
       
       // If all positions are already marked, it's a regular win
       if (markedInPattern.length === patternPositions.length) {
+              const lastMarkedPosition = patternPositions[patternPositions.length - 1];
+
         return {
           isWinner: true,
           patternType: pattern.type,
           winningPositions: patternPositions,
-          autoMarkedPositions: []
+          autoMarkedPositions: [],
+                winningPositionIndex: null ,
+                        winningPositionIndex: lastMarkedPosition 
+
+
         };
       }
       
@@ -1700,8 +1715,10 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
         if (autoMarkablePositions.length >= requiredAutoMarks) {
           // Take the required number of auto-marks
           const finalAutoMarks = autoMarkablePositions.slice(0, requiredAutoMarks);
+                            const winningPositionIndex = finalAutoMarks[finalAutoMarks.length - 1];
+
           const finalMarkedPositions = [...effectiveMarked, ...finalAutoMarks];
-          
+
           // Verify the pattern is now complete
           const isComplete = patternPositions.every(pos => finalMarkedPositions.includes(pos));
           
@@ -1710,14 +1727,21 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
               isWinner: true,
               patternType: pattern.type,
               winningPositions: patternPositions,
-              autoMarkedPositions: finalAutoMarks
+              autoMarkedPositions: finalAutoMarks,
+               winningPositionIndex: winningPositionIndex
             };
           }
         }
       }
     }
 
-    return { isWinner: false, patternType: null, winningPositions: [], autoMarkedPositions: [] };
+     return { 
+    isWinner: false, 
+    patternType: null, 
+    winningPositions: [], 
+    autoMarkedPositions: [],
+    winningPositionIndex: null 
+  };
   }
 
   // ==================== CARD MANAGEMENT ====================

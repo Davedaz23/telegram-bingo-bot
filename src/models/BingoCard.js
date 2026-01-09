@@ -51,6 +51,10 @@ const bingoCardSchema = new mongoose.Schema({
     enum: ['BINGO', 'ROW', 'COLUMN', 'DIAGONAL', 'FOUR_CORNERS', 'FULL_CARD'],
     default: null
   },
+  winningPositionIndex: {
+    type: Number,
+    default: null
+  },
   
   winningPatternPositions: {
     type: [Number],
