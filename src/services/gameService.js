@@ -125,12 +125,21 @@ class GameService {
 
   // ==================== CORE GAME LIFECYCLE ====================
 
- static async getMainGame() {
+static async getMainGame() {
   const lockKey = 'get_main_game';
+  const MAX_RETRIES = 3;
   
   if (this.processingGames.has(lockKey)) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-    return this.getMainGame(); // Recursive retry
+    // Use iterative retry instead of recursive to avoid stack overflow
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+      if (!this.processingGames.has(lockKey)) {
+        break;
+      }
+    }
+    if (this.processingGames.has(lockKey)) {
+      throw new Error('getMainGame is stuck in processing');
+    }
   }
 
   try {
@@ -138,29 +147,20 @@ class GameService {
     
     console.log('🎮 getMainGame() - Starting...');
     
-    // CRITICAL FIX 1: FIRST, enforce single game with atomic operation
+    // CRITICAL: Use only ONE of these, not both
+    // Choose enforceSingleGameAtomic() since it uses transactions
     await this.enforceSingleGameAtomic();
+    // Remove the duplicate call: await this.ensureSingleActiveGame();
     
-    // CRITICAL FIX 2: Get game with proper state ordering
+    // FIXED: Proper MongoDB sort query
     let game = await Game.findOne({
       status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
       archived: { $ne: true }
     })
     .sort({ 
-      // Priority: ACTIVE > CARD_SELECTION > WAITING_FOR_PLAYERS, then newest
-      statusOrder: {
-        $cond: [
-          { $eq: ['$status', 'ACTIVE'] }, 1,
-          { $cond: [
-            { $eq: ['$status', 'CARD_SELECTION'] }, 2,
-            { $cond: [
-              { $eq: ['$status', 'WAITING_FOR_PLAYERS'] }, 3,
-              4
-            ]}
-          ]}
-        ]
-      },
-      createdAt: -1 
+      // Proper sort using MongoDB's native sorting
+      status: 1, // This sorts alphabetically: 'ACTIVE' < 'CARD_SELECTION' < 'WAITING_FOR_PLAYERS'
+      createdAt: -1 // Newest first for same status
     });
 
     if (game) {
@@ -205,16 +205,32 @@ class GameService {
     
     // Emergency fallback - try to get any game
     try {
-      const emergencyGame = await Game.findOne({ archived: { $ne: true } }).sort({ createdAt: -1 });
+      const emergencyGame = await Game.findOne({ 
+        archived: { $ne: true } 
+      }).sort({ createdAt: -1 });
+      
       if (emergencyGame) {
+        console.log(`🚨 Fallback: Using emergency game ${emergencyGame.code}`);
         return this.formatGameForFrontend(emergencyGame);
       }
       
       // Last resort - create game
+      console.log('🚨 Last resort: Creating emergency game');
       return await this.createNewGame();
     } catch (fallbackError) {
       console.error('❌ Fallback game creation failed:', fallbackError);
-      throw error;
+      // Return minimal game object to prevent frontend crash
+      return {
+        _id: 'emergency',
+        code: 'EMERGENCY',
+        status: 'WAITING_FOR_PLAYERS',
+        message: 'Game system recovering...',
+        currentPlayers: 0,
+        playersWithCards: 0,
+        cardsNeeded: this.MIN_PLAYERS_TO_START,
+        canSelectCard: false,
+        canJoin: false
+      };
     }
   } finally {
     this.processingGames.delete(lockKey);
@@ -697,58 +713,103 @@ static async createNewGame() {
 
   // ==================== CARD SELECTION TIMEOUT HANDLER ====================
 
-  static async checkCardSelectionEnd(gameId) {
-    try {
-      console.log(`⏰ Checking card selection end for game ${gameId}`);
+static async checkCardSelectionEnd(gameId) {
+  const lockKey = `check_card_selection_${gameId}`;
+  
+  if (this.processingGames.has(lockKey)) {
+    console.log(`⏳ Already checking card selection for ${gameId}, skipping...`);
+    return;
+  }
+
+  try {
+    this.processingGames.add(lockKey);
+    
+    console.log(`⏰ [CRITICAL] Checking card selection end for game ${gameId}`);
+    
+    const game = await Game.findById(gameId);
+    
+    if (!game) {
+      console.log(`❌ Game ${gameId} not found`);
+      return;
+    }
+    
+    if (game.status !== 'CARD_SELECTION') {
+      console.log(`⚠️ Game ${gameId} not in CARD_SELECTION state (status: ${game.status})`);
+      return;
+    }
+    
+    const now = new Date();
+    
+    // Check if card selection time has expired
+    if (game.cardSelectionEndTime && game.cardSelectionEndTime > now) {
+      const timeRemaining = Math.max(0, game.cardSelectionEndTime - now);
+      console.log(`⏳ Card selection not yet ended for ${game.code}, ends in ${Math.floor(timeRemaining/1000)} seconds`);
+      return;
+    }
+    
+    console.log(`⏰ [CRITICAL] Card selection time EXPIRED for ${game.code} at ${game.cardSelectionEndTime}`);
+    console.log(`⏰ Current time: ${now}`);
+    
+    const playersWithCards = await BingoCard.countDocuments({ gameId });
+    console.log(`👥 Players with cards: ${playersWithCards}, Minimum required: ${this.MIN_PLAYERS_TO_START}`);
+    
+    if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
+      console.log(`✅ [CRITICAL] Starting game ${game.code} with ${playersWithCards} players`);
       
-      const game = await Game.findById(gameId);
+      // CRITICAL: Broadcast that card selection ended BEFORE starting game
+      this.broadcastToGame(gameId, {
+        type: 'CARD_SELECTION_ENDED',
+        gameId: game._id,
+        status: 'PROCEEDING_TO_GAME',
+        playerCount: playersWithCards,
+        timestamp: new Date().toISOString()
+      });
       
-      if (!game || game.status !== 'CARD_SELECTION') {
-        console.log(`⚠️ Game ${gameId} not in CARD_SELECTION state (status: ${game?.status})`);
-        return;
-      }
+      // CRITICAL: Add a small delay to ensure message is delivered
+      setTimeout(async () => {
+        try {
+          // CRITICAL: Check game status again before starting
+          const refreshedGame = await Game.findById(gameId);
+          if (refreshedGame && refreshedGame.status === 'CARD_SELECTION') {
+            console.log(`🚀 [CRITICAL] Proceeding to startGame for ${refreshedGame.code}`);
+            await this.startGame(gameId);
+          } else {
+            console.log(`⚠️ Game ${gameId} no longer in CARD_SELECTION: ${refreshedGame?.status}`);
+          }
+        } catch (error) {
+          console.error('❌ Error in delayed game start:', error);
+        }
+      }, 1000);
       
-      const now = new Date();
+    } else {
+      console.log(`❌ [CRITICAL] Not enough players (${playersWithCards}/${this.MIN_PLAYERS_TO_START})`);
       
-      // Check if card selection time has expired
-      if (game.cardSelectionEndTime && game.cardSelectionEndTime > now) {
-        const timeRemaining = Math.max(0, game.cardSelectionEndTime - now);
-        console.log(`⏳ Card selection not yet ended for ${game.code}, ends in ${Math.floor(timeRemaining/1000)} seconds`);
-        return;
-      }
+      // CRITICAL: Use transaction for state rollback
+      const session = await mongoose.startSession();
+      session.startTransaction();
       
-      console.log(`⏰ Card selection time HAS EXPIRED for ${game.code}`);
-      
-      const playersWithCards = await BingoCard.countDocuments({ gameId });
-      console.log(`👥 Players with cards: ${playersWithCards}, Minimum required: ${this.MIN_PLAYERS_TO_START}`);
-      
-      if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
-        console.log(`✅ Starting game ${game.code} with ${playersWithCards} players`);
+      try {
+        const gameInSession = await Game.findById(gameId).session(session);
         
-        // Broadcast that card selection ended successfully
-        this.broadcastToGame(gameId, {
-          type: 'CARD_SELECTION_ENDED',
-          gameId: game._id,
-          status: 'PROCEEDING_TO_GAME',
-          playerCount: playersWithCards,
-          timestamp: new Date().toISOString()
-        });
-        
-        // Start the game
-        await this.startGame(gameId);
-      } else {
-        console.log(`❌ Not enough players (${playersWithCards}/${this.MIN_PLAYERS_TO_START})`);
+        // Double-check status
+        if (gameInSession.status !== 'CARD_SELECTION') {
+          console.log(`⚠️ Game already changed state: ${gameInSession.status}`);
+          await session.abortTransaction();
+          return;
+        }
         
         // Go back to waiting state
-        game.status = 'WAITING_FOR_PLAYERS';
-        game.cardSelectionStartTime = null;
-        game.cardSelectionEndTime = null;
-        game.autoStartEndTime = new Date(Date.now() + this.AUTO_START_DELAY);
-        await game.save();
+        gameInSession.status = 'WAITING_FOR_PLAYERS';
+        gameInSession.cardSelectionStartTime = null;
+        gameInSession.cardSelectionEndTime = null;
+        gameInSession.autoStartEndTime = new Date(Date.now() + this.AUTO_START_DELAY);
+        await gameInSession.save({ session });
         
-        console.log(`⏳ Game ${game.code} back to waiting state`);
+        await session.commitTransaction();
         
-        // Broadcast card selection failed
+        console.log(`⏳ Game ${game.code} back to WAITING_FOR_PLAYERS state`);
+        
+        // CRITICAL: Broadcast card selection failed
         this.broadcastToGame(gameId, {
           type: 'CARD_SELECTION_FAILED',
           gameId: game._id,
@@ -758,20 +819,54 @@ static async createNewGame() {
           timestamp: new Date().toISOString()
         });
         
-        // Broadcast game status update
-        this.broadcastGameStatus(gameId, game);
+        // CRITICAL: Broadcast game status update
+        this.broadcastGameStatus(gameId, {
+          ...gameInSession.toObject(),
+          status: 'WAITING_FOR_PLAYERS'
+        });
         
-        // Schedule auto-start check again
+        // CRITICAL: Schedule auto-start check again
         setTimeout(() => {
           this.scheduleAutoStartCheck(gameId);
         }, 5000);
+        
+      } catch (error) {
+        await session.abortTransaction();
+        console.error('❌ Transaction error in checkCardSelectionEnd:', error);
+        
+        // Fallback: Force update game status
+        try {
+          await Game.findByIdAndUpdate(gameId, {
+            status: 'WAITING_FOR_PLAYERS',
+            cardSelectionStartTime: null,
+            cardSelectionEndTime: null,
+            autoStartEndTime: new Date(Date.now() + this.AUTO_START_DELAY)
+          });
+        } catch (fallbackError) {
+          console.error('❌ Fallback update failed:', fallbackError);
+        }
+      } finally {
+        session.endSession();
       }
-    } catch (error) {
-      console.error('❌ Error checking card selection end:', error);
     }
+  } catch (error) {
+    console.error('❌ [CRITICAL] Error checking card selection end:', error);
+  } finally {
+    this.processingGames.delete(lockKey);
+  }
+}
+
+ static async startGame(gameId) {
+  const lockKey = `start_game_${gameId}`;
+  
+  if (this.processingGames.has(lockKey)) {
+    console.log(`⏳ Game ${gameId} already being started`);
+    return;
   }
 
-  static async startGame(gameId) {
+  try {
+    this.processingGames.add(lockKey);
+    
     const session = await mongoose.startSession();
     session.startTransaction();
     
@@ -782,17 +877,21 @@ static async createNewGame() {
         throw new Error('Game not found');
       }
       
-      console.log(`📊 Game ${game.code} status: ${game.status}`);
+      console.log(`📊 [START GAME] Game ${game.code} status: ${game.status}`);
       
+      // CRITICAL: Only allow transition from CARD_SELECTION or WAITING_FOR_PLAYERS
       if (game.status !== 'CARD_SELECTION' && game.status !== 'WAITING_FOR_PLAYERS') {
+        console.log(`❌ Game ${game.code} not in correct state to start: ${game.status}`);
         throw new Error(`Game ${game.code} not in correct state to start: ${game.status}`);
       }
       
       const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
       
+      // CRITICAL: Validate minimum players
       if (playersWithCards < this.MIN_PLAYERS_TO_START) {
         console.log(`❌ Not enough players to start: ${playersWithCards}/${this.MIN_PLAYERS_TO_START}`);
         
+        // Roll back to waiting
         game.status = 'WAITING_FOR_PLAYERS';
         game.cardSelectionStartTime = null;
         game.cardSelectionEndTime = null;
@@ -810,12 +909,21 @@ static async createNewGame() {
         return;
       }
       
-      const feeResult = await this.processEntryFees(gameId);
+      // CRITICAL: Check if entry fees already processed
+      const existingReconciliation = await Reconciliation.findOne({ 
+        gameId, 
+        status: 'DEDUCTED' 
+      }).session(session);
       
-      if (feeResult.alreadyProcessed) {
-        console.log(`⚠️ Entry fees already processed for ${game.code}`);
-        await session.abortTransaction();
-        return;
+      if (existingReconciliation) {
+        console.log(`⚠️ Entry fees already processed for ${game.code}, skipping fee processing`);
+      } else {
+        // Process entry fees
+        const feeResult = await this.processEntryFees(gameId);
+        
+        if (feeResult.alreadyProcessed) {
+          console.log(`⚠️ Entry fees already processed (checked again) for ${game.code}`);
+        }
       }
       
       const now = new Date();
@@ -829,7 +937,7 @@ static async createNewGame() {
       await game.save({ session });
       await session.commitTransaction();
       
-      console.log(`🎮 Game ${game.code} started with ${game.currentPlayers} player(s)`);
+      console.log(`🎮 [CRITICAL SUCCESS] Game ${game.code} STARTED with ${game.currentPlayers} player(s)`);
       
       // Clear any previous bingo claims for this game
       this.clearBingoClaimsForGame(gameId);
@@ -843,6 +951,9 @@ static async createNewGame() {
         playerCount: game.currentPlayers,
         timestamp: new Date().toISOString()
       });
+      
+      // CRITICAL: Also broadcast status update
+      this.broadcastGameStatus(gameId, game);
       
       console.log(`⏱️ Game ${game.code} will start calling numbers in 5 seconds...`);
       setTimeout(() => {
@@ -858,8 +969,148 @@ static async createNewGame() {
     } finally {
       session.endSession();
     }
+  } finally {
+    this.processingGames.delete(lockKey);
+  }
+}
+// ==================== DUPLICATE GAME PREVENTION ====================
+
+static async ensureSingleActiveGame() {
+  const lockKey = 'ensure_single_active_game';
+  
+  if (this.processingGames.has(lockKey)) {
+    console.log('⏳ Already ensuring single active game');
+    return;
   }
 
+  try {
+    this.processingGames.add(lockKey);
+    
+    const session = await mongoose.startSession();
+    
+    try {
+      session.startTransaction();
+      
+      // Find all non-archived games WITH LOCK
+      const allGames = await Game.find({
+        archived: { $ne: true }
+      })
+      .session(session)
+      .sort({ 
+        status: 1, // ACTIVE first, then CARD_SELECTION, then WAITING_FOR_PLAYERS
+        createdAt: -1 
+      });
+
+      if (allGames.length <= 1) {
+        await session.abortTransaction();
+        console.log('✅ Only 0-1 games exist, no cleanup needed');
+        return;
+      }
+
+      console.log(`⚠️ Found ${allGames.length} total games`);
+      
+      // Group by status
+      const activeGames = allGames.filter(g => 
+        ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'].includes(g.status)
+      );
+      
+      const finishedGames = allGames.filter(g => 
+        ['FINISHED', 'NO_WINNER', 'CANCELLED'].includes(g.status)
+      );
+      
+      console.log(`📊 Active: ${activeGames.length}, Finished: ${finishedGames.length}`);
+      
+      // If multiple active games, keep only the newest one
+      if (activeGames.length > 1) {
+        console.log(`⚠️ CRITICAL: ${activeGames.length} active games found!`);
+        
+        const gameToKeep = activeGames[0]; // Already sorted by priority
+        console.log(`✅ Keeping: ${gameToKeep.code} (${gameToKeep.status})`);
+        
+        // Archive the rest
+        for (let i = 1; i < activeGames.length; i++) {
+          const gameToArchive = activeGames[i];
+          console.log(`🗑️ Archiving: ${gameToArchive.code} (${gameToArchive.status})`);
+          
+          gameToArchive.archived = true;
+          gameToArchive.archivedAt = new Date();
+          gameToArchive.archivedReason = `Multiple active games. Keeping ${gameToKeep.code}`;
+          await gameToArchive.save({ session });
+          
+          // Clean up intervals
+          this.stopAutoNumberCalling(gameToArchive._id);
+          this.clearAutoStartTimer(gameToArchive._id);
+        }
+      }
+      
+      // Archive old finished games (keep only the 5 most recent)
+      if (finishedGames.length > 5) {
+        const gamesToArchive = finishedGames.slice(5);
+        console.log(`🗑️ Archiving ${gamesToArchive.length} old finished games`);
+        
+        for (const game of gamesToArchive) {
+          game.archived = true;
+          game.archivedAt = new Date();
+          game.archivedReason = 'Archiving old finished game';
+          await game.save({ session });
+        }
+      }
+      
+      await session.commitTransaction();
+      console.log('✅ Single active game ensured');
+      
+    } catch (error) {
+      if (session.inTransaction()) {
+        await session.abortTransaction();
+      }
+      console.error('❌ Error ensuring single active game:', error);
+      throw error;
+    } finally {
+      session.endSession();
+    }
+    
+  } catch (error) {
+    console.error('❌ Outer error in ensureSingleActiveGame:', error);
+  } finally {
+    this.processingGames.delete(lockKey);
+  }
+}
+
+
+static async cleanupStuckGames() {
+  try {
+    const now = new Date();
+    const threshold = new Date(now.getTime() - 5 * 60 * 1000); // 5 minutes ago
+    
+    // Find games stuck in CARD_SELECTION for too long
+    const stuckCardSelection = await Game.find({
+      status: 'CARD_SELECTION',
+      cardSelectionEndTime: { $lt: threshold },
+      archived: { $ne: true }
+    });
+    
+    for (const game of stuckCardSelection) {
+      console.log(`🧹 Cleaning up stuck CARD_SELECTION game: ${game.code}`);
+      await this.checkCardSelectionEnd(game._id);
+    }
+    
+    // Find games stuck in WAITING_FOR_PLAYERS for too long without auto-start
+    const stuckWaiting = await Game.find({
+      status: 'WAITING_FOR_PLAYERS',
+      autoStartEndTime: { $lt: threshold },
+      archived: { $ne: true },
+      currentPlayers: { $gte: this.MIN_PLAYERS_TO_START }
+    });
+    
+    for (const game of stuckWaiting) {
+      console.log(`🧹 Triggering auto-start for stuck WAITING game: ${game.code}`);
+      await this.beginCardSelection(game._id);
+    }
+    
+  } catch (error) {
+    console.error('❌ Error in cleanupStuckGames:', error);
+  }
+}
   // ==================== AUTO-CALLING SYSTEM ====================
 
   static async startAutoNumberCalling(gameId) {
@@ -2558,30 +2809,41 @@ static async createNewGame() {
   // ==================== SERVICE MANAGEMENT ====================
 
   static startAutoGameService() {
-    this.cleanupAllIntervals();
-    
-    // Check for existing game every 10 seconds
-    const interval = setInterval(async () => {
-      try {
-        await this.ensureActiveGameExists();
-      } catch (error) {
-        console.error('❌ Game service error:', error);
-      }
-    }, 10000);
+  this.cleanupAllIntervals();
+  
+  // Check for existing game every 10 seconds
+  const gameCheckInterval = setInterval(async () => {
+    try {
+      await this.ensureActiveGameExists();
+    } catch (error) {
+      console.error('❌ Game service error:', error);
+    }
+  }, 10000);
+  
+  // Clean up stuck games every 30 seconds
+  const cleanupInterval = setInterval(async () => {
+    try {
+      await this.cleanupStuckGames();
+      await this.manageGameLifecycle();
+    } catch (error) {
+      console.error('❌ Cleanup service error:', error);
+    }
+  }, 30000);
 
-    console.log('🚀 Game Service Started');
-    
-    // Initial game creation
-    setTimeout(async () => {
-      try {
-        await this.ensureActiveGameExists();
-      } catch (error) {
-        console.error('❌ Initial game setup failed:', error);
-      }
-    }, 2000);
+  console.log('🚀 Game Service Started');
+  
+  // Initial setup
+  setTimeout(async () => {
+    try {
+      await this.ensureActiveGameExists();
+      await this.cleanupStuckGames();
+    } catch (error) {
+      console.error('❌ Initial game setup failed:', error);
+    }
+  }, 2000);
 
-    return interval;
-  }
+  return { gameCheckInterval, cleanupInterval };
+}
 
   static async ensureActiveGameExists() {
   const lockKey = 'ensure_active_game';
