@@ -570,38 +570,38 @@ broadcastWinnerDeclared(gameId, winnerData) {
 }
 
 //   // NEW: Broadcast to all users in a game
-//  broadcastToGame(gameId, message, excludeWs = null) {
-//   const room = this.gameRooms.get(gameId);
-//   if (!room) {
-//     console.log(`⚠️ No room found for game ${gameId}`);
-//     return;
-//   }
+ broadcastToGame(gameId, message, excludeWs = null) {
+  const room = this.gameRooms.get(gameId);
+  if (!room) {
+    console.log(`⚠️ No room found for game ${gameId}`);
+    return;
+  }
   
-//   const messageStr = JSON.stringify(message);
-//   let sentCount = 0;
+  const messageStr = JSON.stringify(message);
+  let sentCount = 0;
   
-//   room.forEach(client => {
-//     if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
-//       client.send(messageStr);
-//       sentCount++;
+  room.forEach(client => {
+    if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
+      client.send(messageStr);
+      sentCount++;
       
-//       // Track messages sent
-//       if (!client.messagesSent) client.messagesSent = 0;
-//       client.messagesSent++;
+      // Track messages sent
+      if (!client.messagesSent) client.messagesSent = 0;
+      client.messagesSent++;
       
-//       // Update client state
-//       if (message.sequence) {
-//         const clientKey = `${gameId}_${client.userId || 'anonymous'}`;
-//         this.clientStates.set(clientKey, {
-//           lastSequence: message.sequence,
-//           lastSync: Date.now()
-//         });
-//       }
-//     }
-//   });
+      // Update client state
+      if (message.sequence) {
+        const clientKey = `${gameId}_${client.userId || 'anonymous'}`;
+        this.clientStates.set(clientKey, {
+          lastSequence: message.sequence,
+          lastSync: Date.now()
+        });
+      }
+    }
+  });
   
-//   console.log(`📤 Broadcast to game ${gameId}: ${message.type} sent to ${sentCount} clients`);
-// }
+  console.log(`📤 Broadcast to game ${gameId}: ${message.type} sent to ${sentCount} clients`);
+}
 // Broadcast taken cards update
 broadcastTakenCards(gameId, takenCards) {
   console.log(`📤 Broadcasting taken cards for game ${gameId}: ${takenCards.length} cards`);
