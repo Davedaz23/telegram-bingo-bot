@@ -46,6 +46,15 @@ const bingoCardSchema = new mongoose.Schema({
   },
   disqualificationReason: {
     type: String
+  },  winningPatternType: {
+    type: String,
+    enum: ['BINGO', 'ROW', 'COLUMN', 'DIAGONAL', 'FOUR_CORNERS', 'FULL_CARD'],
+    default: null
+  },
+  
+  winningPatternPositions: {
+    type: [Number],
+    default: []
   },
   // Track which numbers were already called when they joined
   numbersCalledAtJoin: {

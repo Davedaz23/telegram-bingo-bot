@@ -492,7 +492,6 @@ broadcastGameStatusUpdate(gameId, gameData) {
 }
 
 // Broadcast winner info to all players in game
-// Broadcast winner info to all players in game
 broadcastWinnerInfo(gameId, winnerInfo) {
   console.log(`🏆 WebSocket: Broadcasting winner info for game ${gameId} to ALL players`);
   

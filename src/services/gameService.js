@@ -3477,7 +3477,7 @@ static async getWinnerInfo(gameId) {
           cardNumber: bingoCard.cardNumber || bingoCard.cardIndex || 0,
           numbers: bingoCard.numbers || [],
           markedPositions: bingoCard.markedNumbers || bingoCard.markedPositions || [],
-          winningPatternPositions: bingoCard.winningPatternPositions || [],
+          winningPatternPositions: bingoCard.winningPatternPositions || [], 
           winningPatternType: bingoCard.winningPatternType || null
         };
         
