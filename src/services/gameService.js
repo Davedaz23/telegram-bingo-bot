@@ -1261,7 +1261,6 @@ static broadcastWinnerInfo(gameId, winnerInfo) {
 }
 
   // ==================== WINNER DECLARATION ====================
-
 static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions, winningPositionIndex = null) {
   const session = await mongoose.startSession();
   let transactionInProgress = false;
@@ -1270,7 +1269,7 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
     session.startTransaction();
     transactionInProgress = true;
     
-    console.log(`🎉 Declaring winner for game ${gameId}: ${winningUserId}`);
+    console.log(`🎉 [IMMEDIATE] Declaring winner for game ${gameId}: ${winningUserId}`);
     
     const game = await Game.findById(gameId).session(session);
     const card = await BingoCard.findById(winningCard._id).session(session);
@@ -1296,7 +1295,7 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
     card.isWinner = true;
     card.winningPatternPositions = winningPositions || winningCard.winningPatternPositions || [];
     card.winningPatternType = winningCard.winningPatternType || 'BINGO';
-      card.winningPositionIndex = winningPositionIndex || winningCard.winningPositionIndex || null; 
+    card.winningPositionIndex = winningPositionIndex || winningCard.winningPositionIndex || null;
 
     await card.save({ session });
     
@@ -1329,64 +1328,73 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
       `Winner prize for game ${game.code} (${totalUniquePlayers} players)`
     );
     
+    // 🚨 CRITICAL: Mark winner declared BEFORE broadcasting
     this.winnerDeclared.add(gameId.toString());
     
     await session.commitTransaction();
     transactionInProgress = false;
     
-    console.log(`🎊 Game ${game.code} ENDED - Winner: ${winningUserId} won $${winnerPrize}`);
+    console.log(`🎊 [IMMEDIATE] Game ${game.code} ENDED - Winner: ${winningUserId} won $${winnerPrize}`);
+    
+    // 🚨 CRITICAL: STOP number calling immediately
+    this.stopAutoNumberCalling(gameId);
     
     // Get winner info for broadcasting
     const winnerInfo = await this.getWinnerInfo(gameId);
     
-    // Broadcast winner declared with WebSocket - SEND WINNING POSITIONS TO ALL
+    // 🚨 CRITICAL: IMMEDIATE BROADCAST to ALL players
+    const winnerData = {
+      winnerId: winningUserId,
+      winnerPrize: winnerPrize,
+      totalPlayers: totalUniquePlayers,
+      patternType: winningCard.winningPatternType || 'BINGO',
+      endedAt: now.toISOString(),
+      winningPositions: winningPositions || winningCard.winningPatternPositions || [],
+      winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null,
+      winningCard: winnerInfo?.winningCard,
+      immediateDeclaration: true,
+      timestamp: Date.now()
+    };
+    
+    // Broadcast via WebSocket IMMEDIATELY
     if (this.webSocketService) {
-      this.webSocketService.broadcastWinnerDeclared(gameId, {
-        winnerId: winningUserId,
-        winnerPrize: winnerPrize,
-        totalPlayers: totalUniquePlayers,
-        patternType: winningCard.winningPatternType || 'BINGO',
-        endedAt: now.toISOString(),
-        winningPositions: winningPositions || winningCard.winningPatternPositions || [], // SEND TO ALL
-        winningCard: winnerInfo?.winningCard // SEND WINNING CARD INFO TO ALL
-      });
+      this.webSocketService.broadcastWinnerDeclared(gameId, winnerData);
       
-      // Also send detailed winner info with winning positions
+      // Also send detailed winner info
       if (winnerInfo) {
         setTimeout(() => {
           this.webSocketService.broadcastWinnerInfo(gameId, {
             ...winnerInfo,
-            // Ensure winning positions are included
             winningCard: winnerInfo.winningCard ? {
               ...winnerInfo.winningCard,
-              winningPatternPositions: winningPositions || winningCard.winningPatternPositions || []
+              winningPatternPositions: winningPositions || winningCard.winningPatternPositions || [],
+              winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null
             } : null
           });
-        }, 1000);
+        }, 500);
       }
     }
     
     // Also send traditional broadcast
-this.broadcastToGame(gameId, {
-  type: 'WINNER_DECLARED',
-  gameId: game._id,
-  gameCode: game.code,
-  winnerId: winningUserId,
-  winnerPrize: winnerPrize,
-  totalPlayers: totalUniquePlayers,
-  patternType: winningCard.winningPatternType || 'BINGO',
-  winningPositions: winningPositions || winningCard.winningPatternPositions || [],
-  winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null, // NEW
-  winningCard: winnerInfo?.winningCard ? {
-    ...winnerInfo.winningCard,
-    winningPatternPositions: winningPositions || winningCard.winningPatternPositions || [],
-    winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null // NEW
-  } : null,
-  endedAt: now.toISOString(),
-  timestamp: new Date().toISOString()
-});
-    
-    this.stopAutoNumberCalling(gameId);
+    this.broadcastToGame(gameId, {
+      type: 'WINNER_DECLARED',
+      gameId: game._id,
+      gameCode: game.code,
+      winnerId: winningUserId,
+      winnerPrize: winnerPrize,
+      totalPlayers: totalUniquePlayers,
+      patternType: winningCard.winningPatternType || 'BINGO',
+      winningPositions: winningPositions || winningCard.winningPatternPositions || [],
+      winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null,
+      winningCard: winnerInfo?.winningCard ? {
+        ...winnerInfo.winningCard,
+        winningPatternPositions: winningPositions || winningCard.winningPatternPositions || [],
+        winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null
+      } : null,
+      endedAt: now.toISOString(),
+      immediateDeclaration: true,
+      timestamp: Date.now()
+    });
     
     await this.setNextGameCountdown(gameId);
     
@@ -1394,7 +1402,9 @@ this.broadcastToGame(gameId, {
       reconciliation,
       winningPositions: winningPositions || winningCard.winningPatternPositions || [],
       winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null,
-      winnerInfo
+      winnerInfo,
+      winnerPrize: winnerPrize,
+      totalUniquePlayers: totalUniquePlayers
     };
     
   } catch (error) {
@@ -1410,111 +1420,115 @@ this.broadcastToGame(gameId, {
 
   // ==================== AUTO-MARKING & WIN VALIDATION ====================
 
-  static async claimBingo(gameId, userId, patternType = 'BINGO') {
-    const session = await mongoose.startSession();
+static async claimBingo(gameId, userId, patternType = 'BINGO') {
+  const session = await mongoose.startSession();
+  
+  try {
+    console.log(`🏆 [CRITICAL] BINGO CLAIM attempt by ${userId} for game ${gameId}`);
     
-    try {
-      console.log(`🏆 BINGO CLAIM attempt by ${userId} for game ${gameId}`);
-      
-      // Check if winner already declared
-      if (this.winnerDeclared.has(gameId.toString())) {
-        throw new Error('Winner already declared for this game');
+    session.startTransaction();
+    
+    // Check if winner already declared
+    if (this.winnerDeclared.has(gameId.toString())) {
+      await session.abortTransaction();
+      throw new Error('Winner already declared for this game');
+    }
+
+    const game = await Game.findById(gameId).session(session);
+    if (!game || game.status !== 'ACTIVE') {
+      await session.abortTransaction();
+      throw new Error('Game not active');
+    }
+
+    // IMMEDIATELY STOP number calling for this game
+    this.stopAutoNumberCalling(gameId);
+    
+    // Find user
+    let user;
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId).session(session);
+    } else {
+      user = await User.findOne({ telegramId: userId }).session(session);
+    }
+
+    if (!user) {
+      await session.abortTransaction();
+      throw new Error('User not found');
+    }
+
+    const mongoUserId = user._id;
+    
+    // Check if user is already disqualified from this game
+    const existingPlayer = await GamePlayer.findOne({
+      gameId,
+      userId: mongoUserId,
+      disqualified: true
+    }).session(session);
+    
+    if (existingPlayer) {
+      await session.abortTransaction();
+      throw new Error('You have been disqualified from this game');
+    }
+
+    // Check previous false claims for this user in this game
+    const claimKey = `${gameId}_${mongoUserId}`;
+    if (this.bingoClaims.has(claimKey)) {
+      const previousClaim = this.bingoClaims.get(claimKey);
+      if (previousClaim.isDisqualified) {
+        await session.abortTransaction();
+        throw new Error('You have been disqualified for a false bingo claim');
       }
+    }
 
-      const game = await Game.findById(gameId).session(session);
-      if (!game || game.status !== 'ACTIVE') {
-        throw new Error('Game not active');
-      }
+    const bingoCard = await BingoCard.findOne({ 
+      gameId, 
+      userId: mongoUserId 
+    }).session(session);
 
-      // Find user
-      let user;
-      if (mongoose.Types.ObjectId.isValid(userId)) {
-        user = await User.findById(userId).session(session);
-      } else {
-        user = await User.findOne({ telegramId: userId }).session(session);
-      }
+    if (!bingoCard) {
+      await session.abortTransaction();
+      throw new Error('No bingo card found');
+    }
 
-      if (!user) {
-        throw new Error('User not found');
-      }
+    // Check if card is already disqualified
+    if (bingoCard.isDisqualified) {
+      await session.abortTransaction();
+      throw new Error('Your card has been disqualified');
+    }
 
-      const mongoUserId = user._id;
+    // Get all called numbers
+    const calledNumbers = game.numbersCalled || [];
+    
+    // Get user's card numbers
+    const cardNumbers = bingoCard.numbers.flat();
+    
+    // Get manually marked positions
+    const manuallyMarkedPositions = bingoCard.markedPositions || [];
+    
+    // Always include FREE space
+    const effectiveMarkedPositions = [...new Set([...manuallyMarkedPositions, 12])];
+    
+    console.log(`📊 User ${userId} has ${manuallyMarkedPositions.length} manually marked positions`);
+    console.log(`🔢 Total called numbers: ${calledNumbers.length}`);
+    
+    // IMMEDIATELY check for winning condition
+    const winResult = this.checkWinningConditionWithAutoMark(
+      cardNumbers, 
+      effectiveMarkedPositions, 
+      calledNumbers
+    );
+    
+    if (!winResult.isWinner) {
+      // Player claimed bingo without valid win - DISQUALIFY PERMANENTLY
+      console.log(`❌ [CRITICAL] INVALID BINGO CLAIM by ${userId} - DISQUALIFYING PERMANENTLY`);
       
-      // Check if user is already disqualified from this game
-      const existingPlayer = await GamePlayer.findOne({
-        gameId,
-        userId: mongoUserId,
-        disqualified: true
-      }).session(session);
-      
-      if (existingPlayer) {
-        throw new Error('You have been disqualified from this game');
-      }
-
-      // Check previous false claims for this user in this game
-      const claimKey = `${gameId}_${mongoUserId}`;
-      if (this.bingoClaims.has(claimKey)) {
-        const previousClaim = this.bingoClaims.get(claimKey);
-        if (previousClaim.isDisqualified) {
-          throw new Error('You have been disqualified for a false bingo claim');
-        }
-      }
-
-      const bingoCard = await BingoCard.findOne({ 
-        gameId, 
-        userId: mongoUserId 
-      }).session(session);
-
-      if (!bingoCard) {
-        throw new Error('No bingo card found');
-      }
-
-      // Check if card is already disqualified
-      if (bingoCard.isDisqualified) {
-        throw new Error('Your card has been disqualified');
-      }
-
-      // Get all called numbers
-      const calledNumbers = game.numbersCalled || [];
-      
-      // Get user's card numbers
-      const cardNumbers = bingoCard.numbers.flat();
-      
-      // Get manually marked positions
-      const manuallyMarkedPositions = bingoCard.markedPositions || [];
-      
-      // Always include FREE space
-      const effectiveMarkedPositions = [...new Set([...manuallyMarkedPositions, 12])];
-      
-      console.log(`📊 User ${userId} has ${manuallyMarkedPositions.length} manually marked positions`);
-      console.log(`🔢 Total called numbers: ${calledNumbers.length}`);
-      
-      // Check for winning condition with auto-marking logic
-      const winResult = this.checkWinningConditionWithAutoMark(
-        cardNumbers, 
-        effectiveMarkedPositions, 
-        calledNumbers
-      );
-      
-      if (!winResult.isWinner) {
-        // Player claimed bingo without valid win - DISQUALIFY PERMANENTLY
-        console.log(`❌ INVALID BINGO CLAIM by ${userId} - DISQUALIFYING PERMANENTLY`);
-        
+      try {
         // Disqualify the player from the game
         await this.disqualifyPlayer(gameId, mongoUserId, session, {
           reason: 'False bingo claim',
           claimedPattern: patternType,
           markedPositions: manuallyMarkedPositions.length,
           calledNumbersAtClaim: calledNumbers.length
-        });
-        
-        // Record the claim as disqualified
-        this.bingoClaims.set(claimKey, {
-          userId: mongoUserId,
-          timestamp: new Date(),
-          isDisqualified: true,
-          isWinner: false,
-          reason: 'False bingo claim'
         });
         
         // Also mark the card as disqualified
@@ -1540,7 +1554,23 @@ this.broadcastToGame(gameId, {
         game.currentPlayers = Math.max(0, game.currentPlayers - 1);
         await game.save({ session });
         
-        // Broadcast disqualification
+        await session.commitTransaction();
+        
+        // Record the claim as disqualified
+        this.bingoClaims.set(claimKey, {
+          userId: mongoUserId,
+          timestamp: new Date(),
+          isDisqualified: true,
+          isWinner: false,
+          reason: 'False bingo claim'
+        });
+        
+        // 🚨 CRITICAL: RESTART number calling immediately for other players
+        setTimeout(() => {
+          this.restartNumberCallingIfNoWinner(gameId);
+        }, 100);
+        
+        // Broadcast disqualification IMMEDIATELY
         this.broadcastToGame(gameId, {
           type: 'PLAYER_DISQUALIFIED',
           userId: mongoUserId,
@@ -1548,90 +1578,153 @@ this.broadcastToGame(gameId, {
           timestamp: new Date().toISOString()
         }, [mongoUserId.toString()]);
         
-        throw new Error('Invalid bingo claim - You have been disqualified from this game');
-      }
-
-      console.log(`✅ VALID BINGO CLAIM by ${userId} with ${winResult.patternType}`);
-      console.log(`🔄 Auto-marked positions: ${winResult.autoMarkedPositions?.length || 0}`);
-      
-      // Update the card with auto-marked positions
-      if (winResult.autoMarkedPositions && winResult.autoMarkedPositions.length > 0) {
-        const newMarkedPositions = [...new Set([
-          ...bingoCard.markedPositions,
-          ...winResult.autoMarkedPositions
-        ])];
-        
-        bingoCard.markedPositions = newMarkedPositions;
-        bingoCard.autoMarkedPositions = winResult.autoMarkedPositions;
-        await bingoCard.save({ session });
-        
-        console.log(`✅ Updated card with auto-marked positions: ${winResult.autoMarkedPositions}`);
-      }
-      
-      // Record valid claim
-      this.bingoClaims.set(claimKey, {
-        userId: mongoUserId,
-        timestamp: new Date(),
-        isDisqualified: false,
-        isWinner: true,
-        patternType: winResult.patternType
-      });
-      
-      // Declare winner
-     const result = await this.declareWinnerWithRetry(
-        gameId, 
-        mongoUserId, 
-        { 
-          ...bingoCard.toObject(), 
-          winningPatternType: winResult.patternType,
-          winningPatternPositions: winResult.winningPositions,
-              winningPositionIndex: winResult.winningPositionIndex 
-
-        }, 
-        winResult.winningPositions,
-        winResult.winningPositionIndex
-      );
-      
-      // Broadcast bingo claim success
-      this.broadcastToGame(gameId, {
-        type: 'BINGO_CLAIMED',
-        userId: mongoUserId,
-        patternType: winResult.patternType,
-        isWinner: true,
-        timestamp: new Date().toISOString()
-      });
-      
+        // Send immediate response to the disqualified user
         return {
-        success: true,
-        message: 'Bingo claim successful! You are the winner!',
-        patternType: winResult.patternType,
-        winningPositions: winResult.winningPositions, 
-         winningPositionIndex: winResult.winningPositionIndex, 
-        autoMarkedPositions: winResult.autoMarkedPositions || [],
-        manuallyMarked: manuallyMarkedPositions.length
-      };
-      
-    } catch (error) {
-      console.error('❌ Bingo claim error:', error);
-      
-      // Broadcast failed bingo claim
-      if (this.webSocketService) {
-        try {
-          this.sendToUser(userId, {
-            type: 'BINGO_CLAIM_FAILED',
-            error: error.message,
-            timestamp: new Date().toISOString()
-          });
-        } catch (wsError) {
-          console.error('❌ Error sending bingo claim failed message:', wsError);
-        }
+          success: false,
+          isDisqualified: true,
+          message: 'Invalid bingo claim - You have been disqualified from this game'
+        };
+        
+      } catch (disqualifyError) {
+        await session.abortTransaction();
+        console.error('❌ Disqualification error:', disqualifyError);
+        
+        // 🚨 CRITICAL: RESTART number calling on error too
+        setTimeout(() => {
+          this.restartNumberCallingIfNoWinner(gameId);
+        }, 100);
+        
+        throw new Error('Failed to process disqualification');
       }
-      
-      throw error;
-    } finally {
-      session.endSession();
     }
+
+    console.log(`✅ [CRITICAL] VALID BINGO CLAIM by ${userId} with ${winResult.patternType}`);
+    
+    // 🚨 CRITICAL: PREVENT any other claims immediately
+    this.winnerDeclared.add(gameId.toString());
+    
+    // Update the card with auto-marked positions
+    if (winResult.autoMarkedPositions && winResult.autoMarkedPositions.length > 0) {
+      const newMarkedPositions = [...new Set([
+        ...bingoCard.markedPositions,
+        ...winResult.autoMarkedPositions
+      ])];
+      
+      bingoCard.markedPositions = newMarkedPositions;
+      bingoCard.autoMarkedPositions = winResult.autoMarkedPositions;
+      await bingoCard.save({ session });
+      
+      console.log(`✅ Updated card with auto-marked positions: ${winResult.autoMarkedPositions}`);
+    }
+    
+    // Record valid claim
+    this.bingoClaims.set(claimKey, {
+      userId: mongoUserId,
+      timestamp: new Date(),
+      isDisqualified: false,
+      isWinner: true,
+      patternType: winResult.patternType
+    });
+    
+    // 🚨 CRITICAL: DECLARE WINNER IMMEDIATELY
+    const result = await this.declareWinnerWithRetry(
+      gameId, 
+      mongoUserId, 
+      { 
+        ...bingoCard.toObject(), 
+        winningPatternType: winResult.patternType,
+        winningPatternPositions: winResult.winningPositions,
+        winningPositionIndex: winResult.winningPositionIndex
+      }, 
+      winResult.winningPositions,
+      winResult.winningPositionIndex
+    );
+    
+    await session.commitTransaction();
+    
+    console.log(`🎊 [CRITICAL] Winner ${userId} declared IMMEDIATELY for game ${game.code}`);
+    
+    // Broadcast bingo claim success IMMEDIATELY
+    this.broadcastToGame(gameId, {
+      type: 'BINGO_CLAIMED',
+      userId: mongoUserId,
+      patternType: winResult.patternType,
+      isWinner: true,
+      timestamp: new Date().toISOString()
+    });
+    
+    // Return immediate success response
+    return {
+      success: true,
+      isWinner: true,
+      message: 'Bingo claim successful! You are the winner!',
+      patternType: winResult.patternType,
+      winningPositions: winResult.winningPositions, 
+      winningPositionIndex: winResult.winningPositionIndex, 
+      autoMarkedPositions: winResult.autoMarkedPositions || [],
+      manuallyMarked: manuallyMarkedPositions.length,
+      prizeAmount: result?.winnerPrize || 0
+    };
+    
+  } catch (error) {
+    console.error('❌ Bingo claim error:', error);
+    
+    // Ensure transaction is aborted
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
+    
+    // 🚨 CRITICAL: Restart number calling on ANY error
+    setTimeout(() => {
+      this.restartNumberCallingIfNoWinner(gameId);
+    }, 100);
+    
+    // Broadcast failed bingo claim
+    if (this.webSocketService) {
+      try {
+        this.sendToUser(userId, {
+          type: 'BINGO_CLAIM_FAILED',
+          error: error.message,
+          timestamp: new Date().toISOString()
+        });
+      } catch (wsError) {
+        console.error('❌ Error sending bingo claim failed message:', wsError);
+      }
+    }
+    
+    // Check if it's a disqualification error
+    const isDisqualificationError = 
+      error.message.includes('disqualified') || 
+      error.message.includes('Disqualified') ||
+      error.message.includes('False bingo claim');
+    
+    throw error;
+  } finally {
+    session.endSession();
   }
+}
+
+// 🚀 NEW METHOD: Restart number calling if no winner declared
+static async restartNumberCallingIfNoWinner(gameId) {
+  const gameIdStr = gameId.toString();
+  
+  // Check if winner has been declared
+  if (this.winnerDeclared.has(gameIdStr)) {
+    console.log(`✅ Winner already declared for ${gameId}, NOT restarting number calling`);
+    return;
+  }
+  
+  // Check game status
+  const game = await Game.findById(gameId);
+  if (!game || game.status !== 'ACTIVE') {
+    console.log(`⚠️ Game ${gameId} not active (${game?.status}), not restarting`);
+    return;
+  }
+  
+  // Restart number calling
+  console.log(`🔄 Restarting number calling for game ${game.code} after failed claim`);
+  this.startAutoNumberCalling(gameId);
+}
 
   static checkWinningConditionWithAutoMark(cardNumbers, markedPositions, calledNumbers) {
     if (!cardNumbers || !markedPositions) {
@@ -1934,7 +2027,63 @@ this.broadcastToGame(gameId, {
       return true; // Default to allowing join on error
     }
   }
+// Add these methods to the GameService class
 
+static async processBingoClaimWithLock(gameId, userId) {
+  const lockKey = `bingo_claim_${gameId}`;
+  
+  if (this.processingGames.has(lockKey)) {
+    console.log(`⏳ Another bingo claim is being processed for game ${gameId}`);
+    
+    // Wait a bit and retry
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Check if winner was declared while we were waiting
+    if (this.winnerDeclared.has(gameId.toString())) {
+      throw new Error('Winner already declared');
+    }
+    
+    throw new Error('Another bingo claim is being processed. Please try again.');
+  }
+  
+  try {
+    this.processingGames.add(lockKey);
+    
+    // Process the claim with a timeout
+    return await Promise.race([
+      this.claimBingo(gameId, userId, 'BINGO'),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Bingo claim timeout')), 3000)
+      )
+    ]);
+  } finally {
+    this.processingGames.delete(lockKey);
+  }
+}
+
+static async handleBingoClaimWithQueue(gameId, userId) {
+  try {
+    console.log(`📋 [QUEUE] Bingo claim from ${userId} for game ${gameId}`);
+    
+    // Check immediately if winner already declared
+    if (this.winnerDeclared.has(gameId.toString())) {
+      throw new Error('Winner already declared for this game');
+    }
+    
+    // Check game status immediately
+    const game = await Game.findById(gameId);
+    if (!game || game.status !== 'ACTIVE') {
+      throw new Error('Game not active');
+    }
+    
+    // Process with lock to prevent concurrent claims
+    return await this.processBingoClaimWithLock(gameId, userId);
+    
+  } catch (error) {
+    console.error('❌ Bingo claim queue error:', error);
+    throw error;
+  }
+}
   static async disqualifyPlayer(gameId, userId, session, details = {}) {
     try {
       console.log(`⛔ Disqualifying player ${userId} from game ${gameId}`);

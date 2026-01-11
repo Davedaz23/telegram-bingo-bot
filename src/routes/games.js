@@ -683,6 +683,44 @@ router.get('/waiting', async (req, res) => {
   }
 });
 
+
+// In your game routes file
+router.post('/:gameId/claim-bingo-immediate', async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    const { userId, patternType = 'BINGO' } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'User ID is required' 
+      });
+    }
+    
+    // Use the immediate claim handler
+    const result = await GameService.handleBingoClaimWithQueue(gameId, userId, patternType);
+    
+    res.json({
+      success: true,
+      ...result
+    });
+    
+  } catch (error) {
+    console.error('❌ Immediate bingo claim error:', error);
+    
+    // Check if it's a disqualification error
+    const isDisqualified = error.message.includes('disqualified') || 
+                          error.message.includes('Disqualified') ||
+                          error.message.includes('false bingo claim');
+    
+    res.status(400).json({
+      success: false,
+      error: error.message,
+      isDisqualified: isDisqualified,
+      message: error.message
+    });
+  }
+});
 // Get game by ID
 router.get('/:id', async (req, res) => {
   try {
