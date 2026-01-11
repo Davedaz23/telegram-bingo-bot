@@ -708,12 +708,44 @@ router.post('/:gameId/claim-bingo-immediate', async (req, res) => {
       });
     }
     
-    // Check if game is active
+    // Check if game is active - but also check if it SHOULD be finished
     if (game.status !== 'ACTIVE') {
       console.log(`⚠️ Game ${game.code} is not active (status: ${game.status})`);
+      
+      // Check if there's actually a winner
+      const winningCard = await BingoCard.findOne({ 
+        gameId, 
+        isWinner: true 
+      });
+      
+      if (winningCard) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Winner already declared for this game',
+          winnerInfo: await GameService.getWinnerInfo(gameId)
+        });
+      }
+      
       return res.status(400).json({ 
         success: false, 
         error: `Game is not active (status: ${game.status})` 
+      });
+    }
+    
+    // 🚨 CRITICAL: Check for ANY winning card in the database
+    const existingWinner = await BingoCard.findOne({ 
+      gameId, 
+      isWinner: true 
+    });
+    
+    if (existingWinner) {
+      console.log(`⚠️ Database shows winner: ${existingWinner.userId} for game ${game.code}`);
+      const winnerInfo = await GameService.getWinnerInfo(gameId);
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Winner already declared for this game',
+        winnerInfo: winnerInfo,
+        isAlreadyWinner: true
       });
     }
     
@@ -722,16 +754,23 @@ router.post('/:gameId/claim-bingo-immediate', async (req, res) => {
       console.log(`⚠️ Game ${game.code} already has winner: ${game.winnerId}`);
       return res.status(400).json({ 
         success: false, 
-        error: 'Winner already declared for this game' 
+        error: 'Winner already declared for this game',
+        winnerInfo: await GameService.getWinnerInfo(gameId)
       });
     }
     
     // 🚨 CRITICAL: Check in-memory winner declaration
     if (GameService.winnerDeclared.has(gameId)) {
       console.log(`⚠️ In-memory winner already declared for game ${game.code}`);
+      
+      // Double-check database
+      const dbWinner = await BingoCard.findOne({ gameId, isWinner: true });
+      const winnerInfo = dbWinner ? await GameService.getWinnerInfo(gameId) : null;
+      
       return res.status(400).json({ 
         success: false, 
-        error: 'Winner already declared for this game' 
+        error: 'Winner already declared for this game',
+        winnerInfo: winnerInfo
       });
     }
     
@@ -760,7 +799,7 @@ router.post('/:gameId/claim-bingo-immediate', async (req, res) => {
     if (isAlreadyWinner) {
       try {
         const game = await Game.findById(req.params.gameId);
-        if (game && game.winnerId) {
+        if (game) {
           const winnerInfo = await GameService.getWinnerInfo(game._id);
           return res.status(400).json({
             success: false,

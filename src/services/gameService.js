@@ -1125,7 +1125,7 @@ static async cleanupStuckGames() {
       return;
     }
 
-    this.winnerDeclared.delete(gameId.toString());
+    // this.winnerDeclared.delete(gameId.toString());
 
     console.log(`🔢 Starting auto-number calling for ${game.code}`);
 
