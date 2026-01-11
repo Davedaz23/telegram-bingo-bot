@@ -690,6 +690,8 @@ router.post('/:gameId/claim-bingo-immediate', async (req, res) => {
     const { gameId } = req.params;
     const { userId, patternType = 'BINGO' } = req.body;
     
+    console.log(`🏆 IMMEDIATE BINGO CLAIM: gameId=${gameId}, userId=${userId}, pattern=${patternType}`);
+    
     if (!userId) {
       return res.status(400).json({ 
         success: false, 
@@ -697,7 +699,45 @@ router.post('/:gameId/claim-bingo-immediate', async (req, res) => {
       });
     }
     
-    // Use the immediate claim handler
+    // 🚨 CRITICAL: Check game status BEFORE processing claim
+    const game = await Game.findById(gameId);
+    if (!game) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Game not found' 
+      });
+    }
+    
+    // Check if game is active
+    if (game.status !== 'ACTIVE') {
+      console.log(`⚠️ Game ${game.code} is not active (status: ${game.status})`);
+      return res.status(400).json({ 
+        success: false, 
+        error: `Game is not active (status: ${game.status})` 
+      });
+    }
+    
+    // 🚨 CRITICAL: Quick check if winner already exists in database
+    if (game.winnerId) {
+      console.log(`⚠️ Game ${game.code} already has winner: ${game.winnerId}`);
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Winner already declared for this game' 
+      });
+    }
+    
+    // 🚨 CRITICAL: Check in-memory winner declaration
+    if (GameService.winnerDeclared.has(gameId)) {
+      console.log(`⚠️ In-memory winner already declared for game ${game.code}`);
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Winner already declared for this game' 
+      });
+    }
+    
+    console.log(`✅ Pre-checks passed, processing immediate bingo claim...`);
+    
+    // Use the immediate claim handler with queue
     const result = await GameService.handleBingoClaimWithQueue(gameId, userId, patternType);
     
     res.json({
@@ -708,19 +748,43 @@ router.post('/:gameId/claim-bingo-immediate', async (req, res) => {
   } catch (error) {
     console.error('❌ Immediate bingo claim error:', error);
     
-    // Check if it's a disqualification error
+    // Check error type to provide appropriate response
     const isDisqualified = error.message.includes('disqualified') || 
                           error.message.includes('Disqualified') ||
                           error.message.includes('false bingo claim');
+    
+    const isAlreadyWinner = error.message.includes('Winner already declared') ||
+                           error.message.includes('winner already');
+    
+    // If it's a winner already declared error, we need to get the actual winner info
+    if (isAlreadyWinner) {
+      try {
+        const game = await Game.findById(req.params.gameId);
+        if (game && game.winnerId) {
+          const winnerInfo = await GameService.getWinnerInfo(game._id);
+          return res.status(400).json({
+            success: false,
+            error: error.message,
+            isAlreadyWinner: true,
+            winnerInfo: winnerInfo
+          });
+        }
+      } catch (winnerError) {
+        console.error('❌ Error fetching winner info:', winnerError);
+      }
+    }
     
     res.status(400).json({
       success: false,
       error: error.message,
       isDisqualified: isDisqualified,
+      isAlreadyWinner: isAlreadyWinner,
       message: error.message
     });
   }
 });
+
+
 // Get game by ID
 router.get('/:id', async (req, res) => {
   try {
