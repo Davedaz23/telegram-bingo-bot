@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const GameService = require('../services/gameService');
 const Game = require('../models/Game');
+const BingoCard = require('../models/BingoCard');
 
 // ==================== CARD SELECTION ROUTES ====================
 // Add to your routes (games.js)
