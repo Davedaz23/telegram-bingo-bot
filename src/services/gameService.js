@@ -17,13 +17,13 @@ class GameService {
   static selectedCards = new Map();
   static autoStartTimers = new Map();
   static gameCreationLock = new Map();
-  
+
   // Track bingo claims for disqualification
   static bingoClaims = new Map(); // gameId -> { userId, timestamp, isDisqualified }
-  
+
   // WebSocket service reference
   static webSocketService = null;
-  
+
   // Constants
   static MIN_PLAYERS_TO_START = 2;
   static CARD_SELECTION_DURATION = 30000;
@@ -39,105 +39,105 @@ class GameService {
   static async syncWinnerStateWithDatabase() {
     try {
       console.log('🔄 Syncing winner state with database...');
-      
+
       // Clear in-memory winner tracking
       this.winnerDeclared.clear();
-      
+
       // Find games that actually have winners in database
       const gamesWithWinners = await Game.find({
         status: 'FINISHED',
         winnerId: { $exists: true, $ne: null },
         archived: { $ne: true }
       });
-      
+
       for (const game of gamesWithWinners) {
         this.winnerDeclared.add(game._id.toString());
         console.log(`✅ Sync: Game ${game.code} has winner in database`);
       }
-      
+
       // Find active games that should have winners but don't
       const activeGames = await Game.find({
         status: 'ACTIVE',
         archived: { $ne: true }
       });
-      
+
       for (const game of activeGames) {
         // Check if there's actually a winner in database
         const winningCard = await BingoCard.findOne({
           gameId: game._id,
           isWinner: true
         });
-        
+
         if (winningCard) {
           console.warn(`⚠️ Inconsistent state: Game ${game.code} is ACTIVE but has winner card`);
-          
+
           // Fix the game state
           game.status = 'FINISHED';
           game.winnerId = winningCard.userId;
           game.endedAt = game.endedAt || new Date();
           await game.save();
-          
+
           this.winnerDeclared.add(game._id.toString());
           this.stopAutoNumberCalling(game._id);
-          
+
           console.log(`✅ Fixed game ${game.code} state to FINISHED`);
         }
       }
-      
+
       console.log('✅ Winner state sync completed');
-      
+
     } catch (error) {
       console.error('❌ Error syncing winner state:', error);
     }
   }
 
-    // ==================== INITIALIZE WITH SYNC ====================
-  
+  // ==================== INITIALIZE WITH SYNC ====================
+
   static initialize() {
     // Sync winner state on startup
     setTimeout(() => {
       this.syncWinnerStateWithDatabase();
     }, 3000);
-    
+
     // Periodic sync
     setInterval(() => {
       this.syncWinnerStateWithDatabase();
     }, 30000); // Sync every 30 seconds
   }
   // ==================== WEBSOCKET INTEGRATION ====================
-  
-  
+
+
   static setWebSocketService(service) {
     this.webSocketService = service;
     console.log('🔗 WebSocket service injected into GameService');
   }
-  
-  
- static broadcastToGame(gameId, message, excludeUserIds = []) {
+
+
+  static broadcastToGame(gameId, message, excludeUserIds = []) {
     if (!this.webSocketService) {
       console.log('⚠️ WebSocket service not available for broadcasting');
       return;
     }
-    
+
     try {
       this.webSocketService.broadcastToGame(gameId.toString(), {
         ...message,
         timestamp: new Date().toISOString()
       }, excludeUserIds);
-      
+
       console.log(`📤 Broadcast to game ${gameId}: ${message.type}`);
     } catch (error) {
       console.error('❌ Error broadcasting to game:', error);
     }
   }
 
-  
+
   static sendToUser(userId, message) {
     if (!this.webSocketService) {
       console.log('⚠️ WebSocket service not available for user message');
       return false;
     }
-    
+
     try {
       return this.webSocketService.sendToUser(userId, {
         ...message,
@@ -148,10 +148,10 @@ class GameService {
       return false;
     }
   }
-  
+
   static broadcastTakenCardsUpdate(gameId, takenCards) {
     if (!this.webSocketService) return;
-    
+
     try {
       this.webSocketService.broadcastTakenCards(gameId.toString(), takenCards);
       console.log(`📤 Broadcast taken cards update for game ${gameId}: ${takenCards.length} cards`);
@@ -159,10 +159,10 @@ class GameService {
       console.error('❌ Error broadcasting taken cards:', error);
     }
   }
-  
+
   static broadcastGameStatus(gameId, gameData) {
     if (!this.webSocketService) return;
-    
+
     try {
       const statusUpdate = {
         type: 'GAME_STATUS_UPDATE',
@@ -173,14 +173,14 @@ class GameService {
         totalCalled: (gameData.calledNumbers || []).length,
         message: this.getGameStatusMessage(gameData.status)
       };
-      
+
       this.webSocketService.broadcastGameStatus(gameId.toString(), statusUpdate);
       console.log(`📤 Broadcast game status for ${gameId}: ${gameData.status}`);
     } catch (error) {
       console.error('❌ Error broadcasting game status:', error);
     }
   }
-  
+
   static getGameStatusMessage(status) {
     switch (status) {
       case 'WAITING_FOR_PLAYERS':
@@ -199,142 +199,142 @@ class GameService {
   }
 
   // ==================== CORE GAME LIFECYCLE ====================
-static async getMainGame() {
-  const lockKey = 'get_main_game';
-  const MAX_RETRIES = 3;
-  
-  if (this.processingGames.has(lockKey)) {
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
-      if (!this.processingGames.has(lockKey)) {
-        break;
-      }
-    }
+  static async getMainGame() {
+    const lockKey = 'get_main_game';
+    const MAX_RETRIES = 3;
+
     if (this.processingGames.has(lockKey)) {
-      throw new Error('getMainGame is stuck in processing');
-    }
-  }
-
-  try {
-    this.processingGames.add(lockKey);
-    
-    console.log('🎮 getMainGame() - Starting...');
-    
-    // First, sync winner state
-    await this.syncWinnerStateWithDatabase();
-    
-    // CRITICAL: Use only ONE of these, not both
-    await this.enforceSingleGameAtomic();
-    
-    // Check for active games
-    let game = await Game.findOne({
-      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
-      archived: { $ne: true }
-    })
-    .sort({ 
-      status: 1,
-      createdAt: -1
-    });
-
-    if (game) {
-      console.log(`✅ Found game: ${game.code} (${game.status})`);
-      
-      // CRITICAL: Check if game actually has a winner
-      if (game.status === 'ACTIVE') {
-        const winningCard = await BingoCard.findOne({
-          gameId: game._id,
-          isWinner: true
-        });
-        
-        if (winningCard) {
-          console.warn(`⚠️ Game ${game.code} is ACTIVE but has winner! Fixing...`);
-          
-          // Fix the game state
-          game.status = 'FINISHED';
-          game.winnerId = winningCard.userId;
-          game.endedAt = game.endedAt || new Date();
-          await game.save();
-          
-          this.winnerDeclared.add(game._id.toString());
-          this.stopAutoNumberCalling(game._id);
-          
-          console.log(`✅ Fixed game ${game.code} to FINISHED`);
-          
-          // Return the fixed game
-          return this.formatGameForFrontend(game);
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+        if (!this.processingGames.has(lockKey)) {
+          break;
         }
       }
-      
-      // Handle stuck states
-      if (game.status === 'CARD_SELECTION' && game.cardSelectionEndTime) {
-        const now = new Date();
-        if (game.cardSelectionEndTime <= now) {
-          console.log(`🔄 Game ${game.code} stuck in CARD_SELECTION, checking...`);
-          await this.checkCardSelectionEnd(game._id);
-          game = await Game.findById(game._id); // Refresh game
-        }
+      if (this.processingGames.has(lockKey)) {
+        throw new Error('getMainGame is stuck in processing');
       }
-      
-      // If game is ACTIVE, ensure auto-calling is running
-      if (game.status === 'ACTIVE' && !this.activeIntervals.has(game._id.toString())) {
-        console.log(`🔄 Restarting auto-calling for ${game.code}`);
-        this.startAutoNumberCalling(game._id);
-      }
-      
-      return this.formatGameForFrontend(game);
     }
-    
-    // No game found - check for finished games to restart
-    const finishedGame = await Game.findOne({
-      status: { $in: ['FINISHED', 'NO_WINNER'] },
-      archived: { $ne: true }
-    }).sort({ endedAt: -1 });
-    
-    if (finishedGame) {
-      console.log(`🔄 Creating new game after finished game: ${finishedGame.code}`);
-      return await this.createNewGameAfterCooldown(finishedGame._id);
-    }
-    
-    // Absolutely no games exist - create brand new one
-    console.log('🎮 Creating brand new game...');
-    return await this.createNewGame();
-    
-  } catch (error) {
-    console.error('❌ Error in getMainGame:', error);
-    
-    // Emergency fallback
+
     try {
-      const emergencyGame = await Game.findOne({ 
-        archived: { $ne: true } 
-      }).sort({ createdAt: -1 });
-      
-      if (emergencyGame) {
-        console.log(`🚨 Fallback: Using emergency game ${emergencyGame.code}`);
-        return this.formatGameForFrontend(emergencyGame);
+      this.processingGames.add(lockKey);
+
+      console.log('🎮 getMainGame() - Starting...');
+
+      // First, sync winner state
+      await this.syncWinnerStateWithDatabase();
+
+      // CRITICAL: Use only ONE of these, not both
+      await this.enforceSingleGameAtomic();
+
+      // Check for active games
+      let game = await Game.findOne({
+        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+        archived: { $ne: true }
+      })
+        .sort({
+          status: 1,
+          createdAt: -1
+        });
+
+      if (game) {
+        console.log(`✅ Found game: ${game.code} (${game.status})`);
+
+        // CRITICAL: Check if game actually has a winner
+        if (game.status === 'ACTIVE') {
+          const winningCard = await BingoCard.findOne({
+            gameId: game._id,
+            isWinner: true
+          });
+
+          if (winningCard) {
+            console.warn(`⚠️ Game ${game.code} is ACTIVE but has winner! Fixing...`);
+
+            // Fix the game state
+            game.status = 'FINISHED';
+            game.winnerId = winningCard.userId;
+            game.endedAt = game.endedAt || new Date();
+            await game.save();
+
+            this.winnerDeclared.add(game._id.toString());
+            this.stopAutoNumberCalling(game._id);
+
+            console.log(`✅ Fixed game ${game.code} to FINISHED`);
+
+            // Return the fixed game
+            return this.formatGameForFrontend(game);
+          }
+        }
+
+        // Handle stuck states
+        if (game.status === 'CARD_SELECTION' && game.cardSelectionEndTime) {
+          const now = new Date();
+          if (game.cardSelectionEndTime <= now) {
+            console.log(`🔄 Game ${game.code} stuck in CARD_SELECTION, checking...`);
+            await this.checkCardSelectionEnd(game._id);
+            game = await Game.findById(game._id); // Refresh game
+          }
+        }
+
+        // If game is ACTIVE, ensure auto-calling is running
+        if (game.status === 'ACTIVE' && !this.activeIntervals.has(game._id.toString())) {
+          console.log(`🔄 Restarting auto-calling for ${game.code}`);
+          this.startAutoNumberCalling(game._id);
+        }
+
+        return this.formatGameForFrontend(game);
       }
-      
-      // Last resort - create game
-      console.log('🚨 Last resort: Creating emergency game');
+
+      // No game found - check for finished games to restart
+      const finishedGame = await Game.findOne({
+        status: { $in: ['FINISHED', 'NO_WINNER'] },
+        archived: { $ne: true }
+      }).sort({ endedAt: -1 });
+
+      if (finishedGame) {
+        console.log(`🔄 Creating new game after finished game: ${finishedGame.code}`);
+        return await this.createNewGameAfterCooldown(finishedGame._id);
+      }
+
+      // Absolutely no games exist - create brand new one
+      console.log('🎮 Creating brand new game...');
       return await this.createNewGame();
-    } catch (fallbackError) {
-      console.error('❌ Fallback game creation failed:', fallbackError);
-      // Return minimal game object to prevent frontend crash
-      return {
-        _id: 'emergency',
-        code: 'EMERGENCY',
-        status: 'WAITING_FOR_PLAYERS',
-        message: 'Game system recovering...',
-        currentPlayers: 0,
-        playersWithCards: 0,
-        cardsNeeded: this.MIN_PLAYERS_TO_START,
-        canSelectCard: false,
-        canJoin: false
-      };
+
+    } catch (error) {
+      console.error('❌ Error in getMainGame:', error);
+
+      // Emergency fallback
+      try {
+        const emergencyGame = await Game.findOne({
+          archived: { $ne: true }
+        }).sort({ createdAt: -1 });
+
+        if (emergencyGame) {
+          console.log(`🚨 Fallback: Using emergency game ${emergencyGame.code}`);
+          return this.formatGameForFrontend(emergencyGame);
+        }
+
+        // Last resort - create game
+        console.log('🚨 Last resort: Creating emergency game');
+        return await this.createNewGame();
+      } catch (fallbackError) {
+        console.error('❌ Fallback game creation failed:', fallbackError);
+        // Return minimal game object to prevent frontend crash
+        return {
+          _id: 'emergency',
+          code: 'EMERGENCY',
+          status: 'WAITING_FOR_PLAYERS',
+          message: 'Game system recovering...',
+          currentPlayers: 0,
+          playersWithCards: 0,
+          cardsNeeded: this.MIN_PLAYERS_TO_START,
+          canSelectCard: false,
+          canJoin: false
+        };
+      }
+    } finally {
+      this.processingGames.delete(lockKey);
     }
-  } finally {
-    this.processingGames.delete(lockKey);
   }
-}
 
   // ==================== GET CURRENT GAME STATE ====================
 
@@ -342,54 +342,54 @@ static async getMainGame() {
     try {
       // CRITICAL: Ensure only one game exists in active states
       await this.ensureSingleActiveGame();
-      
+
       // 1. Check for active game FIRST
       let game = await this.findActiveGame();
-      
+
       if (game) {
         console.log(`✅ Found active game: ${game.code}`);
         return game;
       }
-      
+
       // 2. Check for waiting or card selection game
       game = await this.findWaitingOrCardSelectionGame();
-      
+
       if (game) {
         console.log(`✅ Found game in progress: ${game.code} (${game.status})`);
-        
+
         // Handle stuck CARD_SELECTION state
         if (game.status === 'CARD_SELECTION' && game.cardSelectionEndTime) {
           const now = new Date();
           if (game.cardSelectionEndTime <= now) {
             console.log(`🔄 Game ${game.code} stuck in CARD_SELECTION, checking...`);
             await this.checkCardSelectionEnd(game._id);
-            
+
             // Get updated game
             game = await Game.findById(game._id);
           }
         }
-        
+
         return game;
       }
-      
+
       // 3. Check for games that need to be restarted (finished games)
       game = await Game.findOne({
         status: { $in: ['FINISHED', 'NO_WINNER'] },
         archived: { $ne: true }
       }).sort({ endedAt: -1 });
-      
+
       if (game) {
         console.log(`🔄 Creating new game after finished game: ${game.code}`);
         return await this.createNewGameAfterCooldown(game._id);
       }
-      
+
       // 4. No game exists at all - create brand new one
       console.log('🎮 Creating brand new game...');
       return await this.createNewGame();
-      
+
     } catch (error) {
       console.error('❌ Error in getCurrentGameState:', error);
-      
+
       // Try to create new game as fallback
       try {
         return await this.createNewGame();
@@ -406,109 +406,109 @@ static async getMainGame() {
       status: 'ACTIVE',
       archived: { $ne: true }
     }).sort({ createdAt: -1 });
-    
+
     if (game) {
       // Check if game should end due to all numbers called
       if (game.numbersCalled && game.numbersCalled.length >= 75) {
         console.log(`⚠️ Game ${game.code} has all 75 numbers. Ending...`);
-        
+
         // End the game and create new one
         await this.endGameDueToNoWinner(game._id);
-        
+
         // Return the newly created game instead
         const newGame = await Game.findOne({
           status: 'WAITING_FOR_PLAYERS',
           archived: { $ne: true }
         }).sort({ createdAt: -1 });
-        
+
         return newGame;
       }
-      
+
       if (!this.activeIntervals.has(game._id.toString())) {
         console.log(`🔄 Restarting auto-calling for ${game.code}`);
         this.startAutoNumberCalling(game._id);
       }
-      
+
       return game;
     }
-    
+
     return null;
   }
 
   // ==================== CRITICAL: ENSURE SINGLE ACTIVE GAME ====================
- static async enforceSingleGameAtomic() {
-  const lockKey = 'enforce_single_game';
-  
-  if (this.processingGames.has(lockKey)) {
-    return; // Already being processed
-  }
+  static async enforceSingleGameAtomic() {
+    const lockKey = 'enforce_single_game';
 
-  try {
-    this.processingGames.add(lockKey);
-    
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    if (this.processingGames.has(lockKey)) {
+      return; // Already being processed
+    }
 
     try {
-      // Find ALL active games in one query WITH LOCK
-      const activeGames = await Game.find({
-        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
-        archived: { $ne: true }
-      })
-      .session(session)
-      .sort({ 
-        // Priority order for keeping which game
-        status: 1, // ACTIVE first, then CARD_SELECTION, then WAITING_FOR_PLAYERS
-        createdAt: -1 // Newest first
-      })
-      .readConcern('majority')
-      .writeConcern({ w: 'majority' });
+      this.processingGames.add(lockKey);
 
-      if (activeGames.length <= 1) {
+      const session = await mongoose.startSession();
+      session.startTransaction();
+
+      try {
+        // Find ALL active games in one query WITH LOCK
+        const activeGames = await Game.find({
+          status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+          archived: { $ne: true }
+        })
+          .session(session)
+          .sort({
+            // Priority order for keeping which game
+            status: 1, // ACTIVE first, then CARD_SELECTION, then WAITING_FOR_PLAYERS
+            createdAt: -1 // Newest first
+          })
+          .readConcern('majority')
+          .writeConcern({ w: 'majority' });
+
+        if (activeGames.length <= 1) {
+          await session.abortTransaction();
+          console.log('✅ Single game check: OK');
+          return;
+        }
+
+        console.warn(`⚠️ CRITICAL: Found ${activeGames.length} active games!`);
+        console.warn(`⚠️ Game states: ${activeGames.map(g => `${g.code}:${g.status}`).join(', ')}`);
+
+        // Keep only the first one (highest priority)
+        const gameToKeep = activeGames[0];
+        console.log(`✅ Keeping game: ${gameToKeep.code} (${gameToKeep.status})`);
+
+        // Archive all others
+        for (let i = 1; i < activeGames.length; i++) {
+          const gameToArchive = activeGames[i];
+          console.log(`🗑️ Archiving duplicate: ${gameToArchive.code} (${gameToArchive.status})`);
+
+          gameToArchive.archived = true;
+          gameToArchive.archivedAt = new Date();
+          gameToArchive.archivedReason = `Multiple active games detected. Keeping only ${gameToKeep.code}`;
+          await gameToArchive.save({ session });
+
+          // Clean up intervals
+          this.stopAutoNumberCalling(gameToArchive._id);
+          this.clearAutoStartTimer(gameToArchive._id);
+        }
+
+        await session.commitTransaction();
+        console.log('✅ Enforced single active game');
+
+      } catch (error) {
         await session.abortTransaction();
-        console.log('✅ Single game check: OK');
-        return;
+        console.error('❌ Error enforcing single game:', error);
+        // Don't throw - we don't want to break everything
+      } finally {
+        if (session) {
+          session.endSession();
+        }
       }
 
-      console.warn(`⚠️ CRITICAL: Found ${activeGames.length} active games!`);
-      console.warn(`⚠️ Game states: ${activeGames.map(g => `${g.code}:${g.status}`).join(', ')}`);
-      
-      // Keep only the first one (highest priority)
-      const gameToKeep = activeGames[0];
-      console.log(`✅ Keeping game: ${gameToKeep.code} (${gameToKeep.status})`);
-
-      // Archive all others
-      for (let i = 1; i < activeGames.length; i++) {
-        const gameToArchive = activeGames[i];
-        console.log(`🗑️ Archiving duplicate: ${gameToArchive.code} (${gameToArchive.status})`);
-        
-        gameToArchive.archived = true;
-        gameToArchive.archivedAt = new Date();
-        gameToArchive.archivedReason = `Multiple active games detected. Keeping only ${gameToKeep.code}`;
-        await gameToArchive.save({ session });
-        
-        // Clean up intervals
-        this.stopAutoNumberCalling(gameToArchive._id);
-        this.clearAutoStartTimer(gameToArchive._id);
-      }
-
-      await session.commitTransaction();
-      console.log('✅ Enforced single active game');
-      
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Error enforcing single game:', error);
-      // Don't throw - we don't want to break everything
     } finally {
-      if (session) {
-        session.endSession();
-      }
+      this.processingGames.delete(lockKey);
     }
-    
-  } finally {
-    this.processingGames.delete(lockKey);
   }
-}
 
 
   // ==================== FIND WAITING OR CARD SELECTION GAME ====================
@@ -517,125 +517,125 @@ static async getMainGame() {
       status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION'] },
       archived: { $ne: true }
     }).sort({ createdAt: -1 });
-    
+
     return game;
   }
 
   // ==================== GAME CREATION & CLEANUP ====================
 
- 
-static async createNewGame() {
-  const lockKey = 'create_new_game';
-  
-  if (this.gameCreationLock.has(lockKey)) {
-    console.log('⏳ Game creation in progress, waiting...');
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    // Instead of recursive call, check if game was created
-    const existingGame = await Game.findOne({
-      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
-      archived: { $ne: true }
-    }).sort({ createdAt: -1 });
-    
-    if (existingGame) {
-      console.log(`✅ Game already created: ${existingGame.code}`);
-      return existingGame;
-    }
-    
-    // If still no game, retry creation
-    return this.createNewGame();
-  }
 
-  try {
-    this.gameCreationLock.set(lockKey, true);
-    
-    // CRITICAL: Check with lock if there's already an active/waiting game
-    const existingGame = await Game.findOne({
-      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
-      archived: { $ne: true }
-    });
-    
-    if (existingGame) {
-      console.log(`⏭️ Skipping creation: ${existingGame.code} (${existingGame.status}) already exists`);
-      return existingGame;
-    }
-    
-    // Also check for recently created games (last 5 seconds)
-    const recentGame = await Game.findOne({
-      createdAt: { $gte: new Date(Date.now() - 5000) },
-      archived: { $ne: true }
-    });
-    
-    if (recentGame) {
-      console.log(`⏭️ Recent game exists: ${recentGame.code}, skipping creation`);
-      return recentGame;
-    }
-    
-    const gameCode = GameUtils.generateGameCode();
-    const now = new Date();
-    
-    const game = new Game({
-      code: gameCode,
-      maxPlayers: 400,
-      isPrivate: false,
-      numbersCalled: [],
-      status: 'WAITING_FOR_PLAYERS',
-      currentPlayers: 0,
-      isAutoCreated: true,
-      autoStartEndTime: new Date(now.getTime() + this.AUTO_START_DELAY),
-      createdAt: now,
-      updatedAt: now
-    });
+  static async createNewGame() {
+    const lockKey = 'create_new_game';
 
-    await game.save();
-    console.log(`🎯 Created new game: ${gameCode} (ID: ${game._id})`);
-    
-    // Broadcast new game created
-    if (this.webSocketService) {
-      this.broadcastToGame(game._id, {
-        type: 'NEW_GAME_CREATED',
-        gameId: game._id,
-        gameCode: game.code,
-        status: game.status,
-        autoStartTime: game.autoStartEndTime,
-        timestamp: new Date().toISOString()
+    if (this.gameCreationLock.has(lockKey)) {
+      console.log('⏳ Game creation in progress, waiting...');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Instead of recursive call, check if game was created
+      const existingGame = await Game.findOne({
+        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+        archived: { $ne: true }
+      }).sort({ createdAt: -1 });
+
+      if (existingGame) {
+        console.log(`✅ Game already created: ${existingGame.code}`);
+        return existingGame;
+      }
+
+      // If still no game, retry creation
+      return this.createNewGame();
+    }
+
+    try {
+      this.gameCreationLock.set(lockKey, true);
+
+      // CRITICAL: Check with lock if there's already an active/waiting game
+      const existingGame = await Game.findOne({
+        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+        archived: { $ne: true }
       });
+
+      if (existingGame) {
+        console.log(`⏭️ Skipping creation: ${existingGame.code} (${existingGame.status}) already exists`);
+        return existingGame;
+      }
+
+      // Also check for recently created games (last 5 seconds)
+      const recentGame = await Game.findOne({
+        createdAt: { $gte: new Date(Date.now() - 5000) },
+        archived: { $ne: true }
+      });
+
+      if (recentGame) {
+        console.log(`⏭️ Recent game exists: ${recentGame.code}, skipping creation`);
+        return recentGame;
+      }
+
+      const gameCode = GameUtils.generateGameCode();
+      const now = new Date();
+
+      const game = new Game({
+        code: gameCode,
+        maxPlayers: 400,
+        isPrivate: false,
+        numbersCalled: [],
+        status: 'WAITING_FOR_PLAYERS',
+        currentPlayers: 0,
+        isAutoCreated: true,
+        autoStartEndTime: new Date(now.getTime() + this.AUTO_START_DELAY),
+        createdAt: now,
+        updatedAt: now
+      });
+
+      await game.save();
+      console.log(`🎯 Created new game: ${gameCode} (ID: ${game._id})`);
+
+      // Broadcast new game created
+      if (this.webSocketService) {
+        this.broadcastToGame(game._id, {
+          type: 'NEW_GAME_CREATED',
+          gameId: game._id,
+          gameCode: game.code,
+          status: game.status,
+          autoStartTime: game.autoStartEndTime,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Schedule auto-start check with delay to avoid immediate checks
+      setTimeout(() => {
+        this.scheduleAutoStartCheck(game._id);
+      }, 3000);
+
+      return game;
+
+    } catch (error) {
+      console.error('❌ Error creating new game:', error);
+
+      // On error, check if game was created anyway
+      const existingGame = await Game.findOne({
+        status: 'WAITING_FOR_PLAYERS',
+        archived: { $ne: true }
+      }).sort({ createdAt: -1 });
+
+      if (existingGame) {
+        console.log(`🔄 Found game after error: ${existingGame.code}`);
+        return existingGame;
+      }
+
+      throw error;
+    } finally {
+      this.gameCreationLock.delete(lockKey);
     }
-    
-    // Schedule auto-start check with delay to avoid immediate checks
-    setTimeout(() => {
-      this.scheduleAutoStartCheck(game._id);
-    }, 3000);
-    
-    return game;
-    
-  } catch (error) {
-    console.error('❌ Error creating new game:', error);
-    
-    // On error, check if game was created anyway
-    const existingGame = await Game.findOne({
-      status: 'WAITING_FOR_PLAYERS',
-      archived: { $ne: true }
-    }).sort({ createdAt: -1 });
-    
-    if (existingGame) {
-      console.log(`🔄 Found game after error: ${existingGame.code}`);
-      return existingGame;
-    }
-    
-    throw error;
-  } finally {
-    this.gameCreationLock.delete(lockKey);
   }
-}
 
 
   static async createNewGameAfterCooldown(previousGameId) {
     const session = await mongoose.startSession();
-    
+
     try {
       session.startTransaction();
-      
+
       // Archive the old game
       const oldGame = await Game.findById(previousGameId).session(session);
       if (oldGame) {
@@ -649,7 +649,7 @@ static async createNewGame() {
       // Create new game
       const gameCode = GameUtils.generateGameCode();
       const now = new Date();
-      
+
       const newGame = new Game({
         code: gameCode,
         maxPlayers: 400,
@@ -666,9 +666,9 @@ static async createNewGame() {
 
       await newGame.save({ session });
       await session.commitTransaction();
-      
+
       console.log(`🎯 Created new game after cooldown: ${gameCode} (ID: ${newGame._id})`);
-      
+
       // Broadcast new game created
       this.broadcastToGame(newGame._id, {
         type: 'NEW_GAME_CREATED',
@@ -678,19 +678,19 @@ static async createNewGame() {
         autoStartTime: newGame.autoStartEndTime,
         timestamp: new Date().toISOString()
       });
-      
+
       // Schedule auto-start check
       this.scheduleAutoStartCheck(newGame._id);
-      
+
       return newGame;
-      
+
     } catch (error) {
       if (session && session.inTransaction()) {
         await session.abortTransaction();
       }
-      
+
       console.error('❌ Error creating new game after cooldown:', error);
-      
+
       // Fallback: try to create a simple new game
       try {
         console.log('🔄 Trying fallback game creation...');
@@ -722,14 +722,14 @@ static async createNewGame() {
       }
 
       console.warn(`⚠️ Found ${activeGames.length} active games - cleaning duplicates`);
-      
+
       const newestGame = activeGames[0];
       console.log(`✅ Keeping newest game: ${newestGame.code}`);
 
       for (let i = 1; i < activeGames.length; i++) {
         const oldGame = activeGames[i];
         console.log(`🗑️ Archiving duplicate: ${oldGame.code}`);
-        
+
         oldGame.archived = true;
         oldGame.archivedAt = new Date();
         oldGame.archivedReason = 'Duplicate game detected during cleanup';
@@ -739,7 +739,7 @@ static async createNewGame() {
       await session.commitTransaction();
       console.log('✅ Duplicate games cleaned up');
       return true;
-      
+
     } catch (error) {
       await session.abortTransaction();
       console.error('❌ Error cleaning duplicate games:', error);
@@ -757,31 +757,31 @@ static async createNewGame() {
 
     try {
       const game = await Game.findById(gameId).session(session);
-      
+
       if (!game || game.status !== 'WAITING_FOR_PLAYERS') {
         throw new Error('Game not in waiting state');
       }
 
       const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
-      
+
       if (playersWithCards < this.MIN_PLAYERS_TO_START) {
         throw new Error(`Not enough players with cards. Need ${this.MIN_PLAYERS_TO_START}, have ${playersWithCards}`);
       }
 
       const now = new Date();
       const cardSelectionEndTime = new Date(now.getTime() + this.CARD_SELECTION_DURATION);
-      
+
       game.status = 'CARD_SELECTION';
       game.cardSelectionStartTime = now;
       game.cardSelectionEndTime = cardSelectionEndTime;
       game.autoStartEndTime = null;
-      
+
       await game.save({ session });
       await session.commitTransaction();
-      
+
       console.log(`🎲 Card selection started for game ${game.code}`);
       console.log(`⏰ Card selection ends at: ${cardSelectionEndTime}`);
-      
+
       // Broadcast card selection start
       this.broadcastToGame(gameId, {
         type: 'CARD_SELECTION_STARTED',
@@ -790,17 +790,17 @@ static async createNewGame() {
         duration: this.CARD_SELECTION_DURATION,
         timestamp: new Date().toISOString()
       });
-      
+
       // Broadcast game status update
       this.broadcastGameStatus(gameId, game);
-      
+
       // Set timeout to check card selection end
       setTimeout(async () => {
         await this.checkCardSelectionEnd(gameId);
       }, this.CARD_SELECTION_DURATION + 1000);
-      
+
       return game;
-      
+
     } catch (error) {
       await session.abortTransaction();
       console.error('❌ Error beginning card selection:', error);
@@ -812,404 +812,404 @@ static async createNewGame() {
 
   // ==================== CARD SELECTION TIMEOUT HANDLER ====================
 
-static async checkCardSelectionEnd(gameId) {
-  const lockKey = `check_card_selection_${gameId}`;
-  
-  if (this.processingGames.has(lockKey)) {
-    console.log(`⏳ Already checking card selection for ${gameId}, skipping...`);
-    return;
-  }
+  static async checkCardSelectionEnd(gameId) {
+    const lockKey = `check_card_selection_${gameId}`;
 
-  try {
-    this.processingGames.add(lockKey);
-    
-    console.log(`⏰ [CRITICAL] Checking card selection end for game ${gameId}`);
-    
-    const game = await Game.findById(gameId);
-    
-    if (!game) {
-      console.log(`❌ Game ${gameId} not found`);
+    if (this.processingGames.has(lockKey)) {
+      console.log(`⏳ Already checking card selection for ${gameId}, skipping...`);
       return;
     }
-    
-    if (game.status !== 'CARD_SELECTION') {
-      console.log(`⚠️ Game ${gameId} not in CARD_SELECTION state (status: ${game.status})`);
-      return;
-    }
-    
-    const now = new Date();
-    
-    // Check if card selection time has expired
-    if (game.cardSelectionEndTime && game.cardSelectionEndTime > now) {
-      const timeRemaining = Math.max(0, game.cardSelectionEndTime - now);
-      console.log(`⏳ Card selection not yet ended for ${game.code}, ends in ${Math.floor(timeRemaining/1000)} seconds`);
-      return;
-    }
-    
-    console.log(`⏰ [CRITICAL] Card selection time EXPIRED for ${game.code} at ${game.cardSelectionEndTime}`);
-    console.log(`⏰ Current time: ${now}`);
-    
+
+    try {
+      this.processingGames.add(lockKey);
+
+      console.log(`⏰ [CRITICAL] Checking card selection end for game ${gameId}`);
+
+      const game = await Game.findById(gameId);
+
+      if (!game) {
+        console.log(`❌ Game ${gameId} not found`);
+        return;
+      }
+
+      if (game.status !== 'CARD_SELECTION') {
+        console.log(`⚠️ Game ${gameId} not in CARD_SELECTION state (status: ${game.status})`);
+        return;
+      }
+
+      const now = new Date();
+
+      // Check if card selection time has expired
+      if (game.cardSelectionEndTime && game.cardSelectionEndTime > now) {
+        const timeRemaining = Math.max(0, game.cardSelectionEndTime - now);
+        console.log(`⏳ Card selection not yet ended for ${game.code}, ends in ${Math.floor(timeRemaining / 1000)} seconds`);
+        return;
+      }
+
+      console.log(`⏰ [CRITICAL] Card selection time EXPIRED for ${game.code} at ${game.cardSelectionEndTime}`);
+      console.log(`⏰ Current time: ${now}`);
+
     const playersWithCards = await BingoCard.countDocuments({ gameId });
-    console.log(`👥 Players with cards: ${playersWithCards}, Minimum required: ${this.MIN_PLAYERS_TO_START}`);
-    
-    if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
-      console.log(`✅ [CRITICAL] Starting game ${game.code} with ${playersWithCards} players`);
-      
-      // CRITICAL: Broadcast that card selection ended BEFORE starting game
-      this.broadcastToGame(gameId, {
-        type: 'CARD_SELECTION_ENDED',
-        gameId: game._id,
-        status: 'PROCEEDING_TO_GAME',
-        playerCount: playersWithCards,
-        timestamp: new Date().toISOString()
-      });
-      
-      // CRITICAL: Add a small delay to ensure message is delivered
-      setTimeout(async () => {
-        try {
-          // CRITICAL: Check game status again before starting
-          const refreshedGame = await Game.findById(gameId);
-          if (refreshedGame && refreshedGame.status === 'CARD_SELECTION') {
-            console.log(`🚀 [CRITICAL] Proceeding to startGame for ${refreshedGame.code}`);
-            await this.startGame(gameId);
-          } else {
-            console.log(`⚠️ Game ${gameId} no longer in CARD_SELECTION: ${refreshedGame?.status}`);
-          }
-        } catch (error) {
-          console.error('❌ Error in delayed game start:', error);
-        }
-      }, 1000);
-      
-    } else {
-      console.log(`❌ [CRITICAL] Not enough players (${playersWithCards}/${this.MIN_PLAYERS_TO_START})`);
-      
-      // CRITICAL: Use transaction for state rollback
-      const session = await mongoose.startSession();
-      session.startTransaction();
-      
-      try {
-        const gameInSession = await Game.findById(gameId).session(session);
-        
-        // Double-check status
-        if (gameInSession.status !== 'CARD_SELECTION') {
-          console.log(`⚠️ Game already changed state: ${gameInSession.status}`);
-          await session.abortTransaction();
-          return;
-        }
-        
-        // Go back to waiting state
-        gameInSession.status = 'WAITING_FOR_PLAYERS';
-        gameInSession.cardSelectionStartTime = null;
-        gameInSession.cardSelectionEndTime = null;
-        gameInSession.autoStartEndTime = new Date(Date.now() + this.AUTO_START_DELAY);
-        await gameInSession.save({ session });
-        
-        await session.commitTransaction();
-        
-        console.log(`⏳ Game ${game.code} back to WAITING_FOR_PLAYERS state`);
-        
-        // CRITICAL: Broadcast card selection failed
+      console.log(`👥 Players with cards: ${playersWithCards}, Minimum required: ${this.MIN_PLAYERS_TO_START}`);
+
+      if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
+        console.log(`✅ [CRITICAL] Starting game ${game.code} with ${playersWithCards} players`);
+
+        // CRITICAL: Broadcast that card selection ended BEFORE starting game
         this.broadcastToGame(gameId, {
-          type: 'CARD_SELECTION_FAILED',
+          type: 'CARD_SELECTION_ENDED',
           gameId: game._id,
-          reason: 'Not enough players selected cards',
-          required: this.MIN_PLAYERS_TO_START,
-          current: playersWithCards,
+          status: 'PROCEEDING_TO_GAME',
+          playerCount: playersWithCards,
           timestamp: new Date().toISOString()
         });
-        
-        // CRITICAL: Broadcast game status update
-        this.broadcastGameStatus(gameId, {
-          ...gameInSession.toObject(),
-          status: 'WAITING_FOR_PLAYERS'
+
+        // CRITICAL: Add a small delay to ensure message is delivered
+        setTimeout(async () => {
+          try {
+            // CRITICAL: Check game status again before starting
+            const refreshedGame = await Game.findById(gameId);
+            if (refreshedGame && refreshedGame.status === 'CARD_SELECTION') {
+              console.log(`🚀 [CRITICAL] Proceeding to startGame for ${refreshedGame.code}`);
+              await this.startGame(gameId);
+            } else {
+              console.log(`⚠️ Game ${gameId} no longer in CARD_SELECTION: ${refreshedGame?.status}`);
+            }
+          } catch (error) {
+            console.error('❌ Error in delayed game start:', error);
+          }
+        }, 1000);
+
+      } else {
+        console.log(`❌ [CRITICAL] Not enough players (${playersWithCards}/${this.MIN_PLAYERS_TO_START})`);
+
+        // CRITICAL: Use transaction for state rollback
+        const session = await mongoose.startSession();
+        session.startTransaction();
+
+        try {
+          const gameInSession = await Game.findById(gameId).session(session);
+
+          // Double-check status
+          if (gameInSession.status !== 'CARD_SELECTION') {
+            console.log(`⚠️ Game already changed state: ${gameInSession.status}`);
+            await session.abortTransaction();
+            return;
+          }
+
+          // Go back to waiting state
+          gameInSession.status = 'WAITING_FOR_PLAYERS';
+          gameInSession.cardSelectionStartTime = null;
+          gameInSession.cardSelectionEndTime = null;
+          gameInSession.autoStartEndTime = new Date(Date.now() + this.AUTO_START_DELAY);
+          await gameInSession.save({ session });
+
+          await session.commitTransaction();
+
+          console.log(`⏳ Game ${game.code} back to WAITING_FOR_PLAYERS state`);
+
+          // CRITICAL: Broadcast card selection failed
+          this.broadcastToGame(gameId, {
+            type: 'CARD_SELECTION_FAILED',
+            gameId: game._id,
+            reason: 'Not enough players selected cards',
+            required: this.MIN_PLAYERS_TO_START,
+            current: playersWithCards,
+            timestamp: new Date().toISOString()
+          });
+
+          // CRITICAL: Broadcast game status update
+          this.broadcastGameStatus(gameId, {
+            ...gameInSession.toObject(),
+            status: 'WAITING_FOR_PLAYERS'
+          });
+
+          // CRITICAL: Schedule auto-start check again
+          setTimeout(() => {
+            this.scheduleAutoStartCheck(gameId);
+          }, 5000);
+
+        } catch (error) {
+          await session.abortTransaction();
+          console.error('❌ Transaction error in checkCardSelectionEnd:', error);
+
+          // Fallback: Force update game status
+          try {
+            await Game.findByIdAndUpdate(gameId, {
+              status: 'WAITING_FOR_PLAYERS',
+              cardSelectionStartTime: null,
+              cardSelectionEndTime: null,
+              autoStartEndTime: new Date(Date.now() + this.AUTO_START_DELAY)
+            });
+          } catch (fallbackError) {
+            console.error('❌ Fallback update failed:', fallbackError);
+          }
+        } finally {
+          session.endSession();
+        }
+      }
+    } catch (error) {
+      console.error('❌ [CRITICAL] Error checking card selection end:', error);
+    } finally {
+      this.processingGames.delete(lockKey);
+    }
+  }
+
+  static async startGame(gameId) {
+    const lockKey = `start_game_${gameId}`;
+
+    if (this.processingGames.has(lockKey)) {
+      console.log(`⏳ Game ${gameId} already being started`);
+      return;
+    }
+
+    try {
+      this.processingGames.add(lockKey);
+
+      const session = await mongoose.startSession();
+      session.startTransaction();
+
+      try {
+        const game = await Game.findById(gameId).session(session);
+
+        if (!game) {
+          throw new Error('Game not found');
+        }
+
+        console.log(`📊 [START GAME] Game ${game.code} status: ${game.status}`);
+
+        // CRITICAL: Only allow transition from CARD_SELECTION or WAITING_FOR_PLAYERS
+        if (game.status !== 'CARD_SELECTION' && game.status !== 'WAITING_FOR_PLAYERS') {
+          console.log(`❌ Game ${game.code} not in correct state to start: ${game.status}`);
+          throw new Error(`Game ${game.code} not in correct state to start: ${game.status}`);
+        }
+
+        const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
+
+        // CRITICAL: Validate minimum players
+        if (playersWithCards < this.MIN_PLAYERS_TO_START) {
+          console.log(`❌ Not enough players to start: ${playersWithCards}/${this.MIN_PLAYERS_TO_START}`);
+
+          // Roll back to waiting
+          game.status = 'WAITING_FOR_PLAYERS';
+          game.cardSelectionStartTime = null;
+          game.cardSelectionEndTime = null;
+          game.autoStartEndTime = new Date(Date.now() + this.AUTO_START_DELAY);
+          await game.save({ session });
+
+          await session.commitTransaction();
+
+          console.log(`⏳ Rescheduling auto-start for ${game.code}`);
+
+          setTimeout(() => {
+            this.scheduleAutoStartCheck(gameId);
+          }, this.AUTO_START_DELAY);
+
+          return;
+        }
+
+        // CRITICAL: Check if entry fees already processed
+        const existingReconciliation = await Reconciliation.findOne({
+          gameId,
+          status: 'DEDUCTED'
+        }).session(session);
+
+        if (existingReconciliation) {
+          console.log(`⚠️ Entry fees already processed for ${game.code}, skipping fee processing`);
+        } else {
+          // Process entry fees
+          const feeResult = await this.processEntryFees(gameId);
+
+          if (feeResult.alreadyProcessed) {
+            console.log(`⚠️ Entry fees already processed (checked again) for ${game.code}`);
+          }
+        }
+
+        const now = new Date();
+        game.status = 'ACTIVE';
+        game.startedAt = now;
+        game.cardSelectionStartTime = null;
+        game.cardSelectionEndTime = null;
+        game.autoStartEndTime = null;
+        game.currentPlayers = playersWithCards;
+
+        await game.save({ session });
+        await session.commitTransaction();
+
+        console.log(`🎮 [CRITICAL SUCCESS] Game ${game.code} STARTED with ${game.currentPlayers} player(s)`);
+
+        // Clear any previous bingo claims for this game
+        this.clearBingoClaimsForGame(gameId);
+
+        // Broadcast game started
+        this.broadcastToGame(gameId, {
+          type: 'GAME_STARTED',
+          gameId: game._id,
+          gameCode: game.code,
+          startedAt: now.toISOString(),
+          playerCount: game.currentPlayers,
+          timestamp: new Date().toISOString()
         });
-        
-        // CRITICAL: Schedule auto-start check again
+
+        // CRITICAL: Also broadcast status update
+        this.broadcastGameStatus(gameId, game);
+
+        console.log(`⏱️ Game ${game.code} will start calling numbers in 5 seconds...`);
         setTimeout(() => {
-          this.scheduleAutoStartCheck(gameId);
+          this.startAutoNumberCalling(gameId);
         }, 5000);
-        
+
+        return game;
+
       } catch (error) {
         await session.abortTransaction();
-        console.error('❌ Transaction error in checkCardSelectionEnd:', error);
-        
-        // Fallback: Force update game status
-        try {
-          await Game.findByIdAndUpdate(gameId, {
-            status: 'WAITING_FOR_PLAYERS',
-            cardSelectionStartTime: null,
-            cardSelectionEndTime: null,
-            autoStartEndTime: new Date(Date.now() + this.AUTO_START_DELAY)
-          });
-        } catch (fallbackError) {
-          console.error('❌ Fallback update failed:', fallbackError);
-        }
+        console.error('❌ Start game error:', error);
+        throw error;
       } finally {
         session.endSession();
       }
+    } finally {
+      this.processingGames.delete(lockKey);
     }
-  } catch (error) {
-    console.error('❌ [CRITICAL] Error checking card selection end:', error);
-  } finally {
-    this.processingGames.delete(lockKey);
   }
-}
+  // ==================== DUPLICATE GAME PREVENTION ====================
 
- static async startGame(gameId) {
-  const lockKey = `start_game_${gameId}`;
-  
-  if (this.processingGames.has(lockKey)) {
-    console.log(`⏳ Game ${gameId} already being started`);
-    return;
-  }
+  static async ensureSingleActiveGame() {
+    const lockKey = 'ensure_single_active_game';
 
-  try {
-    this.processingGames.add(lockKey);
-    
-    const session = await mongoose.startSession();
-    session.startTransaction();
-    
+    if (this.processingGames.has(lockKey)) {
+      console.log('⏳ Already ensuring single active game');
+      return;
+    }
+
     try {
-      const game = await Game.findById(gameId).session(session);
-      
-      if (!game) {
-        throw new Error('Game not found');
-      }
-      
-      console.log(`📊 [START GAME] Game ${game.code} status: ${game.status}`);
-      
-      // CRITICAL: Only allow transition from CARD_SELECTION or WAITING_FOR_PLAYERS
-      if (game.status !== 'CARD_SELECTION' && game.status !== 'WAITING_FOR_PLAYERS') {
-        console.log(`❌ Game ${game.code} not in correct state to start: ${game.status}`);
-        throw new Error(`Game ${game.code} not in correct state to start: ${game.status}`);
-      }
-      
-      const playersWithCards = await BingoCard.countDocuments({ gameId }).session(session);
-      
-      // CRITICAL: Validate minimum players
-      if (playersWithCards < this.MIN_PLAYERS_TO_START) {
-        console.log(`❌ Not enough players to start: ${playersWithCards}/${this.MIN_PLAYERS_TO_START}`);
-        
-        // Roll back to waiting
-        game.status = 'WAITING_FOR_PLAYERS';
-        game.cardSelectionStartTime = null;
-        game.cardSelectionEndTime = null;
-        game.autoStartEndTime = new Date(Date.now() + this.AUTO_START_DELAY);
-        await game.save({ session });
-        
+      this.processingGames.add(lockKey);
+
+      const session = await mongoose.startSession();
+
+      try {
+        session.startTransaction();
+
+        // Find all non-archived games WITH LOCK
+        const allGames = await Game.find({
+          archived: { $ne: true }
+        })
+          .session(session)
+          .sort({
+            status: 1, // ACTIVE first, then CARD_SELECTION, then WAITING_FOR_PLAYERS
+            createdAt: -1
+          });
+
+        if (allGames.length <= 1) {
+          await session.abortTransaction();
+          console.log('✅ Only 0-1 games exist, no cleanup needed');
+          return;
+        }
+
+        console.log(`⚠️ Found ${allGames.length} total games`);
+
+        // Group by status
+        const activeGames = allGames.filter(g =>
+          ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'].includes(g.status)
+        );
+
+        const finishedGames = allGames.filter(g =>
+          ['FINISHED', 'NO_WINNER', 'CANCELLED'].includes(g.status)
+        );
+
+        console.log(`📊 Active: ${activeGames.length}, Finished: ${finishedGames.length}`);
+
+        // If multiple active games, keep only the newest one
+        if (activeGames.length > 1) {
+          console.log(`⚠️ CRITICAL: ${activeGames.length} active games found!`);
+
+          const gameToKeep = activeGames[0]; // Already sorted by priority
+          console.log(`✅ Keeping: ${gameToKeep.code} (${gameToKeep.status})`);
+
+          // Archive the rest
+          for (let i = 1; i < activeGames.length; i++) {
+            const gameToArchive = activeGames[i];
+            console.log(`🗑️ Archiving: ${gameToArchive.code} (${gameToArchive.status})`);
+
+            gameToArchive.archived = true;
+            gameToArchive.archivedAt = new Date();
+            gameToArchive.archivedReason = `Multiple active games. Keeping ${gameToKeep.code}`;
+            await gameToArchive.save({ session });
+
+            // Clean up intervals
+            this.stopAutoNumberCalling(gameToArchive._id);
+            this.clearAutoStartTimer(gameToArchive._id);
+          }
+        }
+
+        // Archive old finished games (keep only the 5 most recent)
+        if (finishedGames.length > 5) {
+          const gamesToArchive = finishedGames.slice(5);
+          console.log(`🗑️ Archiving ${gamesToArchive.length} old finished games`);
+
+          for (const game of gamesToArchive) {
+            game.archived = true;
+            game.archivedAt = new Date();
+            game.archivedReason = 'Archiving old finished game';
+            await game.save({ session });
+          }
+        }
+
         await session.commitTransaction();
-        
-        console.log(`⏳ Rescheduling auto-start for ${game.code}`);
-        
-        setTimeout(() => {
-          this.scheduleAutoStartCheck(gameId);
-        }, this.AUTO_START_DELAY);
-        
-        return;
-      }
-      
-      // CRITICAL: Check if entry fees already processed
-      const existingReconciliation = await Reconciliation.findOne({ 
-        gameId, 
-        status: 'DEDUCTED' 
-      }).session(session);
-      
-      if (existingReconciliation) {
-        console.log(`⚠️ Entry fees already processed for ${game.code}, skipping fee processing`);
-      } else {
-        // Process entry fees
-        const feeResult = await this.processEntryFees(gameId);
-        
-        if (feeResult.alreadyProcessed) {
-          console.log(`⚠️ Entry fees already processed (checked again) for ${game.code}`);
+        console.log('✅ Single active game ensured');
+
+      } catch (error) {
+        if (session.inTransaction()) {
+          await session.abortTransaction();
         }
+        console.error('❌ Error ensuring single active game:', error);
+        throw error;
+      } finally {
+        session.endSession();
       }
-      
-      const now = new Date();
-      game.status = 'ACTIVE';
-      game.startedAt = now;
-      game.cardSelectionStartTime = null;
-      game.cardSelectionEndTime = null;
-      game.autoStartEndTime = null;
-      game.currentPlayers = playersWithCards;
-      
-      await game.save({ session });
-      await session.commitTransaction();
-      
-      console.log(`🎮 [CRITICAL SUCCESS] Game ${game.code} STARTED with ${game.currentPlayers} player(s)`);
-      
-      // Clear any previous bingo claims for this game
-      this.clearBingoClaimsForGame(gameId);
-      
-      // Broadcast game started
-      this.broadcastToGame(gameId, {
-        type: 'GAME_STARTED',
-        gameId: game._id,
-        gameCode: game.code,
-        startedAt: now.toISOString(),
-        playerCount: game.currentPlayers,
-        timestamp: new Date().toISOString()
-      });
-      
-      // CRITICAL: Also broadcast status update
-      this.broadcastGameStatus(gameId, game);
-      
-      console.log(`⏱️ Game ${game.code} will start calling numbers in 5 seconds...`);
-      setTimeout(() => {
-        this.startAutoNumberCalling(gameId);
-      }, 5000);
-      
-      return game;
-      
+
     } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Start game error:', error);
-      throw error;
+      console.error('❌ Outer error in ensureSingleActiveGame:', error);
     } finally {
-      session.endSession();
+      this.processingGames.delete(lockKey);
     }
-  } finally {
-    this.processingGames.delete(lockKey);
-  }
-}
-// ==================== DUPLICATE GAME PREVENTION ====================
-
-static async ensureSingleActiveGame() {
-  const lockKey = 'ensure_single_active_game';
-  
-  if (this.processingGames.has(lockKey)) {
-    console.log('⏳ Already ensuring single active game');
-    return;
   }
 
-  try {
-    this.processingGames.add(lockKey);
-    
-    const session = await mongoose.startSession();
-    
+
+  static async cleanupStuckGames() {
     try {
-      session.startTransaction();
-      
-      // Find all non-archived games WITH LOCK
-      const allGames = await Game.find({
+      const now = new Date();
+      const threshold = new Date(now.getTime() - 5 * 60 * 1000); // 5 minutes ago
+
+      // Find games stuck in CARD_SELECTION for too long
+      const stuckCardSelection = await Game.find({
+        status: 'CARD_SELECTION',
+        cardSelectionEndTime: { $lt: threshold },
         archived: { $ne: true }
-      })
-      .session(session)
-      .sort({ 
-        status: 1, // ACTIVE first, then CARD_SELECTION, then WAITING_FOR_PLAYERS
-        createdAt: -1 
       });
 
-      if (allGames.length <= 1) {
-        await session.abortTransaction();
-        console.log('✅ Only 0-1 games exist, no cleanup needed');
-        return;
+      for (const game of stuckCardSelection) {
+        console.log(`🧹 Cleaning up stuck CARD_SELECTION game: ${game.code}`);
+        await this.checkCardSelectionEnd(game._id);
       }
 
-      console.log(`⚠️ Found ${allGames.length} total games`);
-      
-      // Group by status
-      const activeGames = allGames.filter(g => 
-        ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'].includes(g.status)
-      );
-      
-      const finishedGames = allGames.filter(g => 
-        ['FINISHED', 'NO_WINNER', 'CANCELLED'].includes(g.status)
-      );
-      
-      console.log(`📊 Active: ${activeGames.length}, Finished: ${finishedGames.length}`);
-      
-      // If multiple active games, keep only the newest one
-      if (activeGames.length > 1) {
-        console.log(`⚠️ CRITICAL: ${activeGames.length} active games found!`);
-        
-        const gameToKeep = activeGames[0]; // Already sorted by priority
-        console.log(`✅ Keeping: ${gameToKeep.code} (${gameToKeep.status})`);
-        
-        // Archive the rest
-        for (let i = 1; i < activeGames.length; i++) {
-          const gameToArchive = activeGames[i];
-          console.log(`🗑️ Archiving: ${gameToArchive.code} (${gameToArchive.status})`);
-          
-          gameToArchive.archived = true;
-          gameToArchive.archivedAt = new Date();
-          gameToArchive.archivedReason = `Multiple active games. Keeping ${gameToKeep.code}`;
-          await gameToArchive.save({ session });
-          
-          // Clean up intervals
-          this.stopAutoNumberCalling(gameToArchive._id);
-          this.clearAutoStartTimer(gameToArchive._id);
-        }
+      // Find games stuck in WAITING_FOR_PLAYERS for too long without auto-start
+      const stuckWaiting = await Game.find({
+        status: 'WAITING_FOR_PLAYERS',
+        autoStartEndTime: { $lt: threshold },
+        archived: { $ne: true },
+        currentPlayers: { $gte: this.MIN_PLAYERS_TO_START }
+      });
+
+      for (const game of stuckWaiting) {
+        console.log(`🧹 Triggering auto-start for stuck WAITING game: ${game.code}`);
+        await this.beginCardSelection(game._id);
       }
-      
-      // Archive old finished games (keep only the 5 most recent)
-      if (finishedGames.length > 5) {
-        const gamesToArchive = finishedGames.slice(5);
-        console.log(`🗑️ Archiving ${gamesToArchive.length} old finished games`);
-        
-        for (const game of gamesToArchive) {
-          game.archived = true;
-          game.archivedAt = new Date();
-          game.archivedReason = 'Archiving old finished game';
-          await game.save({ session });
-        }
-      }
-      
-      await session.commitTransaction();
-      console.log('✅ Single active game ensured');
-      
+
     } catch (error) {
-      if (session.inTransaction()) {
-        await session.abortTransaction();
-      }
-      console.error('❌ Error ensuring single active game:', error);
-      throw error;
-    } finally {
-      session.endSession();
+      console.error('❌ Error in cleanupStuckGames:', error);
     }
-    
-  } catch (error) {
-    console.error('❌ Outer error in ensureSingleActiveGame:', error);
-  } finally {
-    this.processingGames.delete(lockKey);
   }
-}
-
-
-static async cleanupStuckGames() {
-  try {
-    const now = new Date();
-    const threshold = new Date(now.getTime() - 5 * 60 * 1000); // 5 minutes ago
-    
-    // Find games stuck in CARD_SELECTION for too long
-    const stuckCardSelection = await Game.find({
-      status: 'CARD_SELECTION',
-      cardSelectionEndTime: { $lt: threshold },
-      archived: { $ne: true }
-    });
-    
-    for (const game of stuckCardSelection) {
-      console.log(`🧹 Cleaning up stuck CARD_SELECTION game: ${game.code}`);
-      await this.checkCardSelectionEnd(game._id);
-    }
-    
-    // Find games stuck in WAITING_FOR_PLAYERS for too long without auto-start
-    const stuckWaiting = await Game.find({
-      status: 'WAITING_FOR_PLAYERS',
-      autoStartEndTime: { $lt: threshold },
-      archived: { $ne: true },
-      currentPlayers: { $gte: this.MIN_PLAYERS_TO_START }
-    });
-    
-    for (const game of stuckWaiting) {
-      console.log(`🧹 Triggering auto-start for stuck WAITING game: ${game.code}`);
-      await this.beginCardSelection(game._id);
-    }
-    
-  } catch (error) {
-    console.error('❌ Error in cleanupStuckGames:', error);
-  }
-}
   // ==================== AUTO-CALLING SYSTEM ====================
 
   static async startAutoNumberCalling(gameId) {
@@ -1218,7 +1218,7 @@ static async cleanupStuckGames() {
     }
 
     const game = await Game.findById(gameId);
-    
+
     if (!game || game.status !== 'ACTIVE') {
       console.log(`❌ Cannot start auto-calling: Game ${gameId} not active`);
       return;
@@ -1231,7 +1231,7 @@ static async cleanupStuckGames() {
     const interval = setInterval(async () => {
       try {
         const currentGame = await Game.findById(gameId);
-        
+
         if (!currentGame || currentGame.status !== 'ACTIVE') {
           this.stopAutoNumberCalling(gameId);
           return;
@@ -1250,7 +1250,7 @@ static async cleanupStuckGames() {
         }
 
         await this.callNumber(gameId);
-        
+
       } catch (error) {
         console.error('❌ Auto-call error:', error);
       }
@@ -1264,7 +1264,7 @@ static async cleanupStuckGames() {
 
   static async stopAutoNumberCalling(gameId) {
     const gameIdStr = gameId.toString();
-    
+
     if (this.activeIntervals.has(gameIdStr)) {
       const interval = this.activeIntervals.get(gameIdStr);
       clearInterval(interval);
@@ -1286,7 +1286,7 @@ static async cleanupStuckGames() {
       }
 
       const calledNumbers = game.numbersCalled || [];
-      
+
       if (calledNumbers.length >= 75) {
         await this.endGameDueToNoWinner(gameId);
         return;
@@ -1308,7 +1308,7 @@ static async cleanupStuckGames() {
       await game.save();
 
       console.log(`🔢 Called number: ${newNumber} for ${game.code}. Total: ${calledNumbers.length}`);
-      
+
       // Store synchronized state
       this.gameStates.set(gameId.toString(), {
         calledNumbers,
@@ -1330,9 +1330,9 @@ static async cleanupStuckGames() {
         timestamp: Date.now(),
         serverTime: Date.now()
       });
-      
-      return { 
-        number: newNumber, 
+
+      return {
+        number: newNumber,
         letter: GameUtils.getNumberLetter(newNumber),
         calledNumbers,
         totalCalled: calledNumbers.length,
@@ -1344,678 +1344,673 @@ static async cleanupStuckGames() {
     }
   }
 
-// In GameService.js, add this method:
-static broadcastWinnerInfo(gameId, winnerInfo) {
-  if (!this.webSocketService) {
-    console.log('⚠️ WebSocket service not available for winner info broadcast');
-    return;
+  // In GameService.js, add this method:
+  static broadcastWinnerInfo(gameId, winnerInfo) {
+    if (!this.webSocketService) {
+      console.log('⚠️ WebSocket service not available for winner info broadcast');
+      return;
+    }
+
+    try {
+      this.webSocketService.broadcastWinnerInfo(gameId.toString(), winnerInfo);
+      console.log(`📤 Broadcast winner info to all players for game ${gameId}`);
+    } catch (error) {
+      console.error('❌ Error broadcasting winner info:', error);
+    }
   }
-  
-  try {
-    this.webSocketService.broadcastWinnerInfo(gameId.toString(), winnerInfo);
-    console.log(`📤 Broadcast winner info to all players for game ${gameId}`);
-  } catch (error) {
-    console.error('❌ Error broadcasting winner info:', error);
-  }
-}
 
   // ==================== WINNER DECLARATION ====================
-static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions, winningPositionIndex = null) {
-  const session = await mongoose.startSession();
-  let transactionInProgress = false;
-  
-  try {
-    session.startTransaction();
-    transactionInProgress = true;
-    
-    console.log(`🎉 [IMMEDIATE] Declaring winner for game ${gameId}: ${winningUserId}`);
-    
-    const game = await Game.findById(gameId).session(session);
-    
-    if (!game) {
-      throw new Error('Game not found');
-    }
-    
-    // 🚨 CRITICAL: Double-check if winner already exists in database
-    const existingWinnerInDB = await BingoCard.findOne({
-      gameId,
-      isWinner: true,
-      userId: { $ne: winningUserId } // Different user
-    }).session(session);
-    
-    if (existingWinnerInDB) {
-      console.log(`⚠️ Database shows existing winner: ${existingWinnerInDB.userId}`);
-      await session.abortTransaction();
-      
-      // Sync in-memory state
-      this.winnerDeclared.add(gameId.toString());
-      
-      return await this.getWinnerInfo(gameId);
-    }
-    
-    // Check current status
-    if (game.status === 'FINISHED' || game.status === 'NO_WINNER') {
-      console.log(`⚠️ Game ${game.code} already finished (${game.status})`);
-      await session.abortTransaction();
-      
-      // Sync in-memory state
-      this.winnerDeclared.add(gameId.toString());
-      
-      return await this.getWinnerInfo(gameId);
-    }
-    
-    if (game.status !== 'ACTIVE') {
-      throw new Error(`Game ${game.code} not active (status: ${game.status})`);
-    }
-    
-    // Check in-memory state
-    if (this.winnerDeclared.has(gameId.toString())) {
-      // Verify with database
-      const dbCheck = await BingoCard.findOne({
-        gameId,
-        isWinner: true
-      }).session(session);
-      
-      if (dbCheck) {
-        console.log(`⚠️ Winner confirmed in database: ${dbCheck.userId}`);
-        await session.abortTransaction();
-        return await this.getWinnerInfo(gameId);
-      } else {
-        // In-memory state is stale, clear it
-        console.log(`🔄 Clearing stale in-memory winner state for ${gameId}`);
-        this.winnerDeclared.delete(gameId.toString());
-      }
-    }
-    
-    const card = await BingoCard.findById(winningCard._id).session(session);
-    const bingoCards = await BingoCard.find({ gameId }).session(session);
-    
-    const uniqueUsers = new Set();
-    bingoCards.forEach(card => uniqueUsers.add(card.userId.toString()));
-    const totalUniquePlayers = uniqueUsers.size;
-    
-    const totalPot = totalUniquePlayers * this.ENTRY_FEE;
-    const platformFee = totalPot * 0.2;
-    const winnerPrize = totalPot - platformFee;
-    
-    // CRITICAL: Save winning pattern positions to the winning card
-    card.isWinner = true;
-    card.winningPatternPositions = winningPositions || winningCard.winningPatternPositions || [];
-    card.winningPatternType = winningCard.winningPatternType || 'BINGO';
-    card.winningPositionIndex = winningPositionIndex || winningCard.winningPositionIndex || null;
+  static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningPositions, winningPositionIndex = null) {
+    const session = await mongoose.startSession();
+    let transactionInProgress = false;
 
-    await card.save({ session });
-    
-    const reconciliation = new Reconciliation({
-      gameId: game._id,
-      status: 'WINNER_DECLARED',
-      totalPot: totalPot,
-      platformFee: platformFee,
-      winnerAmount: winnerPrize,
-      winnerId: winningUserId,
-      debitTotal: totalPot,
-      creditTotal: winnerPrize + platformFee,
-      completedAt: new Date()
-    });
-    
-    const now = new Date();
-    
-    // Update game status
-    game.status = 'FINISHED';
-    game.winnerId = winningUserId;
-    game.endedAt = now;
-    game.winningAmount = winnerPrize;
-    game.updatedAt = now;
-    
-    // Ensure numbers called array exists
-    if (!game.numbersCalled) {
-      game.numbersCalled = [];
-    }
-    
-    await game.save({ session });
-    await reconciliation.save({ session });
-    
-    const WalletService = require('./walletService');
-    await WalletService.addWinning(
-      winningUserId,
-      gameId,
-      winnerPrize,
-      `Winner prize for game ${game.code} (${totalUniquePlayers} players)`
-    );
-    
-    // 🚨 CRITICAL: Mark winner declared BEFORE broadcasting
-    this.winnerDeclared.add(gameId.toString());
-    
-    await session.commitTransaction();
-    transactionInProgress = false;
-    
-    console.log(`🎊 [IMMEDIATE] Game ${game.code} ENDED - Status: ${game.status}, Winner: ${winningUserId} won $${winnerPrize}`);
-    
-    // 🚨 CRITICAL: STOP number calling immediately
-    this.stopAutoNumberCalling(gameId);
-    
-    // Get winner info for broadcasting
-    const winnerInfo = await this.getWinnerInfo(gameId);
-    
-    // 🚨 CRITICAL: IMMEDIATE BROADCAST to ALL players
-    const winnerData = {
-      winnerId: winningUserId,
-      winnerPrize: winnerPrize,
-      totalPlayers: totalUniquePlayers,
-      patternType: winningCard.winningPatternType || 'BINGO',
-      endedAt: now.toISOString(),
-      winningPositions: winningPositions || winningCard.winningPatternPositions || [],
-      winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null,
-      winningCard: winnerInfo?.winningCard,
-      immediateDeclaration: true,
-      timestamp: Date.now()
-    };
-    
-    // Broadcast via WebSocket IMMEDIATELY
-    if (this.webSocketService) {
-      this.webSocketService.broadcastWinnerDeclared(gameId, winnerData);
-      
-      // Broadcast game status update
-      this.broadcastGameStatus(gameId, {
-        ...game.toObject(),
-        status: 'FINISHED',
-        winnerId: winningUserId
-      });
-      
-      // Also send detailed winner info
-      if (winnerInfo) {
-        setTimeout(() => {
-          this.webSocketService.broadcastWinnerInfo(gameId, {
-            ...winnerInfo,
-            winningCard: winnerInfo.winningCard ? {
-              ...winnerInfo.winningCard,
-              winningPatternPositions: winningPositions || winningCard.winningPatternPositions || [],
-              winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null
-            } : null
-          });
-        }, 500);
+    try {
+      session.startTransaction();
+      transactionInProgress = true;
+
+      console.log(`🎉 [IMMEDIATE] Declaring winner for game ${gameId}: ${winningUserId}`);
+
+      const game = await Game.findById(gameId).session(session);
+
+      if (!game) {
+        throw new Error('Game not found');
       }
+
+      // 🚨 CRITICAL: Double-check if winner already exists in database
+      const existingWinnerInDB = await BingoCard.findOne({
+        gameId,
+        isWinner: true,
+        userId: { $ne: winningUserId } // Different user
+      }).session(session);
+
+      if (existingWinnerInDB) {
+        console.log(`⚠️ Database shows existing winner: ${existingWinnerInDB.userId}`);
+        await session.abortTransaction();
+
+        // Sync in-memory state
+        this.winnerDeclared.add(gameId.toString());
+
+        return await this.getWinnerInfo(gameId);
+      }
+
+      // Check current status
+      if (game.status === 'FINISHED' || game.status === 'NO_WINNER') {
+        console.log(`⚠️ Game ${game.code} already finished (${game.status})`);
+        await session.abortTransaction();
+
+        // Sync in-memory state
+        this.winnerDeclared.add(gameId.toString());
+
+        return await this.getWinnerInfo(gameId);
+      }
+
+      if (game.status !== 'ACTIVE') {
+        throw new Error(`Game ${game.code} not active (status: ${game.status})`);
+      }
+
+      // Check in-memory state
+      if (this.winnerDeclared.has(gameId.toString())) {
+        // Verify with database
+        const dbCheck = await BingoCard.findOne({
+          gameId,
+          isWinner: true
+        }).session(session);
+
+        if (dbCheck) {
+          console.log(`⚠️ Winner confirmed in database: ${dbCheck.userId}`);
+          await session.abortTransaction();
+          return await this.getWinnerInfo(gameId);
+        } else {
+          // In-memory state is stale, clear it
+          console.log(`🔄 Clearing stale in-memory winner state for ${gameId}`);
+          this.winnerDeclared.delete(gameId.toString());
+        }
+      }
+
+      const card = await BingoCard.findById(winningCard._id).session(session);
+      const bingoCards = await BingoCard.find({ gameId }).session(session);
+
+      const uniqueUsers = new Set();
+      bingoCards.forEach(card => uniqueUsers.add(card.userId.toString()));
+      const totalUniquePlayers = uniqueUsers.size;
+
+      const totalPot = totalUniquePlayers * this.ENTRY_FEE;
+      const platformFee = totalPot * 0.2;
+      const winnerPrize = totalPot - platformFee;
+
+      // CRITICAL: Save winning pattern positions to the winning card
+      card.isWinner = true;
+      card.winningPatternPositions = winningPositions || winningCard.winningPatternPositions || [];
+      card.winningPatternType = winningCard.winningPatternType || 'BINGO';
+      card.winningPositionIndex = winningPositionIndex || winningCard.winningPositionIndex || null;
+
+      await card.save({ session });
+
+      const reconciliation = new Reconciliation({
+        gameId: game._id,
+        status: 'WINNER_DECLARED',
+        totalPot: totalPot,
+        platformFee: platformFee,
+        winnerAmount: winnerPrize,
+        winnerId: winningUserId,
+        debitTotal: totalPot,
+        creditTotal: winnerPrize + platformFee,
+        completedAt: new Date()
+      });
+
+      const now = new Date();
+
+      // Update game status
+      game.status = 'FINISHED';
+      game.winnerId = winningUserId;
+      game.endedAt = now;
+      game.winningAmount = winnerPrize;
+      game.updatedAt = now;
+
+      // Ensure numbers called array exists
+      if (!game.numbersCalled) {
+        game.numbersCalled = [];
+      }
+
+      await game.save({ session });
+      await reconciliation.save({ session });
+
+      const WalletService = require('./walletService');
+      await WalletService.addWinning(
+        winningUserId,
+        gameId,
+        winnerPrize,
+        `Winner prize for game ${game.code} (${totalUniquePlayers} players)`
+      );
+
+      // 🚨 CRITICAL: Mark winner declared BEFORE broadcasting
+      this.winnerDeclared.add(gameId.toString());
+
+      await session.commitTransaction();
+      transactionInProgress = false;
+
+      console.log(`🎊 [IMMEDIATE] Game ${game.code} ENDED - Status: ${game.status}, Winner: ${winningUserId} won $${winnerPrize}`);
+
+      // 🚨 CRITICAL: STOP number calling immediately
+      this.stopAutoNumberCalling(gameId);
+
+      // Get winner info for broadcasting
+      const winnerInfo = await this.getWinnerInfo(gameId);
+
+      // 🚨 CRITICAL: IMMEDIATE BROADCAST to ALL players
+      const winnerData = {
+        winnerId: winningUserId,
+        winnerPrize: winnerPrize,
+        totalPlayers: totalUniquePlayers,
+        patternType: winningCard.winningPatternType || 'BINGO',
+        endedAt: now.toISOString(),
+        winningPositions: winningPositions || winningCard.winningPatternPositions || [],
+        winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null,
+        winningCard: winnerInfo?.winningCard,
+        immediateDeclaration: true,
+        timestamp: Date.now()
+      };
+
+      // Broadcast via WebSocket IMMEDIATELY
+      if (this.webSocketService) {
+        this.webSocketService.broadcastWinnerDeclared(gameId, winnerData);
+
+        // Broadcast game status update
+        this.broadcastGameStatus(gameId, {
+          ...game.toObject(),
+          status: 'FINISHED',
+          winnerId: winningUserId
+        });
+
+        // Also send detailed winner info
+        if (winnerInfo) {
+          setTimeout(() => {
+            this.webSocketService.broadcastWinnerInfo(gameId, {
+              ...winnerInfo,
+              winningCard: winnerInfo.winningCard ? {
+                ...winnerInfo.winningCard,
+                winningPatternPositions: winningPositions || winningCard.winningPatternPositions || [],
+                winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null
+              } : null
+            });
+          }, 500);
+        }
+      }
+
+      // Also send traditional broadcast
+      this.broadcastToGame(gameId, {
+        type: 'WINNER_DECLARED',
+        gameId: game._id,
+        gameCode: game.code,
+        status: 'FINISHED',
+        winnerId: winningUserId,
+        winnerPrize: winnerPrize,
+        totalPlayers: totalUniquePlayers,
+        patternType: winningCard.winningPatternType || 'BINGO',
+        winningPositions: winningPositions || winningCard.winningPatternPositions || [],
+        winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null,
+        winningCard: winnerInfo?.winningCard ? {
+          ...winnerInfo.winningCard,
+          winningPatternPositions: winningPositions || winningCard.winningPatternPositions || [],
+          winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null
+        } : null,
+        endedAt: now.toISOString(),
+        immediateDeclaration: true,
+        timestamp: Date.now()
+      });
+
+      // Start next game countdown
+      setTimeout(async () => {
+        await this.setNextGameCountdown(gameId);
+      }, 3000);
+
+      return {
+        reconciliation,
+        winningPositions: winningPositions || winningCard.winningPatternPositions || [],
+        winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null,
+        winnerInfo,
+        winnerPrize: winnerPrize,
+        totalUniquePlayers: totalUniquePlayers,
+        gameStatus: 'FINISHED'
+      };
+
+    } catch (error) {
+      if (transactionInProgress && session.inTransaction()) {
+        await session.abortTransaction();
+      }
+      console.error('❌ Failed to declare winner:', error);
+      throw error;
+    } finally {
+      session.endSession();
     }
-    
-    // Also send traditional broadcast
-    this.broadcastToGame(gameId, {
-      type: 'WINNER_DECLARED',
-      gameId: game._id,
-      gameCode: game.code,
-      status: 'FINISHED',
-      winnerId: winningUserId,
-      winnerPrize: winnerPrize,
-      totalPlayers: totalUniquePlayers,
-      patternType: winningCard.winningPatternType || 'BINGO',
-      winningPositions: winningPositions || winningCard.winningPatternPositions || [],
-      winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null,
-      winningCard: winnerInfo?.winningCard ? {
-        ...winnerInfo.winningCard,
-        winningPatternPositions: winningPositions || winningCard.winningPatternPositions || [],
-        winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null
-      } : null,
-      endedAt: now.toISOString(),
-      immediateDeclaration: true,
-      timestamp: Date.now()
-    });
-    
-    // Start next game countdown
-    setTimeout(async () => {
-      await this.setNextGameCountdown(gameId);
-    }, 3000);
-    
-    return {
-      reconciliation,
-      winningPositions: winningPositions || winningCard.winningPatternPositions || [],
-      winningPositionIndex: winningPositionIndex || winningCard.winningPositionIndex || null,
-      winnerInfo,
-      winnerPrize: winnerPrize,
-      totalUniquePlayers: totalUniquePlayers,
-      gameStatus: 'FINISHED'
-    };
-    
-  } catch (error) {
-    if (transactionInProgress && session.inTransaction()) {
-      await session.abortTransaction();
-    }
-    console.error('❌ Failed to declare winner:', error);
-    throw error;
-  } finally {
-    session.endSession();
   }
-}
 
   // ==================== AUTO-MARKING & WIN VALIDATION ====================
 
-static async claimBingo(gameId, userId, patternType = 'BINGO') {
-  const lockKey = `bingo_claim_${gameId}`;
-  
-  // Prevent multiple simultaneous claims
-  if (this.processingGames.has(lockKey)) {
-    console.log(`⏳ Another bingo claim is being processed for game ${gameId}`);
-    throw new Error('Another bingo claim is being processed. Please try again.');
-  }
+  static async claimBingo(gameId, userId, patternType = 'BINGO') {
+    const lockKey = `bingo_claim_${gameId}`;
 
-  const session = await mongoose.startSession();
-  
-  try {
-    this.processingGames.add(lockKey);
-    session.startTransaction();
-    
-    console.log(`🏆 BINGO CLAIM attempt by ${userId} for game ${gameId}, pattern: ${patternType}`);
-    
-    // Check database for existing winner WITHIN TRANSACTION
-    const existingWinnerInDB = await BingoCard.findOne({ 
-      gameId, 
-      isWinner: true 
-    }).session(session);
-    
-    if (existingWinnerInDB) {
-      console.log(`⚠️ Database shows existing winner: ${existingWinnerInDB.userId}`);
-      await session.abortTransaction();
-      
-      // Sync in-memory state
-      this.winnerDeclared.add(gameId.toString());
-      
-      const winnerInfo = await this.getWinnerInfo(gameId);
-      throw new Error(`Winner already declared: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
+    // Prevent multiple simultaneous claims
+    if (this.processingGames.has(lockKey)) {
+      console.log(`⏳ Another bingo claim is being processed for game ${gameId}`);
+      throw new Error('Another bingo claim is being processed. Please try again.');
     }
 
-    const game = await Game.findById(gameId).session(session);
-    if (!game) {
-      throw new Error('Game not found');
-    }
+    const session = await mongoose.startSession();
 
-    // Check game status
-    if (game.status !== 'ACTIVE') {
-      // Check if there's actually a winner
-      const winningCardCheck = await BingoCard.findOne({ 
-        gameId, 
-        isWinner: true 
+    try {
+      this.processingGames.add(lockKey);
+      session.startTransaction();
+
+      console.log(`🏆 BINGO CLAIM attempt by ${userId} for game ${gameId}, pattern: ${patternType}`);
+
+      // Check database for existing winner WITHIN TRANSACTION
+      const existingWinnerInDB = await BingoCard.findOne({
+        gameId,
+        isWinner: true
       }).session(session);
-      
-      if (winningCardCheck) {
-        // Fix game status
-        game.status = 'FINISHED';
-        game.winnerId = winningCardCheck.userId;
-        game.endedAt = game.endedAt || new Date();
-        await game.save({ session });
-        
+
+      if (existingWinnerInDB) {
+        console.log(`⚠️ Database shows existing winner: ${existingWinnerInDB.userId}`);
+        await session.abortTransaction();
+
+        // Sync in-memory state
         this.winnerDeclared.add(gameId.toString());
-        
-        await session.commitTransaction();
-        
+
         const winnerInfo = await this.getWinnerInfo(gameId);
-        throw new Error(`Game finished. Winner: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
+        throw new Error(`Winner already declared: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
       }
-      
-      throw new Error(`Game is not active (status: ${game.status})`);
-    }
 
-    // IMMEDIATELY STOP number calling for this game
-    this.stopAutoNumberCalling(gameId);
-    
-    // Find user
-    let user;
-    if (mongoose.Types.ObjectId.isValid(userId)) {
-      user = await User.findById(userId).session(session);
-    } else {
-      user = await User.findOne({ telegramId: userId }).session(session);
-    }
-
-    if (!user) {
-      throw new Error('User not found');
-    }
-
-    const mongoUserId = user._id;
-    
-    // Check if user is already disqualified from this game
-    const existingPlayer = await GamePlayer.findOne({
-      gameId,
-      userId: mongoUserId,
-      disqualified: true
-    }).session(session);
-    
-    if (existingPlayer) {
-      throw new Error('You have been disqualified from this game');
-    }
-
-    // Check previous false claims for this user in this game
-    const claimKey = `${gameId}_${mongoUserId}`;
-    if (this.bingoClaims.has(claimKey)) {
-      const previousClaim = this.bingoClaims.get(claimKey);
-      if (previousClaim.isDisqualified) {
-        throw new Error('You have been disqualified for a false bingo claim');
+      const game = await Game.findById(gameId).session(session);
+      if (!game) {
+        throw new Error('Game not found');
       }
-    }
 
-    const bingoCard = await BingoCard.findOne({ 
-      gameId, 
-      userId: mongoUserId 
-    }).session(session);
+      // Check game status
+      if (game.status !== 'ACTIVE') {
+        // Check if there's actually a winner
+        const winningCardCheck = await BingoCard.findOne({
+          gameId,
+          isWinner: true
+        }).session(session);
 
-    if (!bingoCard) {
-      throw new Error('No bingo card found');
-    }
+        if (winningCardCheck) {
+          // Fix game status
+          game.status = 'FINISHED';
+          game.winnerId = winningCardCheck.userId;
+          game.endedAt = game.endedAt || new Date();
+          await game.save({ session });
 
-    // Check if card is already disqualified
-    if (bingoCard.isDisqualified) {
-      throw new Error('Your card has been disqualified');
-    }
+          this.winnerDeclared.add(gameId.toString());
 
-    // Get all called numbers WITHIN TRANSACTION
-    const calledNumbers = game.numbersCalled || [];
-    
-    // Get user's card numbers
-    const cardNumbers = bingoCard.numbers.flat();
-    
-    // Get manually marked positions
-    const manuallyMarkedPositions = bingoCard.markedPositions || [];
-    
-    // Always include FREE space
-    const effectiveMarkedPositions = [...new Set([...manuallyMarkedPositions, 12])];
-    
-    console.log(`📊 User ${userId} has ${manuallyMarkedPositions.length} manually marked positions`);
-    console.log(`🔢 Total called numbers: ${calledNumbers.length}`);
-    
-    // IMMEDIATELY check for winning condition
-    const winResult = this.checkWinningConditionWithAutoMark(
-      cardNumbers, 
-      effectiveMarkedPositions, 
-      calledNumbers
-    );
-    
-    if (!winResult.isWinner) {
-      // Player claimed bingo without valid win - DISQUALIFY PERMANENTLY
-      console.log(`❌ INVALID BINGO CLAIM by ${userId} - DISQUALIFYING PERMANENTLY`);
-      
-      // Disqualify the player from the game
-      await this.disqualifyPlayer(gameId, mongoUserId, session, {
-        reason: 'False bingo claim',
-        claimedPattern: patternType,
-        markedPositions: manuallyMarkedPositions.length,
-        calledNumbersAtClaim: calledNumbers.length
-      });
-      
-      // Also mark the card as disqualified
-      bingoCard.isDisqualified = true;
-      bingoCard.disqualifiedAt = new Date();
-      bingoCard.disqualificationReason = 'False bingo claim';
-      await bingoCard.save({ session });
-      
-      // Remove player from active game participants
-      const gamePlayer = await GamePlayer.findOne({ 
-        gameId, 
-        userId: mongoUserId 
+          await session.commitTransaction();
+
+          const winnerInfo = await this.getWinnerInfo(gameId);
+          throw new Error(`Game finished. Winner: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
+        }
+
+        throw new Error(`Game is not active (status: ${game.status})`);
+      }
+
+      // IMMEDIATELY STOP number calling for this game
+      this.stopAutoNumberCalling(gameId);
+
+      // Find user
+      let user;
+      if (mongoose.Types.ObjectId.isValid(userId)) {
+        user = await User.findById(userId).session(session);
+      } else {
+        user = await User.findOne({ telegramId: userId }).session(session);
+      }
+
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      const mongoUserId = user._id;
+
+      // Check if user is already disqualified from this game
+      const existingPlayer = await GamePlayer.findOne({
+        gameId,
+        userId: mongoUserId,
+        disqualified: true
       }).session(session);
-      
-      if (gamePlayer) {
-        gamePlayer.disqualified = true;
-        gamePlayer.disqualifiedAt = new Date();
-        gamePlayer.disqualificationReason = 'False bingo claim';
-        await gamePlayer.save({ session });
+
+      if (existingPlayer) {
+        throw new Error('You have been disqualified from this game');
       }
-      
-      // Decrement current players count
-      game.currentPlayers = Math.max(0, game.currentPlayers - 1);
-      await game.save({ session });
-      
-      // Record the claim as disqualified
+
+      // Check previous false claims for this user in this game
+      const claimKey = `${gameId}_${mongoUserId}`;
+      if (this.bingoClaims.has(claimKey)) {
+        const previousClaim = this.bingoClaims.get(claimKey);
+        if (previousClaim.isDisqualified) {
+          throw new Error('You have been disqualified for a false bingo claim');
+        }
+      }
+
+      const bingoCard = await BingoCard.findOne({
+        gameId,
+        userId: mongoUserId
+      }).session(session);
+
+      if (!bingoCard) {
+        throw new Error('No bingo card found');
+      }
+
+      // Check if card is already disqualified
+      if (bingoCard.isDisqualified) {
+        throw new Error('Your card has been disqualified');
+      }
+
+      // Get all called numbers WITHIN TRANSACTION
+      const calledNumbers = game.numbersCalled || [];
+
+      // Get user's card numbers
+      const cardNumbers = bingoCard.numbers.flat();
+
+      // Get manually marked positions
+      const manuallyMarkedPositions = bingoCard.markedPositions || [];
+
+      // Always include FREE space
+      const effectiveMarkedPositions = [...new Set([...manuallyMarkedPositions, 12])];
+
+      console.log(`📊 User ${userId} has ${manuallyMarkedPositions.length} manually marked positions`);
+      console.log(`🔢 Total called numbers: ${calledNumbers.length}`);
+
+      // IMMEDIATELY check for winning condition
+      const winResult = this.checkWinningConditionWithAutoMark(
+        cardNumbers,
+        effectiveMarkedPositions,
+        calledNumbers
+      );
+
+      if (!winResult.isWinner) {
+        // Player claimed bingo without valid win - DISQUALIFY PERMANENTLY
+        console.log(`❌ INVALID BINGO CLAIM by ${userId} - DISQUALIFYING PERMANENTLY`);
+
+        // Disqualify the player from the game
+        await this.disqualifyPlayer(gameId, mongoUserId, session, {
+          reason: 'False bingo claim',
+          claimedPattern: patternType,
+          markedPositions: manuallyMarkedPositions.length,
+          calledNumbersAtClaim: calledNumbers.length
+        });
+
+        // Also mark the card as disqualified
+        bingoCard.isDisqualified = true;
+        bingoCard.disqualifiedAt = new Date();
+        bingoCard.disqualificationReason = 'False bingo claim';
+        await bingoCard.save({ session });
+
+        // Remove player from active game participants
+        const gamePlayer = await GamePlayer.findOne({
+          gameId,
+          userId: mongoUserId
+        }).session(session);
+
+        if (gamePlayer) {
+          gamePlayer.disqualified = true;
+          gamePlayer.disqualifiedAt = new Date();
+          gamePlayer.disqualificationReason = 'False bingo claim';
+          await gamePlayer.save({ session });
+        }
+
+        // Decrement current players count
+        game.currentPlayers = Math.max(0, game.currentPlayers - 1);
+        await game.save({ session });
+
+        // Record the claim as disqualified
+        this.bingoClaims.set(claimKey, {
+          userId: mongoUserId,
+          timestamp: new Date(),
+          isDisqualified: true,
+          isWinner: false,
+          reason: 'False bingo claim'
+        });
+
+        await session.commitTransaction();
+
+        // Broadcast disqualification
+        this.broadcastToGame(gameId, {
+          type: 'PLAYER_DISQUALIFIED',
+          userId: mongoUserId,
+          reason: 'False bingo claim',
+          timestamp: new Date().toISOString()
+        }, [mongoUserId.toString()]);
+
+        // 🚨 CRITICAL: RESTART number calling immediately for other players
+        setTimeout(() => {
+          this.restartNumberCallingIfNoWinner(gameId);
+        }, 100);
+
+        throw new Error('Invalid bingo claim - You have been disqualified from this game');
+      }
+
+      console.log(`✅ VALID BINGO CLAIM by ${userId} with ${winResult.patternType}`);
+
+      // 🚨 CRITICAL: PREVENT any other claims immediately
+      this.winnerDeclared.add(gameId.toString());
+
+      // Update the card with auto-marked positions
+      if (winResult.autoMarkedPositions && winResult.autoMarkedPositions.length > 0) {
+        const newMarkedPositions = [...new Set([
+          ...bingoCard.markedPositions,
+          ...winResult.autoMarkedPositions
+        ])];
+
+        bingoCard.markedPositions = newMarkedPositions;
+        bingoCard.autoMarkedPositions = winResult.autoMarkedPositions;
+        await bingoCard.save({ session });
+
+        console.log(`✅ Updated card with auto-marked positions: ${winResult.autoMarkedPositions}`);
+      }
+
+      // Record valid claim
       this.bingoClaims.set(claimKey, {
         userId: mongoUserId,
         timestamp: new Date(),
-        isDisqualified: true,
-        isWinner: false,
-        reason: 'False bingo claim'
+        isDisqualified: false,
+        isWinner: true,
+        patternType: winResult.patternType
       });
-      
+
+      // 🚨 CRITICAL: DECLARE WINNER IMMEDIATELY
+      const result = await this.declareWinnerWithRetry(
+        gameId,
+        mongoUserId,
+        {
+          ...bingoCard.toObject(),
+          winningPatternType: winResult.patternType,
+          winningPatternPositions: winResult.winningPositions,
+          winningPositionIndex: winResult.winningPositionIndex
+        },
+        winResult.winningPositions,
+        winResult.winningPositionIndex
+      );
+
       await session.commitTransaction();
-      
-      // Broadcast disqualification
+
+      console.log(`🎊 Winner ${userId} declared for game ${game.code}`);
+
+      // Broadcast bingo claim success
       this.broadcastToGame(gameId, {
-        type: 'PLAYER_DISQUALIFIED',
+        type: 'BINGO_CLAIMED',
         userId: mongoUserId,
-        reason: 'False bingo claim',
+        patternType: winResult.patternType,
+        isWinner: true,
         timestamp: new Date().toISOString()
-      }, [mongoUserId.toString()]);
-      
-      // 🚨 CRITICAL: RESTART number calling immediately for other players
+      });
+
+      return {
+        success: true,
+        message: 'Bingo claim successful! You are the winner!',
+        patternType: winResult.patternType,
+        winningPositions: winResult.winningPositions,
+        winningPositionIndex: winResult.winningPositionIndex,
+        autoMarkedPositions: winResult.autoMarkedPositions || [],
+        manuallyMarked: manuallyMarkedPositions.length
+      };
+
+    } catch (error) {
+      console.error('❌ Bingo claim error:', error);
+
+      // Ensure transaction is aborted
+      if (session.inTransaction()) {
+        await session.abortTransaction();
+      }
+
+      // 🚨 CRITICAL: Restart number calling on ANY error
       setTimeout(() => {
         this.restartNumberCallingIfNoWinner(gameId);
       }, 100);
-      
-      throw new Error('Invalid bingo claim - You have been disqualified from this game');
+
+      // Broadcast failed bingo claim
+      if (this.webSocketService) {
+        try {
+          this.sendToUser(userId, {
+            type: 'BINGO_CLAIM_FAILED',
+            error: error.message,
+            timestamp: new Date().toISOString()
+          });
+        } catch (wsError) {
+          console.error('❌ Error sending bingo claim failed message:', wsError);
+        }
+      }
+
+      throw error;
+    } finally {
+      session.endSession();
+      this.processingGames.delete(lockKey);
+    }
+  }
+  // 🚀 NEW METHOD: Restart number calling if no winner declared
+  static async restartNumberCallingIfNoWinner(gameId) {
+    const gameIdStr = gameId.toString();
+
+    // Check if winner has been declared
+    if (this.winnerDeclared.has(gameIdStr)) {
+      console.log(`✅ Winner already declared for ${gameId}, NOT restarting number calling`);
+      return;
     }
 
-    console.log(`✅ VALID BINGO CLAIM by ${userId} with ${winResult.patternType}`);
-    
-    // 🚨 CRITICAL: PREVENT any other claims immediately
-    this.winnerDeclared.add(gameId.toString());
-    
-    // Update the card with auto-marked positions
-    if (winResult.autoMarkedPositions && winResult.autoMarkedPositions.length > 0) {
-      const newMarkedPositions = [...new Set([
-        ...bingoCard.markedPositions,
-        ...winResult.autoMarkedPositions
-      ])];
-      
-      bingoCard.markedPositions = newMarkedPositions;
-      bingoCard.autoMarkedPositions = winResult.autoMarkedPositions;
-      await bingoCard.save({ session });
-      
-      console.log(`✅ Updated card with auto-marked positions: ${winResult.autoMarkedPositions}`);
+    // Check game status
+    const game = await Game.findById(gameId);
+    if (!game || game.status !== 'ACTIVE') {
+      console.log(`⚠️ Game ${gameId} not active (${game?.status}), not restarting`);
+      return;
     }
-    
-    // Record valid claim
-    this.bingoClaims.set(claimKey, {
-      userId: mongoUserId,
-      timestamp: new Date(),
-      isDisqualified: false,
-      isWinner: true,
-      patternType: winResult.patternType
-    });
-    
-    // 🚨 CRITICAL: DECLARE WINNER IMMEDIATELY
-    const result = await this.declareWinnerWithRetry(
-      gameId, 
-      mongoUserId, 
-      { 
-        ...bingoCard.toObject(), 
-        winningPatternType: winResult.patternType,
-        winningPatternPositions: winResult.winningPositions,
-        winningPositionIndex: winResult.winningPositionIndex
-      }, 
-      winResult.winningPositions,
-      winResult.winningPositionIndex
-    );
-    
-    await session.commitTransaction();
-    
-    console.log(`🎊 Winner ${userId} declared for game ${game.code}`);
-    
-    // Broadcast bingo claim success
-    this.broadcastToGame(gameId, {
-      type: 'BINGO_CLAIMED',
-      userId: mongoUserId,
-      patternType: winResult.patternType,
-      isWinner: true,
-      timestamp: new Date().toISOString()
-    });
-    
-    return {
-      success: true,
-      message: 'Bingo claim successful! You are the winner!',
-      patternType: winResult.patternType,
-      winningPositions: winResult.winningPositions, 
-      winningPositionIndex: winResult.winningPositionIndex, 
-      autoMarkedPositions: winResult.autoMarkedPositions || [],
-      manuallyMarked: manuallyMarkedPositions.length
-    };
-    
-  } catch (error) {
-    console.error('❌ Bingo claim error:', error);
-    
-    // Ensure transaction is aborted
-    if (session.inTransaction()) {
-      await session.abortTransaction();
-    }
-    
-    // 🚨 CRITICAL: Restart number calling on ANY error
-    setTimeout(() => {
-      this.restartNumberCallingIfNoWinner(gameId);
-    }, 100);
-    
-    // Broadcast failed bingo claim
-    if (this.webSocketService) {
-      try {
-        this.sendToUser(userId, {
-          type: 'BINGO_CLAIM_FAILED',
-          error: error.message,
-          timestamp: new Date().toISOString()
-        });
-      } catch (wsError) {
-        console.error('❌ Error sending bingo claim failed message:', wsError);
-      }
-    }
-    
-    throw error;
-  } finally {
-    session.endSession();
-    this.processingGames.delete(lockKey);
+
+    // Restart number calling
+    console.log(`🔄 Restarting number calling for game ${game.code} after failed claim`);
+    this.startAutoNumberCalling(gameId);
   }
-}
-// 🚀 NEW METHOD: Restart number calling if no winner declared
-static async restartNumberCallingIfNoWinner(gameId) {
-  const gameIdStr = gameId.toString();
+
+
   
-  // Check if winner has been declared
-  if (this.winnerDeclared.has(gameIdStr)) {
-    console.log(`✅ Winner already declared for ${gameId}, NOT restarting number calling`);
-    return;
-  }
-  
-  // Check game status
-  const game = await Game.findById(gameId);
-  if (!game || game.status !== 'ACTIVE') {
-    console.log(`⚠️ Game ${gameId} not active (${game?.status}), not restarting`);
-    return;
-  }
-  
-  // Restart number calling
-  console.log(`🔄 Restarting number calling for game ${game.code} after failed claim`);
-  this.startAutoNumberCalling(gameId);
-}
 
   static checkWinningConditionWithAutoMark(cardNumbers, markedPositions, calledNumbers) {
-    if (!cardNumbers || !markedPositions) {
-      return { isWinner: false, patternType: null, winningPositions: [], autoMarkedPositions: [] };
-    }
+  if (!cardNumbers || !markedPositions) {
+    return { isWinner: false, patternType: null, winningPositions: [], autoMarkedPositions: [] };
+  }
 
-    const effectiveMarked = [...markedPositions];
+  const effectiveMarked = [...markedPositions];
+  
+  // Define all possible winning patterns (same as before)
+  const winningPatterns = [
+    { type: 'ROW', positions: [0, 1, 2, 3, 4] },
+    { type: 'ROW', positions: [5, 6, 7, 8, 9] },
+    { type: 'ROW', positions: [10, 11, 12, 13, 14] },
+    { type: 'ROW', positions: [15, 16, 17, 18, 19] },
+    { type: 'ROW', positions: [20, 21, 22, 23, 24] },
+    { type: 'COLUMN', positions: [0, 5, 10, 15, 20] },
+    { type: 'COLUMN', positions: [1, 6, 11, 16, 21] },
+    { type: 'COLUMN', positions: [2, 7, 12, 17, 22] },
+    { type: 'COLUMN', positions: [3, 8, 13, 18, 23] },
+    { type: 'COLUMN', positions: [4, 9, 14, 19, 24] },
+    { type: 'DIAGONAL', positions: [0, 6, 12, 18, 24] },
+    { type: 'DIAGONAL', positions: [4, 8, 12, 16, 20] },
+    { type: 'FOUR_CORNERS', positions: [0, 4, 20, 24] }
+  ];
+
+  for (const pattern of winningPatterns) {
+    const patternPositions = pattern.positions;
+    const markedInPattern = patternPositions.filter(pos => effectiveMarked.includes(pos));
+    const unmarkedInPattern = patternPositions.filter(pos => !effectiveMarked.includes(pos));
     
-    // Define all possible winning patterns
-    const winningPatterns = [
-      // Rows (5 positions each)
-      { type: 'ROW', positions: [0, 1, 2, 3, 4] },
-      { type: 'ROW', positions: [5, 6, 7, 8, 9] },
-      { type: 'ROW', positions: [10, 11, 12, 13, 14] },
-      { type: 'ROW', positions: [15, 16, 17, 18, 19] },
-      { type: 'ROW', positions: [20, 21, 22, 23, 24] },
+    // If already complete win
+    if (markedInPattern.length === patternPositions.length) {
+      // Find which number completed the win
+      const winningNumberInfo = this.findWinningNumberPosition(
+        cardNumbers, 
+        patternPositions, 
+        [], // No unmarked positions
+        calledNumbers
+      );
       
-      // Columns (5 positions each)
-      { type: 'COLUMN', positions: [0, 5, 10, 15, 20] },
-      { type: 'COLUMN', positions: [1, 6, 11, 16, 21] },
-      { type: 'COLUMN', positions: [2, 7, 12, 17, 22] },
-      { type: 'COLUMN', positions: [3, 8, 13, 18, 23] },
-      { type: 'COLUMN', positions: [4, 9, 14, 19, 24] },
+      return {
+        isWinner: true,
+        patternType: pattern.type,
+        winningPositions: patternPositions,
+        autoMarkedPositions: [],
+        winningPositionIndex: winningNumberInfo?.winningPositionIndex || patternPositions[patternPositions.length - 1],
+        winningNumber: winningNumberInfo?.winningNumber || null
+      };
+    }
+    
+    const requiredMarked = pattern.type === 'FOUR_CORNERS' ? 3 : 4;
+    
+    if (markedInPattern.length >= requiredMarked) {
+      const autoMarkablePositions = [];
       
-      // Diagonals (5 positions each)
-      { type: 'DIAGONAL', positions: [0, 6, 12, 18, 24] },
-      { type: 'DIAGONAL', positions: [4, 8, 12, 16, 20] },
-      
-      // Four Corners (special pattern - 4 positions)
-      { type: 'FOUR_CORNERS', positions: [0, 4, 20, 24] }
-    ];
-
-    // Check each pattern
-    for (const pattern of winningPatterns) {
-      const patternPositions = pattern.positions;
-      
-      // Count marked positions in this pattern
-      const markedInPattern = patternPositions.filter(pos => effectiveMarked.includes(pos));
-      const unmarkedInPattern = patternPositions.filter(pos => !effectiveMarked.includes(pos));
-      
-      // If all positions are already marked, it's a regular win
-      if (markedInPattern.length === patternPositions.length) {
-              const lastMarkedPosition = patternPositions[patternPositions.length - 1];
-
-        return {
-          isWinner: true,
-          patternType: pattern.type,
-          winningPositions: patternPositions,
-          autoMarkedPositions: [],
-                winningPositionIndex: null ,
-                        winningPositionIndex: lastMarkedPosition 
-
-
-        };
+      for (const unmarkedPos of unmarkedInPattern) {
+        const unmarkedNumber = cardNumbers[unmarkedPos];
+        if (unmarkedNumber === 'FREE') continue;
+        if (calledNumbers.includes(unmarkedNumber)) {
+          autoMarkablePositions.push(unmarkedPos);
+        }
       }
       
-      // Check if we have 4 out of 5 marked (or 3 out of 4 for four corners)
-      // and the remaining ones are in called numbers
-      const requiredMarked = pattern.type === 'FOUR_CORNERS' ? 3 : 4;
+      const requiredAutoMarks = pattern.type === 'FOUR_CORNERS' ? 1 : 1;
       
-      if (markedInPattern.length >= requiredMarked) {
-        // Check if unmarked positions have been called
-        const autoMarkablePositions = [];
+      if (autoMarkablePositions.length >= requiredAutoMarks) {
+        // Find which number actually completed the win
+        const winningNumberInfo = this.findWinningNumberPosition(
+          cardNumbers,
+          patternPositions,
+          unmarkedInPattern,
+          calledNumbers
+        );
         
-        for (const unmarkedPos of unmarkedInPattern) {
-          const unmarkedNumber = cardNumbers[unmarkedPos];
-          
-          // Skip FREE space (already included in marked positions)
-          if (unmarkedNumber === 'FREE') continue;
-          
-          // Check if this number has been called
-          if (calledNumbers.includes(unmarkedNumber)) {
-            autoMarkablePositions.push(unmarkedPos);
-          }
-        }
-        
-        // For regular patterns (5 positions): need 4 marked + 1 auto-markable
-        // For four corners (4 positions): need 3 marked + 1 auto-markable
-        const requiredAutoMarks = pattern.type === 'FOUR_CORNERS' ? 1 : 1;
-        
-        if (autoMarkablePositions.length >= requiredAutoMarks) {
-          // Take the required number of auto-marks
-          const finalAutoMarks = autoMarkablePositions.slice(0, requiredAutoMarks);
-                            const winningPositionIndex = finalAutoMarks[finalAutoMarks.length - 1];
+        const finalAutoMarks = autoMarkablePositions.slice(0, requiredAutoMarks);
+        const finalMarkedPositions = [...effectiveMarked, ...finalAutoMarks];
 
-          const finalMarkedPositions = [...effectiveMarked, ...finalAutoMarks];
-
-          // Verify the pattern is now complete
-          const isComplete = patternPositions.every(pos => finalMarkedPositions.includes(pos));
-          
-          if (isComplete) {
-            return {
-              isWinner: true,
-              patternType: pattern.type,
-              winningPositions: patternPositions,
-              autoMarkedPositions: finalAutoMarks,
-               winningPositionIndex: winningPositionIndex
-            };
-          }
+        if (patternPositions.every(pos => finalMarkedPositions.includes(pos))) {
+          return {
+            isWinner: true,
+            patternType: pattern.type,
+            winningPositions: patternPositions,
+            autoMarkedPositions: finalAutoMarks,
+            winningPositionIndex: winningNumberInfo?.winningPositionIndex || autoMarkablePositions[0],
+            winningNumber: winningNumberInfo?.winningNumber || null
+          };
         }
       }
     }
+  }
 
-     return { 
+  return { 
     isWinner: false, 
     patternType: null, 
     winningPositions: [], 
     autoMarkedPositions: [],
-    winningPositionIndex: null 
+    winningPositionIndex: null,
+    winningNumber: null
   };
-  }
+}
+
+
+
 
   // ==================== CARD MANAGEMENT ====================
 
@@ -2028,9 +2023,9 @@ static async restartNumberCallingIfNoWinner(gameId) {
       if (!canJoin) {
         throw new Error('You are disqualified from this game and cannot select a card');
       }
-      
+
       const game = await Game.findById(gameId).session(session);
-      
+
       if (!game) {
         throw new Error('Game not found');
       }
@@ -2039,11 +2034,11 @@ static async restartNumberCallingIfNoWinner(gameId) {
         throw new Error('Cannot select card - game not accepting players');
       }
 
-      const existingCardWithNumber = await BingoCard.findOne({ 
-        gameId, 
-        cardNumber 
+      const existingCardWithNumber = await BingoCard.findOne({
+        gameId,
+        cardNumber
       }).session(session);
-      
+
       if (existingCardWithNumber && existingCardWithNumber.userId.toString() !== userId.toString()) {
         throw new Error(`Card #${cardNumber} is already taken by another player`);
       }
@@ -2067,11 +2062,11 @@ static async restartNumberCallingIfNoWinner(gameId) {
 
       const mongoUserId = user._id;
 
-      const existingPlayer = await GamePlayer.findOne({ 
-        gameId, 
-        userId: mongoUserId 
+      const existingPlayer = await GamePlayer.findOne({
+        gameId,
+        userId: mongoUserId
       }).session(session);
-      
+
       if (!existingPlayer) {
         await GamePlayer.create([{
           userId: mongoUserId,
@@ -2080,12 +2075,12 @@ static async restartNumberCallingIfNoWinner(gameId) {
           playerType: 'PLAYER',
           joinedAt: new Date()
         }], { session });
-        
+
         game.currentPlayers += 1;
         await game.save({ session });
-        
+
         console.log(`✅ User ${userId} joined ${game.code}. Total: ${game.currentPlayers}`);
-        
+
         // Broadcast user joined
         this.broadcastToGame(gameId, {
           type: 'USER_JOINED',
@@ -2097,30 +2092,30 @@ static async restartNumberCallingIfNoWinner(gameId) {
         }, [mongoUserId.toString()]);
       }
 
-      const existingCard = await BingoCard.findOne({ 
-        gameId, 
-        userId: mongoUserId 
+      const existingCard = await BingoCard.findOne({
+        gameId,
+        userId: mongoUserId
       }).session(session);
-      
+
       if (existingCard) {
         if (existingCard.cardNumber === cardNumber) {
           console.log(`✅ User ${userId} already has card #${cardNumber}`);
-          
+
           await session.commitTransaction();
-          
-          return { 
-            success: true, 
+
+          return {
+            success: true,
             message: 'Card already selected',
             action: 'ALREADY_SELECTED',
             cardId: existingCard._id,
             cardNumber: cardNumber
           };
         }
-        
+
         console.log(`🔄 User ${userId} replacing card #${existingCard.cardNumber} with #${cardNumber}`);
-        
-        await BingoCard.deleteOne({ 
-          _id: existingCard._id 
+
+        await BingoCard.deleteOne({
+          _id: existingCard._id
         }).session(session);
       }
 
@@ -2136,11 +2131,11 @@ static async restartNumberCallingIfNoWinner(gameId) {
       }], { session });
 
       await session.commitTransaction();
-      
+
       console.log(`✅ User ${user._id} selected card #${cardNumber} for ${game.code}`);
-      
+
       this.updateCardSelection(gameId, cardNumber, mongoUserId);
-      
+
       // Broadcast card selected
       this.broadcastToGame(gameId, {
         type: 'CARD_SELECTED',
@@ -2150,23 +2145,23 @@ static async restartNumberCallingIfNoWinner(gameId) {
         action: existingCard ? 'REPLACED' : 'SELECTED',
         timestamp: new Date().toISOString()
       }, [mongoUserId.toString()]);
-      
+
       // Broadcast taken cards update
       const takenCards = await this.getTakenCards(gameId);
       this.broadcastTakenCardsUpdate(gameId, takenCards);
-      
+
       if (game.status === 'WAITING_FOR_PLAYERS') {
         this.scheduleAutoStartCheck(gameId);
       }
 
-      return { 
-        success: true, 
+      return {
+        success: true,
         message: 'Card selected successfully',
         action: existingCard ? 'REPLACED' : 'CREATED',
         cardId: newCard[0]._id,
         cardNumber: cardNumber
       };
-      
+
     } catch (error) {
       await session.abortTransaction();
       console.error('❌ Select card error:', error);
@@ -2178,6 +2173,27 @@ static async restartNumberCallingIfNoWinner(gameId) {
 
   // ==================== HELPER METHODS ====================
 
+
+  static findWinningNumberPosition(cardNumbers, patternPositions, unmarkedInPattern, calledNumbers) {
+  // Find which called number completed the pattern by checking from most recent to oldest
+  for (let i = calledNumbers.length - 1; i >= 0; i--) {
+    const calledNumber = calledNumbers[i];
+    
+    // Check if this number is in any of the unmarked positions
+    for (const pos of unmarkedInPattern) {
+      if (cardNumbers[pos] === calledNumber) {
+        return {
+          winningPositionIndex: pos,
+          winningNumber: calledNumber,
+          calledAtIndex: i
+        };
+      }
+    }
+  }
+  
+  return null;
+}
+
   static async canPlayerJoinGame(gameId, userId) {
     try {
       let user;
@@ -2188,19 +2204,19 @@ static async restartNumberCallingIfNoWinner(gameId) {
       }
 
       if (!user) return true; // New users can always join
-      
+
       // Check if player is disqualified from this specific game
       const existingPlayer = await GamePlayer.findOne({
         gameId,
         userId: user._id,
         disqualified: true
       });
-      
+
       if (existingPlayer) {
         console.log(`⛔ Player ${userId} is disqualified from game ${gameId}`);
         return false;
       }
-      
+
       return true;
     } catch (error) {
       console.error('❌ Error checking player eligibility:', error);
@@ -2211,145 +2227,145 @@ static async restartNumberCallingIfNoWinner(gameId) {
 
   // ==================== ADD THIS NEW METHOD ====================
 
-static async processBingoClaimWithLock(gameId, userId, patternType = 'BINGO') {
-  const lockKey = `bingo_claim_${gameId}`;
-  const userSpecificLockKey = `bingo_claim_${gameId}_${userId}`;
-  
-  try {
-    // Check if this user already has a claim in progress
-    if (this.processingGames.has(userSpecificLockKey)) {
-      throw new Error('You already have a bingo claim in progress');
-    }
-    
-    this.processingGames.add(userSpecificLockKey);
-    
-    console.log(`🔐 [LOCK] Processing bingo claim for user ${userId} in game ${gameId}`);
-    
-    // Use the existing claimBingo method with timeout
-    const result = await Promise.race([
-      this.claimBingo(gameId, userId, patternType),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Bingo claim timeout - please try again')), 5000)
-      )
-    ]);
-    
-    return result;
-    
-  } finally {
-    // Clean up user-specific lock
-    this.processingGames.delete(userSpecificLockKey);
-  }
-}
+  static async processBingoClaimWithLock(gameId, userId, patternType = 'BINGO') {
+    const lockKey = `bingo_claim_${gameId}`;
+    const userSpecificLockKey = `bingo_claim_${gameId}_${userId}`;
 
-// Add this cleanup method
-static cleanupStaleLocks(gameId) {
-  const staleKeys = [];
-  const now = Date.now();
-  
-  // Clean up locks older than 30 seconds
-  for (const [key, timestamp] of this.processingGames.entries()) {
-    if (key.startsWith(`bingo_claim_${gameId}`) && now - timestamp > 30000) {
-      staleKeys.push(key);
+    try {
+      // Check if this user already has a claim in progress
+      if (this.processingGames.has(userSpecificLockKey)) {
+        throw new Error('You already have a bingo claim in progress');
+      }
+
+      this.processingGames.add(userSpecificLockKey);
+
+      console.log(`🔐 [LOCK] Processing bingo claim for user ${userId} in game ${gameId}`);
+
+      // Use the existing claimBingo method with timeout
+      const result = await Promise.race([
+        this.claimBingo(gameId, userId, patternType),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Bingo claim timeout - please try again')), 5000)
+        )
+      ]);
+
+      return result;
+
+    } finally {
+      // Clean up user-specific lock
+      this.processingGames.delete(userSpecificLockKey);
     }
   }
-  
-  staleKeys.forEach(key => {
-    this.processingGames.delete(key);
-    console.log(`🧹 Cleaned up stale lock: ${key}`);
-  });
-}
 
- // ==================== CRITICAL FIX: HANDLE BINGO CLAIM ====================
+  // Add this cleanup method
+  static cleanupStaleLocks(gameId) {
+    const staleKeys = [];
+    const now = Date.now();
 
-static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
-  try {
-    console.log(`📋 [QUEUE] Bingo claim from ${userId} for game ${gameId}, pattern: ${patternType}`);
-    
-    // CRITICAL: Check database first for existing winner
-    const existingWinnerInDB = await BingoCard.findOne({
-      gameId,
-      isWinner: true
+    // Clean up locks older than 30 seconds
+    for (const [key, timestamp] of this.processingGames.entries()) {
+      if (key.startsWith(`bingo_claim_${gameId}`) && now - timestamp > 30000) {
+        staleKeys.push(key);
+      }
+    }
+
+    staleKeys.forEach(key => {
+      this.processingGames.delete(key);
+      console.log(`🧹 Cleaned up stale lock: ${key}`);
     });
-    
-    if (existingWinnerInDB) {
-      console.log(`⚠️ Database shows existing winner: ${existingWinnerInDB.userId}`);
-      
-      // Sync in-memory state
-      this.winnerDeclared.add(gameId.toString());
-      
-      const winnerInfo = await this.getWinnerInfo(gameId);
-      throw new Error(`Winner already declared: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
-    }
-    
-    // Check in-memory state
-    if (this.winnerDeclared.has(gameId.toString())) {
-      // Verify with database
-      const dbCheck = await BingoCard.findOne({
+  }
+
+  // ==================== CRITICAL FIX: HANDLE BINGO CLAIM ====================
+
+  static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
+    try {
+      console.log(`📋 [QUEUE] Bingo claim from ${userId} for game ${gameId}, pattern: ${patternType}`);
+
+      // CRITICAL: Check database first for existing winner
+      const existingWinnerInDB = await BingoCard.findOne({
         gameId,
         isWinner: true
       });
-      
-      if (dbCheck) {
+
+      if (existingWinnerInDB) {
+        console.log(`⚠️ Database shows existing winner: ${existingWinnerInDB.userId}`);
+
+        // Sync in-memory state
+        this.winnerDeclared.add(gameId.toString());
+
         const winnerInfo = await this.getWinnerInfo(gameId);
         throw new Error(`Winner already declared: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
-      } else {
-        // In-memory state is stale, clear it
-        console.log(`🔄 Clearing stale in-memory winner state for ${gameId}`);
-        this.winnerDeclared.delete(gameId.toString());
       }
-    }
-    
-    // Check game status
-    const game = await Game.findById(gameId);
-    if (!game) {
-      throw new Error('Game not found');
-    }
-    
-    if (game.status !== 'ACTIVE') {
-      // Check if game actually has winner but status is wrong
-      const winningCard = await BingoCard.findOne({
-        gameId,
-        isWinner: true
-      });
-      
-      if (winningCard) {
-        // Fix game status
-        game.status = 'FINISHED';
-        game.winnerId = winningCard.userId;
-        game.endedAt = game.endedAt || new Date();
-        await game.save();
-        
-        this.winnerDeclared.add(gameId.toString());
-        
-        const winnerInfo = await this.getWinnerInfo(gameId);
-        throw new Error(`Game finished. Winner: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
-      }
-      
-      throw new Error(`Game is not active (status: ${game.status})`);
-    }
-    
-    // Process with user-specific lock
-    return await this.processBingoClaimWithLock(gameId, userId, patternType);
-    
-  } catch (error) {
-    console.error('❌ Bingo claim queue error:', error);
-    
-    // If it's a lock timeout, send a specific message
-    if (error.message.includes('timeout') || error.message.includes('Another bingo claim')) {
-      // Send WebSocket message to user
-      if (this.webSocketService) {
-        this.sendToUser(userId, {
-          type: 'BINGO_CLAIM_BUSY',
-          gameId: gameId,
-          message: 'The system is processing bingo claims. Please try again in a moment.',
-          timestamp: new Date().toISOString()
+
+      // Check in-memory state
+      if (this.winnerDeclared.has(gameId.toString())) {
+        // Verify with database
+        const dbCheck = await BingoCard.findOne({
+          gameId,
+          isWinner: true
         });
+
+        if (dbCheck) {
+          const winnerInfo = await this.getWinnerInfo(gameId);
+          throw new Error(`Winner already declared: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
+        } else {
+          // In-memory state is stale, clear it
+          console.log(`🔄 Clearing stale in-memory winner state for ${gameId}`);
+          this.winnerDeclared.delete(gameId.toString());
+        }
       }
+
+      // Check game status
+      const game = await Game.findById(gameId);
+      if (!game) {
+        throw new Error('Game not found');
+      }
+
+      if (game.status !== 'ACTIVE') {
+        // Check if game actually has winner but status is wrong
+        const winningCard = await BingoCard.findOne({
+          gameId,
+          isWinner: true
+        });
+
+        if (winningCard) {
+          // Fix game status
+          game.status = 'FINISHED';
+          game.winnerId = winningCard.userId;
+          game.endedAt = game.endedAt || new Date();
+          await game.save();
+
+          this.winnerDeclared.add(gameId.toString());
+
+          const winnerInfo = await this.getWinnerInfo(gameId);
+          throw new Error(`Game finished. Winner: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
+        }
+
+        throw new Error(`Game is not active (status: ${game.status})`);
+      }
+
+      // Process with user-specific lock
+      return await this.processBingoClaimWithLock(gameId, userId, patternType);
+
+    } catch (error) {
+      console.error('❌ Bingo claim queue error:', error);
+
+      // If it's a lock timeout, send a specific message
+      if (error.message.includes('timeout') || error.message.includes('Another bingo claim')) {
+        // Send WebSocket message to user
+        if (this.webSocketService) {
+          this.sendToUser(userId, {
+            type: 'BINGO_CLAIM_BUSY',
+            gameId: gameId,
+            message: 'The system is processing bingo claims. Please try again in a moment.',
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+
+      throw error;
     }
-    
-    throw error;
   }
-}
 
 
 
@@ -2357,11 +2373,11 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
   static async disqualifyPlayer(gameId, userId, session, details = {}) {
     try {
       console.log(`⛔ Disqualifying player ${userId} from game ${gameId}`);
-      
+
       // Mark player as disqualified in GamePlayer
       await GamePlayer.findOneAndUpdate(
         { gameId, userId },
-        { 
+        {
           disqualified: true,
           disqualifiedAt: new Date(),
           disqualificationReason: details.reason || 'False bingo claim',
@@ -2369,7 +2385,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         },
         { session, upsert: true }
       );
-      
+
       // Mark all cards from this player in this game as disqualified
       await BingoCard.updateMany(
         { gameId, userId },
@@ -2380,7 +2396,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         },
         { session }
       );
-      
+
       // Add to disqualified claims tracker
       const claimKey = `${gameId}_${userId}`;
       this.bingoClaims.set(claimKey, {
@@ -2389,9 +2405,9 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         isDisqualified: true,
         details
       });
-      
+
       console.log(`✅ Player ${userId} disqualified from game ${gameId}`);
-      
+
     } catch (error) {
       console.error('❌ Error disqualifying player:', error);
       throw error;
@@ -2401,32 +2417,32 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
   static clearBingoClaimsForGame(gameId) {
     const gameIdStr = gameId.toString();
     const keysToDelete = [];
-    
+
     for (const [key, value] of this.bingoClaims.entries()) {
       if (key.startsWith(gameIdStr + '_')) {
         keysToDelete.push(key);
       }
     }
-    
+
     keysToDelete.forEach(key => this.bingoClaims.delete(key));
     console.log(`🧹 Cleared ${keysToDelete.length} bingo claims for game ${gameId}`);
   }
 
   static updateCardSelection(gameId, cardNumber, userId) {
     const gameIdStr = gameId.toString();
-    
+
     if (!this.selectedCards.has(gameIdStr)) {
       this.selectedCards.set(gameIdStr, new Map());
     }
-    
+
     const gameCards = this.selectedCards.get(gameIdStr);
-    
+
     for (const [existingCardNumber, data] of gameCards.entries()) {
       if (data.userId.toString() === userId.toString()) {
         gameCards.delete(existingCardNumber);
       }
     }
-    
+
     gameCards.set(cardNumber, {
       userId: userId,
       selectedAt: new Date()
@@ -2436,15 +2452,15 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
   static async scheduleAutoStartCheck(gameId) {
     const game = await Game.findById(gameId);
     if (!game || game.status !== 'WAITING_FOR_PLAYERS') return;
-    
+
     const playersWithCards = await BingoCard.countDocuments({ gameId });
-    
+
     if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
       console.log(`✅ Conditions met for auto-start: ${playersWithCards} players`);
       await this.beginCardSelection(gameId);
     } else {
       console.log(`⏳ Waiting for players: ${playersWithCards}/${this.MIN_PLAYERS_TO_START}`);
-      
+
       setTimeout(() => {
         this.scheduleAutoStartCheck(gameId);
       }, 5000);
@@ -2455,7 +2471,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
   static async getAvailableCards(gameId, userId, count = 400) {
     const cards = [];
-    
+
     for (let i = 0; i < count; i++) {
       const cardNumbers = GameUtils.generateBingoCard(i + 1);
       cards.push({
@@ -2464,18 +2480,18 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         preview: this.formatCardForPreview(cardNumbers)
       });
     }
-    
+
     return cards;
   }
 
   static formatCardForPreview(cardNumbers) {
     const letters = ['B', 'I', 'N', 'G', 'O'];
     const preview = {};
-    
+
     for (let i = 0; i < 5; i++) {
       preview[letters[i]] = cardNumbers[i];
     }
-    
+
     return preview;
   }
 
@@ -2487,16 +2503,16 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
       } else {
         user = await User.findOne({ telegramId: userId });
       }
-      
+
       if (!user) {
         return null;
       }
-      
+
       const query = { gameId, userId: user._id };
-      
+
       const bingoCard = await BingoCard.findOne(query)
         .populate('userId', 'username firstName telegramId');
-      
+
       return bingoCard;
     } catch (error) {
       console.error('❌ Error in getUserBingoCard:', error);
@@ -2530,29 +2546,29 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
       this.stopAutoNumberCalling(gameId);
 
       const game = await Game.findById(gameId).session(session);
-      
+
       if (!game || game.status !== 'ACTIVE') {
         throw new Error('Game not active');
       }
 
       const bingoCards = await BingoCard.find({ gameId }).session(session);
-      
+
       const now = new Date();
       const cooldownEndTime = new Date(now.getTime() + this.GAME_RESTART_COOLDOWN);
-      
+
       game.status = 'COOLDOWN';
       game.endedAt = now;
       game.cooldownEndTime = cooldownEndTime;
       await game.save({ session });
 
       console.log(`💰 Refunding ${bingoCards.length} players due to game cancellation...`);
-      
+
       const WalletService = require('./walletService');
-      
+
       for (const card of bingoCards) {
         try {
           const user = await User.findById(card.userId).session(session);
-          
+
           if (user && user.telegramId) {
             await WalletService.addWinning(
               user.telegramId,
@@ -2591,7 +2607,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
       }, this.GAME_RESTART_COOLDOWN);
 
       return this.getGameWithDetails(gameId);
-      
+
     } catch (error) {
       await session.abortTransaction();
       console.error('❌ End game error:', error);
@@ -2613,8 +2629,8 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         throw new Error('Game not found');
       }
 
-      const existingReconciliation = await Reconciliation.findOne({ 
-        gameId, 
+      const existingReconciliation = await Reconciliation.findOne({
+        gameId,
         status: 'DEDUCTED'
       }).session(session);
 
@@ -2626,7 +2642,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
       const bingoCards = await BingoCard.find({ gameId }).session(session);
       const WalletService = require('./walletService');
-      
+
       const reconciliation = new Reconciliation({
         gameId: game._id,
         status: 'DEDUCTED',
@@ -2638,13 +2654,13 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
       });
 
       const userCardsMap = new Map();
-      
+
       for (const card of bingoCards) {
         const user = await User.findById(card.userId).session(session);
         if (!user || !user.telegramId) continue;
-        
+
         const telegramId = user.telegramId;
-        
+
         if (!userCardsMap.has(telegramId)) {
           userCardsMap.set(telegramId, {
             userId: user._id,
@@ -2653,13 +2669,13 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
             totalAmount: 0
           });
         }
-        
+
         const userData = userCardsMap.get(telegramId);
         userData.cards.push(card.cardNumber);
       }
 
       let successfullyCharged = 0;
-      
+
       for (const [telegramId, userData] of userCardsMap.entries()) {
         const existingPayment = await Transaction.findOne({
           userId: userData.userId,
@@ -2667,10 +2683,10 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
           type: 'GAME_ENTRY',
           status: 'COMPLETED'
         }).session(session);
-        
+
         if (existingPayment) {
           console.log(`✅ User ${telegramId} already paid for ${game.code}`);
-          
+
           reconciliation.transactions.push({
             userId: userData.userId,
             type: 'ENTRY_FEE',
@@ -2681,12 +2697,12 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
           });
           continue;
         }
-        
+
         const balance = await WalletService.getBalance(telegramId);
-        
+
         if (balance < this.ENTRY_FEE) {
           console.log(`❌ User ${telegramId} insufficient balance: $${balance}`);
-          
+
           reconciliation.transactions.push({
             userId: userData.userId,
             type: 'ENTRY_FEE',
@@ -2697,7 +2713,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
           });
           continue;
         }
-        
+
         try {
           const result = await WalletService.deductGameEntry(
             telegramId,
@@ -2705,10 +2721,10 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
             this.ENTRY_FEE,
             `Entry fee for game ${game.code}`
           );
-          
+
           successfullyCharged++;
           userData.totalAmount += this.ENTRY_FEE;
-          
+
           reconciliation.transactions.push({
             userId: userData.userId,
             type: 'ENTRY_FEE',
@@ -2717,12 +2733,12 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
             transactionId: result.transaction._id,
             cardNumbers: userData.cards
           });
-          
+
           console.log(`✅ Charged $${this.ENTRY_FEE} to ${telegramId} for ${game.code}`);
-          
+
         } catch (error) {
           console.error(`❌ Failed to charge ${telegramId}:`, error.message);
-          
+
           reconciliation.transactions.push({
             userId: userData.userId,
             type: 'ENTRY_FEE',
@@ -2736,7 +2752,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
       reconciliation.totalPot = successfullyCharged * this.ENTRY_FEE;
       reconciliation.debitTotal = reconciliation.totalPot;
-      
+
       reconciliation.addAudit('ENTRY_FEES_PROCESSED', {
         gameCode: game.code,
         uniqueUsersAttempted: userCardsMap.size,
@@ -2744,14 +2760,14 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         totalPot: reconciliation.totalPot,
         timestamp: new Date()
       });
-      
+
       await reconciliation.save({ session });
       await session.commitTransaction();
-      
+
       console.log(`💰 Entry fees for ${game.code}: ${successfullyCharged}/${userCardsMap.size} users charged. Total: $${reconciliation.totalPot}`);
-      
+
       return { success: true, reconciliation };
-      
+
     } catch (error) {
       await session.abortTransaction();
       console.error('❌ Error processing entry fees:', error);
@@ -2765,7 +2781,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
   static async endGameDueToNoWinner(gameId) {
     const lockKey = `no_winner_${gameId}`;
-    
+
     if (this.processingGames.has(lockKey)) {
       console.log(`⏳ Game ${gameId} already being processed for no-winner ending`);
       return;
@@ -2773,9 +2789,9 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
     try {
       this.processingGames.add(lockKey);
-      
+
       const game = await Game.findById(gameId);
-      
+
       if (!game) {
         console.log(`⚠️ Game ${gameId} not found`);
         return;
@@ -2783,16 +2799,16 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
       if (game.winnerId) {
         console.log(`✅ Game ${game.code} already has winner ${game.winnerId}`);
-        
+
         if (game.status !== 'FINISHED') {
           game.status = 'FINISHED';
           game.endedAt = game.endedAt || new Date();
           await game.save();
         }
-        
+
         this.winnerDeclared.add(gameId.toString());
         this.stopAutoNumberCalling(gameId);
-        
+
         // IMPORTANT: Start new game immediately
         await this.createNewGameAfterCooldown(game._id);
         return;
@@ -2809,13 +2825,13 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
       }
 
       console.log(`🏁 Ending game ${game.code} - no winner after ALL 75 numbers`);
-      
+
       const session = await mongoose.startSession();
       session.startTransaction();
 
       try {
         const gameInSession = await Game.findById(gameId).session(session);
-        
+
         if (!gameInSession) {
           await session.abortTransaction();
           return;
@@ -2826,55 +2842,55 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
           gameInSession.status = 'FINISHED';
           gameInSession.endedAt = gameInSession.endedAt || new Date();
           await gameInSession.save({ session });
-          
+
           await session.commitTransaction();
-          
+
           this.winnerDeclared.add(gameId.toString());
           this.stopAutoNumberCalling(gameId);
-          
+
           // IMPORTANT: Start new game immediately
           await this.createNewGameAfterCooldown(game._id);
           return;
         }
 
-        const existingReconciliation = await Reconciliation.findOne({ 
+        const existingReconciliation = await Reconciliation.findOne({
           gameId: gameInSession._id,
           status: 'NO_WINNER_REFUNDED'
         }).session(session);
-        
+
         if (existingReconciliation) {
           console.log(`✅ Refunds already processed for ${gameInSession.code}`);
-          
+
           if (gameInSession.status !== 'NO_WINNER') {
             gameInSession.status = 'NO_WINNER';
             gameInSession.endedAt = gameInSession.endedAt || new Date();
             await gameInSession.save({ session });
           }
-          
+
           await session.commitTransaction();
-          
+
           // IMPORTANT: Start new game immediately
           await this.createNewGameAfterCooldown(game._id);
           return;
         }
 
         const bingoCards = await BingoCard.find({ gameId: gameInSession._id }).session(session);
-        
-        const winningCard = await BingoCard.findOne({ 
-          gameId: gameInSession._id, 
-          isWinner: true 
+
+        const winningCard = await BingoCard.findOne({
+          gameId: gameInSession._id,
+          isWinner: true
         }).session(session);
-        
+
         if (winningCard) {
           console.log(`✅ Found winning card for ${gameInSession.code}`);
-          
+
           gameInSession.status = 'FINISHED';
           gameInSession.winnerId = winningCard.userId;
           gameInSession.endedAt = gameInSession.endedAt || new Date();
           await gameInSession.save({ session });
-          
+
           await session.commitTransaction();
-          
+
           this.winnerDeclared.add(gameId.toString());
           this.stopAutoNumberCalling(gameId);
           await this.setNextGameCountdown(gameId);
@@ -2882,18 +2898,18 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         }
 
         console.log(`💰 Processing refunds for ${bingoCards.length} cards...`);
-        
+
         const WalletService = require('./walletService');
-        
+
         const userCardsMap = new Map();
         let refundTransactions = [];
-        
+
         for (const card of bingoCards) {
           const user = await User.findById(card.userId).session(session);
           if (!user || !user.telegramId) continue;
-          
+
           const telegramId = user.telegramId;
-          
+
           if (!userCardsMap.has(telegramId)) {
             userCardsMap.set(telegramId, {
               userId: user._id,
@@ -2902,7 +2918,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
               totalRefund: 0
             });
           }
-          
+
           const userData = userCardsMap.get(telegramId);
           userData.cards.push(card.cardNumber);
         }
@@ -2915,14 +2931,14 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
             description: { $regex: `Refund.*game.*${gameInSession.code}` },
             status: 'COMPLETED'
           }).session(session);
-          
+
           if (existingRefund) {
             console.log(`✅ User ${telegramId} already refunded for ${gameInSession.code}`);
             continue;
           }
-          
+
           const refundAmount = this.ENTRY_FEE;
-          
+
           try {
             await WalletService.addWinning(
               telegramId,
@@ -2930,9 +2946,9 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
               refundAmount,
               `Refund - No winner in game ${gameInSession.code}`
             );
-            
+
             userData.totalRefund = refundAmount;
-            
+
             refundTransactions.push({
               userId: userData.userId,
               type: 'REFUND',
@@ -2940,12 +2956,12 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
               status: 'COMPLETED',
               telegramId: telegramId
             });
-            
+
             console.log(`✅ Refunded $${refundAmount} to ${telegramId}`);
-            
+
           } catch (error) {
             console.error(`❌ Failed to refund ${telegramId}:`, error.message);
-            
+
             refundTransactions.push({
               userId: userData.userId,
               type: 'REFUND',
@@ -2958,14 +2974,14 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         }
 
         const now = new Date();
-        
+
         gameInSession.status = 'NO_WINNER';
         gameInSession.endedAt = now;
         gameInSession.refunded = true;
         gameInSession.refundedAt = now;
-        
+
         await gameInSession.save({ session });
-        
+
         // Create reconciliation record
         const reconciliation = new Reconciliation({
           gameId: gameInSession._id,
@@ -2977,12 +2993,12 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
           creditTotal: 0,
           completedAt: now
         });
-        
+
         await reconciliation.save({ session });
         await session.commitTransaction();
-        
+
         console.log(`✅ Game ${gameInSession.code} ended as NO_WINNER`);
-        
+
         // Broadcast no winner
         this.broadcastToGame(gameId, {
           type: 'NO_WINNER',
@@ -2992,10 +3008,10 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
           endedAt: now.toISOString(),
           timestamp: new Date().toISOString()
         });
-        
+
         this.winnerDeclared.add(gameId.toString());
         this.stopAutoNumberCalling(gameId);
-        
+
         // IMPORTANT: Create new game immediately (no cooldown)
         console.log(`🔄 Creating new game after ${gameInSession.code} ended`);
         await this.createNewGameAfterCooldown(game._id);
@@ -3005,14 +3021,14 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         if (session && session.inTransaction()) {
           await session.abortTransaction();
         }
-        
+
         // Even on error, try to create new game
         try {
           await this.createNewGameAfterCooldown(game._id);
         } catch (createError) {
           console.error('❌ Failed to create new game after error:', createError);
         }
-        
+
         throw error;
       } finally {
         if (session) {
@@ -3022,14 +3038,14 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
     } catch (error) {
       console.error('❌ Error in endGameDueToNoWinner:', error);
-      
+
       // Try to create new game anyway
       try {
         await this.createNewGameAfterCooldown(gameId);
       } catch (createError) {
         console.error('❌ Failed to create new game after endGameDueToNoWinner error:', createError);
       }
-      
+
       throw error;
     } finally {
       this.processingGames.delete(lockKey);
@@ -3041,7 +3057,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
   static async setNextGameCountdown(gameId) {
     try {
       const game = await Game.findById(gameId);
-      
+
       if (!game) {
         console.log(`⚠️ Game ${gameId} not found, creating new game`);
         return await this.createNewGame();
@@ -3049,39 +3065,39 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
       if (game.status !== 'FINISHED' && game.status !== 'NO_WINNER') {
         console.log(`⚠️ Game ${game.code} not finished (${game.status}), checking for active game`);
-        
+
         // Check if there's already an active/waiting game
         const activeGame = await Game.findOne({
           status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
           archived: { $ne: true },
           _id: { $ne: gameId }
         });
-        
+
         if (activeGame) {
           console.log(`✅ Active game exists: ${activeGame.code}`);
           return activeGame;
         }
-        
+
         // No active game, create new one
         return await this.createNewGame();
       }
 
       console.log(`🔄 Setting up next game after ${game.code}...`);
-      
+
       // Archive the finished game immediately
       game.archived = true;
       game.archivedAt = new Date();
       game.archivedReason = 'Game finished - preparing for new game';
       await game.save();
-      
+
       console.log(`📦 Archived finished game ${game.code}`);
-      
+
       // Create new game immediately (no cooldown wait)
       return await this.createNewGameAfterCooldown(gameId);
-      
+
     } catch (error) {
       console.error('❌ Error setting next game countdown:', error);
-      
+
       // Try to create new game anyway
       try {
         return await this.createNewGame();
@@ -3094,46 +3110,46 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
   // ==================== GAME QUERIES & UTILITIES ====================
 
- static async getActiveGames() {
-  try {
-    // Use the same logic as getMainGame but return array
-    await this.enforceSingleGameAtomic();
-    
-    const games = await Game.find({
-      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
-      archived: { $ne: true }
-    })
-    .sort({ 
-      status: 1,
-      createdAt: -1 
-    })
-    .limit(1); // Only return 1 game maximum
-    
-    console.log(`🔍 GET /api/games/active: Found ${games.length} games`);
-    
-    if (games.length === 0) {
-      // No active game - check if we need to create one
-      const finishedGame = await Game.findOne({
-        status: { $in: ['FINISHED', 'NO_WINNER'] },
+  static async getActiveGames() {
+    try {
+      // Use the same logic as getMainGame but return array
+      await this.enforceSingleGameAtomic();
+
+      const games = await Game.find({
+        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
         archived: { $ne: true }
-      }).sort({ endedAt: -1 });
-      
-      if (finishedGame) {
-        console.log(`🔄 Auto-creating new game after finished game`);
-        const newGame = await this.createNewGameAfterCooldown(finishedGame._id);
-        return [await this.formatGameForFrontend(newGame)];
+      })
+        .sort({
+          status: 1,
+          createdAt: -1
+        })
+        .limit(1); // Only return 1 game maximum
+
+      console.log(`🔍 GET /api/games/active: Found ${games.length} games`);
+
+      if (games.length === 0) {
+        // No active game - check if we need to create one
+        const finishedGame = await Game.findOne({
+          status: { $in: ['FINISHED', 'NO_WINNER'] },
+          archived: { $ne: true }
+        }).sort({ endedAt: -1 });
+
+        if (finishedGame) {
+          console.log(`🔄 Auto-creating new game after finished game`);
+          const newGame = await this.createNewGameAfterCooldown(finishedGame._id);
+          return [await this.formatGameForFrontend(newGame)];
+        }
+
+        return [];
       }
-      
+
+      return [await this.formatGameForFrontend(games[0])];
+
+    } catch (error) {
+      console.error('❌ Error in getActiveGames:', error);
       return [];
     }
-    
-    return [await this.formatGameForFrontend(games[0])];
-    
-  } catch (error) {
-    console.error('❌ Error in getActiveGames:', error);
-    return [];
   }
-}
 
   static async getWaitingGames() {
     try {
@@ -3141,12 +3157,12 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         status: 'WAITING_FOR_PLAYERS',
         archived: { $ne: true }
       })
-      .sort({ createdAt: -1 })
-      .limit(10)
-      .lean();
-      
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean();
+
       console.log(`✅ Found ${games.length} waiting games`);
-      
+
       const now = new Date();
       const formattedGames = games.map(game => {
         const gameObj = {
@@ -3154,17 +3170,17 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
           _id: game._id.toString(),
           message: 'Waiting for players to join...'
         };
-        
+
         if (game.autoStartEndTime && game.autoStartEndTime > now) {
           gameObj.autoStartTimeRemaining = game.autoStartEndTime - now;
           gameObj.hasAutoStartTimer = true;
         }
-        
+
         return gameObj;
       });
-      
+
       return formattedGames;
-      
+
     } catch (error) {
       console.error('❌ Error in getWaitingGames:', error);
       return [];
@@ -3173,14 +3189,14 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
   static async formatGameForFrontend(game) {
     if (!game) return null;
-    
+
     const gameObj = game.toObject ? game.toObject() : { ...game };
     const now = new Date();
-    
+
     if (gameObj.status === 'WAITING') {
       gameObj.status = 'WAITING_FOR_PLAYERS';
     }
-    
+
     switch (gameObj.status) {
       case 'WAITING_FOR_PLAYERS':
         gameObj.message = 'Waiting for players to join...';
@@ -3189,7 +3205,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
           gameObj.hasAutoStartTimer = true;
         }
         break;
-        
+
       case 'CARD_SELECTION':
         gameObj.message = 'Select your bingo card!';
         if (gameObj.cardSelectionEndTime) {
@@ -3197,18 +3213,18 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
           gameObj.hasCardSelectionTimer = true;
         }
         break;
-        
+
       case 'ACTIVE':
         gameObj.message = 'Game in progress!';
         if (!gameObj.startedAt) {
           gameObj.startedAt = new Date();
         }
         break;
-        
+
       case 'FINISHED':
         gameObj.message = gameObj.noWinner ? 'Game ended - No winner (All refunded)' : 'Game finished!';
         break;
-        
+
       case 'NO_WINNER':
         gameObj.message = 'Next game starting soon...';
         if (gameObj.cooldownEndTime && gameObj.cooldownEndTime > now) {
@@ -3216,17 +3232,17 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         }
         break;
     }
-    
+
     const bingoCards = await BingoCard.find({ gameId: gameObj._id });
     const playersWithCards = bingoCards.length;
-    
+
     gameObj.playersWithCards = playersWithCards;
     gameObj.cardsNeeded = Math.max(0, this.MIN_PLAYERS_TO_START - playersWithCards);
-    
-    gameObj.canSelectCard = gameObj.status === 'WAITING_FOR_PLAYERS' || 
-                          gameObj.status === 'CARD_SELECTION';
+
+    gameObj.canSelectCard = gameObj.status === 'WAITING_FOR_PLAYERS' ||
+      gameObj.status === 'CARD_SELECTION';
     gameObj.canJoin = gameObj.status === 'WAITING_FOR_PLAYERS';
-    
+
     return gameObj;
   }
 
@@ -3256,9 +3272,9 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
     try {
       const game = await Game.findById(gameId);
       if (!game) return null;
-      
+
       const currentState = this.gameStates.get(gameId.toString());
-      
+
       return {
         gameId: game._id,
         status: game.status,
@@ -3282,9 +3298,9 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         cardNumber: card.cardNumber,
         userId: card.userId
       }));
-      
+
       console.log(`📊 Taken cards: ${takenCards.length}`);
-      
+
       return takenCards;
     } catch (error) {
       console.error('❌ Get taken cards error:', error);
@@ -3296,7 +3312,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
   static clearAutoStartTimer(gameId) {
     const gameIdStr = gameId.toString();
-    
+
     if (this.autoStartTimers.has(gameIdStr)) {
       const timerInfo = this.autoStartTimers.get(gameIdStr);
       clearTimeout(timerInfo.timer);
@@ -3307,126 +3323,126 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
   // ==================== SERVICE MANAGEMENT ====================
 
   static startAutoGameService() {
-  this.cleanupAllIntervals();
-  
-  // Check for existing game every 10 seconds
-  const gameCheckInterval = setInterval(async () => {
-    try {
-      await this.ensureActiveGameExists();
-    } catch (error) {
-      console.error('❌ Game service error:', error);
-    }
-  }, 10000);
-  
-  // Clean up stuck games every 30 seconds
-  const cleanupInterval = setInterval(async () => {
-    try {
-      await this.cleanupStuckGames();
-      await this.manageGameLifecycle();
-    } catch (error) {
-      console.error('❌ Cleanup service error:', error);
-    }
-  }, 30000);
+    this.cleanupAllIntervals();
 
-  console.log('🚀 Game Service Started');
-  
-  // Initial setup
-  setTimeout(async () => {
-    try {
-      await this.ensureActiveGameExists();
-      await this.cleanupStuckGames();
-    } catch (error) {
-      console.error('❌ Initial game setup failed:', error);
-    }
-  }, 2000);
+    // Check for existing game every 10 seconds
+    const gameCheckInterval = setInterval(async () => {
+      try {
+        await this.ensureActiveGameExists();
+      } catch (error) {
+        console.error('❌ Game service error:', error);
+      }
+    }, 10000);
 
-  return { gameCheckInterval, cleanupInterval };
-}
+    // Clean up stuck games every 30 seconds
+    const cleanupInterval = setInterval(async () => {
+      try {
+        await this.cleanupStuckGames();
+        await this.manageGameLifecycle();
+      } catch (error) {
+        console.error('❌ Cleanup service error:', error);
+      }
+    }, 30000);
+
+    console.log('🚀 Game Service Started');
+
+    // Initial setup
+    setTimeout(async () => {
+      try {
+        await this.ensureActiveGameExists();
+        await this.cleanupStuckGames();
+      } catch (error) {
+        console.error('❌ Initial game setup failed:', error);
+      }
+    }, 2000);
+
+    return { gameCheckInterval, cleanupInterval };
+  }
 
   static async ensureActiveGameExists() {
-  const lockKey = 'ensure_active_game';
-  
-  if (this.processingGames.has(lockKey)) {
-    return;
-  }
+    const lockKey = 'ensure_active_game';
 
-  try {
-    this.processingGames.add(lockKey);
-    
-    console.log('🔍 ensureActiveGameExists() - Checking...');
-    
-    // First, clean up any duplicates
-    await this.enforceSingleGameAtomic();
-    
-    // Check for existing game
-    const existingGame = await Game.findOne({
-      status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
-      archived: { $ne: true }
-    });
-    
-    if (existingGame) {
-      console.log(`✅ Game exists: ${existingGame.code} (${existingGame.status})`);
-      
-      // Handle stuck states
-      if (existingGame.status === 'CARD_SELECTION' && existingGame.cardSelectionEndTime) {
-        const now = new Date();
-        if (existingGame.cardSelectionEndTime <= now) {
-          console.log(`🔄 Game ${existingGame.code} has expired card selection`);
-          await this.checkCardSelectionEnd(existingGame._id);
+    if (this.processingGames.has(lockKey)) {
+      return;
+    }
+
+    try {
+      this.processingGames.add(lockKey);
+
+      console.log('🔍 ensureActiveGameExists() - Checking...');
+
+      // First, clean up any duplicates
+      await this.enforceSingleGameAtomic();
+
+      // Check for existing game
+      const existingGame = await Game.findOne({
+        status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
+        archived: { $ne: true }
+      });
+
+      if (existingGame) {
+        console.log(`✅ Game exists: ${existingGame.code} (${existingGame.status})`);
+
+        // Handle stuck states
+        if (existingGame.status === 'CARD_SELECTION' && existingGame.cardSelectionEndTime) {
+          const now = new Date();
+          if (existingGame.cardSelectionEndTime <= now) {
+            console.log(`🔄 Game ${existingGame.code} has expired card selection`);
+            await this.checkCardSelectionEnd(existingGame._id);
+          }
         }
+
+        return;
       }
-      
-      return;
+
+      // No game exists - check for finished games
+      const finishedGame = await Game.findOne({
+        status: { $in: ['FINISHED', 'NO_WINNER'] },
+        archived: { $ne: true }
+      }).sort({ endedAt: -1 });
+
+      if (finishedGame) {
+        console.log(`🔄 Creating new game after finished: ${finishedGame.code}`);
+        await this.createNewGameAfterCooldown(finishedGame._id);
+        return;
+      }
+
+      // Create brand new game
+      console.log('🎮 Creating brand new game...');
+      await this.createNewGame();
+
+    } catch (error) {
+      console.error('❌ Error ensuring active game exists:', error);
+    } finally {
+      this.processingGames.delete(lockKey);
     }
-    
-    // No game exists - check for finished games
-    const finishedGame = await Game.findOne({
-      status: { $in: ['FINISHED', 'NO_WINNER'] },
-      archived: { $ne: true }
-    }).sort({ endedAt: -1 });
-    
-    if (finishedGame) {
-      console.log(`🔄 Creating new game after finished: ${finishedGame.code}`);
-      await this.createNewGameAfterCooldown(finishedGame._id);
-      return;
-    }
-    
-    // Create brand new game
-    console.log('🎮 Creating brand new game...');
-    await this.createNewGame();
-    
-  } catch (error) {
-    console.error('❌ Error ensuring active game exists:', error);
-  } finally {
-    this.processingGames.delete(lockKey);
   }
-}
 
   static async manageGameLifecycle() {
     try {
       const now = new Date();
-      
+
       const expiredCardSelectionGames = await Game.find({
         status: 'CARD_SELECTION',
         cardSelectionEndTime: { $lte: now },
         archived: { $ne: true }
       });
-      
+
       for (const game of expiredCardSelectionGames) {
         console.log(`⏰ Found expired card selection game: ${game.code}`);
         await this.checkCardSelectionEnd(game._id);
       }
-      
+
       const expiredCooldownGames = await Game.find({
         status: 'COOLDOWN',
         cooldownEndTime: { $lte: now },
         archived: { $ne: true }
       });
-      
+
       if (expiredCooldownGames.length > 0) {
         console.log(`🔄 ${expiredCooldownGames.length} cooldown games expired`);
       }
-      
+
     } catch (error) {
       console.error('❌ Error managing game lifecycle:', error);
     }
@@ -3455,7 +3471,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
     try {
       const game = await Game.findOne({ code: gameCode, archived: { $ne: true } }).session(session);
-      
+
       if (!game) {
         throw new Error('Game not found');
       }
@@ -3463,7 +3479,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
       if (game.status !== 'WAITING_FOR_PLAYERS') {
         throw new Error('Game is not accepting new players');
       }
-      
+
       // Check if player is disqualified from this game
       const canJoin = await this.canPlayerJoinGame(game._id, userId);
       if (!canJoin) {
@@ -3489,11 +3505,11 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
       const mongoUserId = user._id;
 
-      const existingPlayer = await GamePlayer.findOne({ 
-        userId: mongoUserId, 
-        gameId: game._id 
+      const existingPlayer = await GamePlayer.findOne({
+        userId: mongoUserId,
+        gameId: game._id
       }).session(session);
-      
+
       if (existingPlayer) {
         await session.commitTransaction();
         return this.getGameWithDetails(game._id);
@@ -3514,16 +3530,16 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
       game.currentPlayers += 1;
       game.updatedAt = new Date();
-      
+
       if (game.currentPlayers >= this.MIN_PLAYERS_TO_START) {
         this.scheduleAutoStartCheck(game._id);
       }
-      
+
       await game.save({ session });
       await session.commitTransaction();
 
       console.log(`✅ User ${userId} joined ${game.code}. Total: ${game.currentPlayers}`);
-      
+
       // Broadcast user joined
       this.broadcastToGame(game._id, {
         type: 'USER_JOINED',
@@ -3535,7 +3551,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
       }, [mongoUserId.toString()]);
 
       return this.getGameWithDetails(game._id);
-      
+
     } catch (error) {
       await session.abortTransaction();
       console.error('❌ Join game error:', error);
@@ -3552,7 +3568,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
     try {
       const WalletService = require('./walletService');
       const balance = await WalletService.getBalance(userId);
-      
+
       if (balance < entryFee) {
         throw new Error(`Insufficient balance. Required: $${entryFee}, Available: $${balance}`);
       }
@@ -3586,7 +3602,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
     }
 
     const mongoUserId = user._id;
-    
+
     const game = await Game.findById(gameId);
     if (!game) {
       throw new Error('Game not found');
@@ -3596,14 +3612,14 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
     await BingoCard.deleteOne({ gameId, userId: mongoUserId });
 
     game.currentPlayers = Math.max(0, game.currentPlayers - 1);
-    
+
     if (game.currentPlayers === 0) {
       game.status = 'CANCELLED';
       game.endedAt = new Date();
     }
-    
+
     await game.save();
-    
+
     // Broadcast user left
     this.broadcastToGame(gameId, {
       type: 'USER_LEFT',
@@ -3613,7 +3629,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
       currentPlayers: game.currentPlayers,
       timestamp: new Date().toISOString()
     });
-    
+
     return this.getGameWithDetails(game._id);
   }
 
@@ -3630,7 +3646,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
     }
 
     const mongoUserId = user._id;
-    
+
     const bingoCard = await BingoCard.findOne({ gameId, userId: mongoUserId });
     if (!bingoCard) {
       throw new Error('Bingo card not found');
@@ -3665,7 +3681,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
     await bingoCard.save();
 
     console.log(`✅ User ${userId} marked number ${number} on card`);
-    
+
     // Broadcast number marked
     this.sendToUser(userId, {
       type: 'NUMBER_MARKED',
@@ -3676,8 +3692,8 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
       timestamp: new Date().toISOString()
     });
 
-    return { 
-      bingoCard, 
+    return {
+      bingoCard,
       isMarked: true,
       markedCount: bingoCard.markedPositions.length
     };
@@ -3696,7 +3712,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
     }
 
     const mongoUserId = user._id;
-    
+
     const bingoCard = await BingoCard.findOne({ gameId, userId: mongoUserId });
     if (!bingoCard) {
       throw new Error('Bingo card not found');
@@ -3708,15 +3724,15 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
     }
 
     const numbers = bingoCard.numbers.flat();
-    
+
     let effectiveMarkedPositions = bingoCard.markedPositions || [];
-    
+
     if (!effectiveMarkedPositions.includes(12)) {
       effectiveMarkedPositions.push(12);
     }
 
     const isWinner = GameUtils.checkWinCondition(numbers, effectiveMarkedPositions);
-    
+
     if (isWinner && !bingoCard.isWinner) {
       bingoCard.isWinner = true;
       await bingoCard.save();
@@ -3729,9 +3745,9 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
         const UserService = require('./userService');
         await UserService.updateUserStats(mongoUserId, true);
-        
+
         console.log(`🎉 Manual win check: Winner found for user ${userId}`);
-        
+
         this.stopAutoNumberCalling(gameId);
         await this.setNextGameCountdown(gameId);
       }
@@ -3746,29 +3762,29 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
   static getRealTimeTakenCards(gameId) {
     const gameIdStr = gameId.toString();
-    
+
     if (!this.selectedCards.has(gameIdStr)) {
       return [];
     }
-    
+
     const gameCards = this.selectedCards.get(gameIdStr);
     const takenCards = [];
-    
+
     for (const [cardNumber, data] of gameCards.entries()) {
       takenCards.push({
         cardNumber: parseInt(cardNumber),
         userId: data.userId
       });
     }
-    
+
     return takenCards;
   }
 
   static scheduleAutoStart(gameId, delay = 10000) {
     this.clearAutoStartTimer(gameId);
-    
+
     console.log(`⏰ Scheduling auto-start for game ${gameId} in ${delay}ms`);
-    
+
     const timer = setTimeout(async () => {
       try {
         const game = await Game.findById(gameId);
@@ -3778,7 +3794,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         }
 
         const playersWithCards = await BingoCard.countDocuments({ gameId });
-        
+
         if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
           console.log(`🎯 Auto-start conditions met for game ${game.code}: ${playersWithCards} players with cards`);
           await this.beginCardSelection(gameId);
@@ -3789,7 +3805,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
         console.error('❌ Auto-start timer failed:', error);
       }
     }, delay);
-    
+
     this.autoStartTimers.set(gameId.toString(), {
       timer,
       scheduledAt: new Date(),
@@ -3801,12 +3817,12 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
     try {
       const gamePlayers = await GamePlayer.find({ gameId })
         .populate('userId', 'username firstName telegramId');
-      
+
       const bingoCards = await BingoCard.find({ gameId })
         .populate('userId', 'username firstName telegramId');
-      
+
       const participants = new Map();
-      
+
       for (const player of gamePlayers) {
         if (player.userId) {
           participants.set(player.userId._id.toString(), {
@@ -3820,7 +3836,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
           });
         }
       }
-      
+
       for (const card of bingoCards) {
         if (card.userId) {
           const userIdStr = card.userId._id.toString();
@@ -3842,7 +3858,7 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
           }
         }
       }
-      
+
       return Array.from(participants.values());
     } catch (error) {
       console.error('❌ Error getting game participants:', error);
@@ -3858,10 +3874,10 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
 
     const bingoCards = await BingoCard.find({ gameId });
     const calledNumbers = game.numbersCalled || [];
-    
+
     let totalMarked = 0;
     let cardsWithBingo = 0;
-    
+
     for (const card of bingoCards) {
       totalMarked += card.markedPositions.length;
       if (card.isWinner) {
@@ -3885,83 +3901,83 @@ static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
   static _getNumbersByLetter(calledNumbers) {
     const letters = ['B', 'I', 'N', 'G', 'O'];
     const result = {};
-    
+
     letters.forEach(letter => {
-      result[letter] = calledNumbers.filter(num => 
+      result[letter] = calledNumbers.filter(num =>
         GameUtils.getNumberLetter(num) === letter
       ).length;
     });
-    
+
     return result;
   }
 
-static async getWinnerInfo(gameId) {
-  try {
-    const game = await Game.findById(gameId)
-      .populate('winnerId', 'username firstName telegramId');
-    
-    if (!game) {
-      return null;
-    }
+  static async getWinnerInfo(gameId) {
+    try {
+      const game = await Game.findById(gameId)
+        .populate('winnerId', 'username firstName telegramId');
 
-    let winningCard = null;
-    let winningPattern = null;
-    let winningPatternPositions = [];
-    
-    if (game.winnerId) {
-      const bingoCard = await BingoCard.findOne({ 
-        gameId, 
-        userId: game.winnerId._id,
-        isWinner: true
-      });
-      
-      if (bingoCard) {
-        winningCard = {
-          cardNumber: bingoCard.cardNumber || bingoCard.cardIndex || 0,
-          numbers: bingoCard.numbers || [],
-          markedPositions: bingoCard.markedNumbers || bingoCard.markedPositions || [],
-          winningPatternPositions: bingoCard.winningPatternPositions || [], 
-          winningPatternType: bingoCard.winningPatternType || null
-        };
-        
-        winningPattern = bingoCard.winningPatternType || null;
-        winningPatternPositions = bingoCard.winningPatternPositions || [];
+      if (!game) {
+        return null;
       }
-    }
 
-    // Get game details for all players to see
-    const bingoCards = await BingoCard.find({ gameId });
-    const totalPlayers = new Set(bingoCards.map(card => card.userId.toString())).size;
+      let winningCard = null;
+      let winningPattern = null;
+      let winningPatternPositions = [];
 
-    const winnerInfo = {
-      winner: game.winnerId || { _id: 'no-winner', username: 'No Winner', firstName: 'No Winner' },
-      gameCode: game.code,
-      endedAt: game.endedAt,
-      totalPlayers: totalPlayers,
-      numbersCalled: game.numbersCalled?.length || 0,
-      winningPattern: winningPattern,
-      // CRITICAL: Always include winning card with positions for ALL players
-      winningCard: winningCard ? {
-        cardNumber: winningCard.cardNumber,
-        numbers: winningCard.numbers,
-        markedPositions: winningCard.markedPositions,
-        winningPatternPositions: winningPatternPositions // Always include positions
-      } : null,
-      message: game.winnerId ? 'Game finished with a winner!' : 'Game ended without winner'
-    };
-    
-    // Broadcast winner info via WebSocket
-    if (this.webSocketService) {
-      this.webSocketService.broadcastWinnerInfo(gameId, winnerInfo);
+      if (game.winnerId) {
+        const bingoCard = await BingoCard.findOne({
+          gameId,
+          userId: game.winnerId._id,
+          isWinner: true
+        });
+
+        if (bingoCard) {
+          winningCard = {
+            cardNumber: bingoCard.cardNumber || bingoCard.cardIndex || 0,
+            numbers: bingoCard.numbers || [],
+            markedPositions: bingoCard.markedNumbers || bingoCard.markedPositions || [],
+            winningPatternPositions: bingoCard.winningPatternPositions || [],
+            winningPatternType: bingoCard.winningPatternType || null
+          };
+
+          winningPattern = bingoCard.winningPatternType || null;
+          winningPatternPositions = bingoCard.winningPatternPositions || [];
+        }
+      }
+
+      // Get game details for all players to see
+      const bingoCards = await BingoCard.find({ gameId });
+      const totalPlayers = new Set(bingoCards.map(card => card.userId.toString())).size;
+
+      const winnerInfo = {
+        winner: game.winnerId || { _id: 'no-winner', username: 'No Winner', firstName: 'No Winner' },
+        gameCode: game.code,
+        endedAt: game.endedAt,
+        totalPlayers: totalPlayers,
+        numbersCalled: game.numbersCalled?.length || 0,
+        winningPattern: winningPattern,
+        // CRITICAL: Always include winning card with positions for ALL players
+        winningCard: winningCard ? {
+          cardNumber: winningCard.cardNumber,
+          numbers: winningCard.numbers,
+          markedPositions: winningCard.markedPositions,
+          winningPatternPositions: winningPatternPositions // Always include positions
+        } : null,
+        message: game.winnerId ? 'Game finished with a winner!' : 'Game ended without winner'
+      };
+
+      // Broadcast winner info via WebSocket
+      if (this.webSocketService) {
+        this.webSocketService.broadcastWinnerInfo(gameId, winnerInfo);
+      }
+
+      return winnerInfo;
+
+    } catch (error) {
+      console.error('Error getting winner info:', error);
+      throw error;
     }
-    
-    return winnerInfo;
-    
-  } catch (error) {
-    console.error('Error getting winner info:', error);
-    throw error;
   }
-}
 
   static async getUserActiveGames(userId) {
     const games = await Game.find({
@@ -3985,7 +4001,7 @@ static async getWinnerInfo(gameId) {
   static async getUserGameRole(gameId, userId) {
     const player = await GamePlayer.findOne({ gameId, userId });
     if (!player) return null;
-    
+
     return {
       playerType: player.playerType || 'PLAYER',
       isReady: player.isReady,
@@ -3995,7 +4011,7 @@ static async getWinnerInfo(gameId) {
 
   static async getUserGameHistory(userId, limit = 10, page = 1) {
     const skip = (page - 1) * limit;
-    
+
     const games = await Game.find({
       'players.userId': userId,
       status: { $in: ['FINISHED', 'CANCELLED'] }
@@ -4011,12 +4027,12 @@ static async getWinnerInfo(gameId) {
       .sort({ updatedAt: -1 })
       .skip(skip)
       .limit(limit);
-    
+
     const total = await Game.countDocuments({
       'players.userId': userId,
       status: { $in: ['FINISHED', 'CANCELLED'] }
     });
-    
+
     return {
       games: games.map(game => this.formatGameForFrontend(game)),
       pagination: {
@@ -4031,9 +4047,9 @@ static async getWinnerInfo(gameId) {
   static async autoRestartGame(gameId) {
     try {
       console.log(`🔄 Auto-restarting game ${gameId}...`);
-      
+
       this.clearAutoStartTimer(gameId);
-      
+
       const game = await Game.findById(gameId);
       if (!game || game.status !== 'FINISHED') {
         console.log('❌ Game not found or not finished, cannot restart');
@@ -4048,13 +4064,13 @@ static async getWinnerInfo(gameId) {
       game.winnerId = null;
       game.startedAt = null;
       game.autoStartEndTime = null;
-      
+
       await game.save();
-      
+
       await BingoCard.deleteMany({ gameId });
-      
+
       console.log(`✅ Game ${game.code} restarted - waiting for players to select cards`);
-      
+
     } catch (error) {
       console.error('❌ Auto-restart error:', error);
     }
@@ -4068,9 +4084,9 @@ static async getWinnerInfo(gameId) {
       }
 
       const playersWithCards = await BingoCard.countDocuments({ gameId });
-      
+
       console.log(`🔍 Auto-start check: ${playersWithCards} players with cards for game ${game.code}`);
-      
+
       if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
         console.log(`🚀 AUTO-STARTING game ${game.code} with ${playersWithCards} players`);
         await this.startGame(gameId);
@@ -4097,13 +4113,13 @@ static async getWinnerInfo(gameId) {
         const userTransaction = existingReconciliation.transactions.find(
           tx => tx.userId.toString() === userId.toString() && tx.status === 'COMPLETED'
         );
-        
+
         if (userTransaction) {
           console.log(`⚠️ User ${userId} already has reconciliation for game ${gameId}`);
           return true;
         }
       }
-      
+
       return false;
     } catch (error) {
       console.error('❌ Error checking duplicate reconciliation:', error);
@@ -4120,18 +4136,18 @@ static async getWinnerInfo(gameId) {
       }
 
       const playersWithCards = await BingoCard.countDocuments({ gameId });
-      
+
       if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
         console.log(`🎯 Auto-start conditions met for game ${game.code}: ${playersWithCards} players with cards`);
         await this.beginCardSelection(gameId);
       } else {
         console.log(`❌ Auto-start cancelled - only ${playersWithCards} players with cards`);
-        
+
         setTimeout(() => {
           this.scheduleAutoStartCheck(gameId);
         }, 10000);
       }
-      
+
     } catch (error) {
       console.error('❌ Auto-start game error:', error);
       this.clearAutoStartTimer(gameId);
@@ -4144,7 +4160,7 @@ static async getWinnerInfo(gameId) {
     const totalPot = uniquePlayers * entryFee;
     const platformFee = totalPot * 0.2;
     const winnerPrize = totalPot - platformFee;
-    
+
     return {
       uniquePlayers,
       totalPot,
@@ -4164,7 +4180,7 @@ static async getWinnerInfo(gameId) {
   static async createAutoGame() {
     try {
       const gameCode = GameUtils.generateGameCode();
-      
+
       const game = new Game({
         code: gameCode,
         maxPlayers: 400,
@@ -4177,7 +4193,7 @@ static async getWinnerInfo(gameId) {
 
       await game.save();
       console.log(`🎯 Auto-created game: ${gameCode} - Waiting for players and manual start`);
-      
+
       return this.getGameWithDetails(game._id);
     } catch (error) {
       console.error('❌ Error creating auto game:', error);
@@ -4190,13 +4206,13 @@ static async getWinnerInfo(gameId) {
       const reconciliation = await Reconciliation.findOne({ gameId })
         .populate('winnerId', 'username firstName telegramId')
         .populate('transactions.userId', 'username firstName telegramId');
-      
+
       if (!reconciliation) {
         return null;
       }
-      
+
       reconciliation.isBalanced();
-      
+
       return reconciliation;
     } catch (error) {
       console.error('❌ Error getting game reconciliation:', error);
@@ -4215,7 +4231,7 @@ static async getWinnerInfo(gameId) {
         console.log(`🔄 Auto-setting countdown for finished game ${game.code}`);
         await this.setNextGameCountdown(game._id);
       }
-      
+
       return finishedGames.length;
     } catch (error) {
       console.error('❌ Error auto-restarting games:', error);
@@ -4227,15 +4243,15 @@ static async getWinnerInfo(gameId) {
     try {
       const reconciliation = await Reconciliation.findOne({ gameId });
       if (!reconciliation) return false;
-      
+
       if (reconciliation.status === 'NO_WINNER_REFUNDED') {
         return true;
       }
-      
-      const refundTransactions = reconciliation.transactions.filter(tx => 
+
+      const refundTransactions = reconciliation.transactions.filter(tx =>
         tx.type === 'REFUND' && tx.status === 'COMPLETED'
       );
-      
+
       return refundTransactions.length > 0;
     } catch (error) {
       console.error('Error checking refunds:', error);
@@ -4246,21 +4262,21 @@ static async getWinnerInfo(gameId) {
   static async createReconciliation(gameId) {
     const session = await mongoose.startSession();
     session.startTransaction();
-    
+
     try {
       const game = await Game.findById(gameId).session(session);
       const bingoCards = await BingoCard.find({ gameId }).session(session);
-      
+
       if (!game) {
         throw new Error('Game not found');
       }
-      
+
       const totalPlayers = bingoCards.length;
       const entryFee = 10;
       const totalPot = totalPlayers * entryFee;
       const platformFee = totalPot * 0.2;
       const winnerPrize = totalPot - platformFee;
-      
+
       const reconciliation = new Reconciliation({
         gameId: game._id,
         status: 'PENDING',
@@ -4271,7 +4287,7 @@ static async getWinnerInfo(gameId) {
         debitTotal: totalPot,
         creditTotal: 0
       });
-      
+
       for (const card of bingoCards) {
         reconciliation.transactions.push({
           userId: card.userId,
@@ -4280,7 +4296,7 @@ static async getWinnerInfo(gameId) {
           status: 'PENDING'
         });
       }
-      
+
       reconciliation.addAudit('RECONCILIATION_CREATED', {
         gameCode: game.code,
         totalPlayers,
@@ -4289,12 +4305,12 @@ static async getWinnerInfo(gameId) {
         platformFee,
         winnerPrize
       });
-      
+
       await reconciliation.save({ session });
       await session.commitTransaction();
-      
+
       console.log(`💰 Reconciliation created for game ${game.code}: $${totalPot} pot from ${totalPlayers} players`);
-      
+
       return reconciliation;
     } catch (error) {
       await session.abortTransaction();
@@ -4309,13 +4325,13 @@ static async getWinnerInfo(gameId) {
     try {
       const bingoCards = await BingoCard.find({ gameId });
       const uniqueUsers = new Set();
-      
+
       bingoCards.forEach(card => {
         if (card.userId) {
           uniqueUsers.add(card.userId.toString());
         }
       });
-      
+
       return uniqueUsers.size;
     } catch (error) {
       console.error('❌ Error getting unique players count:', error);
