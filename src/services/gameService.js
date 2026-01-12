@@ -33,14 +33,87 @@ class GameService {
   static ENTRY_FEE = 10;
   static gameStates = new Map(); // gameId -> { calledNumbers, status, currentNumber, lastUpdate }
 
+
+  // ==================== CRITICAL FIX: SYNC WINNER STATE ====================
+
+  static async syncWinnerStateWithDatabase() {
+    try {
+      console.log('🔄 Syncing winner state with database...');
+      
+      // Clear in-memory winner tracking
+      this.winnerDeclared.clear();
+      
+      // Find games that actually have winners in database
+      const gamesWithWinners = await Game.find({
+        status: 'FINISHED',
+        winnerId: { $exists: true, $ne: null },
+        archived: { $ne: true }
+      });
+      
+      for (const game of gamesWithWinners) {
+        this.winnerDeclared.add(game._id.toString());
+        console.log(`✅ Sync: Game ${game.code} has winner in database`);
+      }
+      
+      // Find active games that should have winners but don't
+      const activeGames = await Game.find({
+        status: 'ACTIVE',
+        archived: { $ne: true }
+      });
+      
+      for (const game of activeGames) {
+        // Check if there's actually a winner in database
+        const winningCard = await BingoCard.findOne({
+          gameId: game._id,
+          isWinner: true
+        });
+        
+        if (winningCard) {
+          console.warn(`⚠️ Inconsistent state: Game ${game.code} is ACTIVE but has winner card`);
+          
+          // Fix the game state
+          game.status = 'FINISHED';
+          game.winnerId = winningCard.userId;
+          game.endedAt = game.endedAt || new Date();
+          await game.save();
+          
+          this.winnerDeclared.add(game._id.toString());
+          this.stopAutoNumberCalling(game._id);
+          
+          console.log(`✅ Fixed game ${game.code} state to FINISHED`);
+        }
+      }
+      
+      console.log('✅ Winner state sync completed');
+      
+    } catch (error) {
+      console.error('❌ Error syncing winner state:', error);
+    }
+  }
+
+    // ==================== INITIALIZE WITH SYNC ====================
+  
+  static initialize() {
+    // Sync winner state on startup
+    setTimeout(() => {
+      this.syncWinnerStateWithDatabase();
+    }, 3000);
+    
+    // Periodic sync
+    setInterval(() => {
+      this.syncWinnerStateWithDatabase();
+    }, 30000); // Sync every 30 seconds
+  }
   // ==================== WEBSOCKET INTEGRATION ====================
+  
   
   static setWebSocketService(service) {
     this.webSocketService = service;
     console.log('🔗 WebSocket service injected into GameService');
   }
   
-  static broadcastToGame(gameId, message, excludeUserIds = []) {
+  
+ static broadcastToGame(gameId, message, excludeUserIds = []) {
     if (!this.webSocketService) {
       console.log('⚠️ WebSocket service not available for broadcasting');
       return;
@@ -57,6 +130,7 @@ class GameService {
       console.error('❌ Error broadcasting to game:', error);
     }
   }
+
   
   static sendToUser(userId, message) {
     if (!this.webSocketService) {
@@ -125,13 +199,11 @@ class GameService {
   }
 
   // ==================== CORE GAME LIFECYCLE ====================
-
 static async getMainGame() {
   const lockKey = 'get_main_game';
   const MAX_RETRIES = 3;
   
   if (this.processingGames.has(lockKey)) {
-    // Use iterative retry instead of recursive to avoid stack overflow
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
       if (!this.processingGames.has(lockKey)) {
@@ -148,24 +220,50 @@ static async getMainGame() {
     
     console.log('🎮 getMainGame() - Starting...');
     
-    // CRITICAL: Use only ONE of these, not both
-    // Choose enforceSingleGameAtomic() since it uses transactions
-    await this.enforceSingleGameAtomic();
-    // Remove the duplicate call: await this.ensureSingleActiveGame();
+    // First, sync winner state
+    await this.syncWinnerStateWithDatabase();
     
-    // FIXED: Proper MongoDB sort query
+    // CRITICAL: Use only ONE of these, not both
+    await this.enforceSingleGameAtomic();
+    
+    // Check for active games
     let game = await Game.findOne({
       status: { $in: ['WAITING_FOR_PLAYERS', 'CARD_SELECTION', 'ACTIVE'] },
       archived: { $ne: true }
     })
     .sort({ 
-      // Proper sort using MongoDB's native sorting
-      status: 1, // This sorts alphabetically: 'ACTIVE' < 'CARD_SELECTION' < 'WAITING_FOR_PLAYERS'
-      createdAt: -1 // Newest first for same status
+      status: 1,
+      createdAt: -1
     });
 
     if (game) {
       console.log(`✅ Found game: ${game.code} (${game.status})`);
+      
+      // CRITICAL: Check if game actually has a winner
+      if (game.status === 'ACTIVE') {
+        const winningCard = await BingoCard.findOne({
+          gameId: game._id,
+          isWinner: true
+        });
+        
+        if (winningCard) {
+          console.warn(`⚠️ Game ${game.code} is ACTIVE but has winner! Fixing...`);
+          
+          // Fix the game state
+          game.status = 'FINISHED';
+          game.winnerId = winningCard.userId;
+          game.endedAt = game.endedAt || new Date();
+          await game.save();
+          
+          this.winnerDeclared.add(game._id.toString());
+          this.stopAutoNumberCalling(game._id);
+          
+          console.log(`✅ Fixed game ${game.code} to FINISHED`);
+          
+          // Return the fixed game
+          return this.formatGameForFrontend(game);
+        }
+      }
       
       // Handle stuck states
       if (game.status === 'CARD_SELECTION' && game.cardSelectionEndTime) {
@@ -204,7 +302,7 @@ static async getMainGame() {
   } catch (error) {
     console.error('❌ Error in getMainGame:', error);
     
-    // Emergency fallback - try to get any game
+    // Emergency fallback
     try {
       const emergencyGame = await Game.findOne({ 
         archived: { $ne: true } 
@@ -1278,12 +1376,31 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
       throw new Error('Game not found');
     }
     
-    // 🚨 CRITICAL: Check current status and prevent invalid transitions
+    // 🚨 CRITICAL: Double-check if winner already exists in database
+    const existingWinnerInDB = await BingoCard.findOne({
+      gameId,
+      isWinner: true,
+      userId: { $ne: winningUserId } // Different user
+    }).session(session);
+    
+    if (existingWinnerInDB) {
+      console.log(`⚠️ Database shows existing winner: ${existingWinnerInDB.userId}`);
+      await session.abortTransaction();
+      
+      // Sync in-memory state
+      this.winnerDeclared.add(gameId.toString());
+      
+      return await this.getWinnerInfo(gameId);
+    }
+    
+    // Check current status
     if (game.status === 'FINISHED' || game.status === 'NO_WINNER') {
       console.log(`⚠️ Game ${game.code} already finished (${game.status})`);
       await session.abortTransaction();
       
-      // Return existing winner info
+      // Sync in-memory state
+      this.winnerDeclared.add(gameId.toString());
+      
       return await this.getWinnerInfo(gameId);
     }
     
@@ -1291,8 +1408,23 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
       throw new Error(`Game ${game.code} not active (status: ${game.status})`);
     }
     
+    // Check in-memory state
     if (this.winnerDeclared.has(gameId.toString())) {
-      throw new Error('Winner already declared');
+      // Verify with database
+      const dbCheck = await BingoCard.findOne({
+        gameId,
+        isWinner: true
+      }).session(session);
+      
+      if (dbCheck) {
+        console.log(`⚠️ Winner confirmed in database: ${dbCheck.userId}`);
+        await session.abortTransaction();
+        return await this.getWinnerInfo(gameId);
+      } else {
+        // In-memory state is stale, clear it
+        console.log(`🔄 Clearing stale in-memory winner state for ${gameId}`);
+        this.winnerDeclared.delete(gameId.toString());
+      }
     }
     
     const card = await BingoCard.findById(winningCard._id).session(session);
@@ -1328,7 +1460,7 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
     
     const now = new Date();
     
-    // 🚨 CRITICAL: Update ALL game status fields
+    // Update game status
     game.status = 'FINISHED';
     game.winnerId = winningUserId;
     game.endedAt = now;
@@ -1383,7 +1515,7 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
     if (this.webSocketService) {
       this.webSocketService.broadcastWinnerDeclared(gameId, winnerData);
       
-      // 🚨 CRITICAL: Also broadcast game status update
+      // Broadcast game status update
       this.broadcastGameStatus(gameId, {
         ...game.toObject(),
         status: 'FINISHED',
@@ -1410,7 +1542,7 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
       type: 'WINNER_DECLARED',
       gameId: game._id,
       gameCode: game.code,
-      status: 'FINISHED', // 🚨 ADD STATUS
+      status: 'FINISHED',
       winnerId: winningUserId,
       winnerPrize: winnerPrize,
       totalPlayers: totalUniquePlayers,
@@ -1427,7 +1559,7 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
       timestamp: Date.now()
     });
     
-    // 🚨 CRITICAL: Start next game countdown
+    // Start next game countdown
     setTimeout(async () => {
       await this.setNextGameCountdown(gameId);
     }, 3000);
@@ -1439,7 +1571,7 @@ static async declareWinnerWithRetry(gameId, winningUserId, winningCard, winningP
       winnerInfo,
       winnerPrize: winnerPrize,
       totalUniquePlayers: totalUniquePlayers,
-      gameStatus: 'FINISHED' // 🚨 RETURN STATUS
+      gameStatus: 'FINISHED'
     };
     
   } catch (error) {
@@ -1470,16 +1602,54 @@ static async claimBingo(gameId, userId, patternType = 'BINGO') {
     this.processingGames.add(lockKey);
     session.startTransaction();
     
-    console.log(`🏆 BINGO CLAIM attempt by ${userId} for game ${gameId}`);
+    console.log(`🏆 BINGO CLAIM attempt by ${userId} for game ${gameId}, pattern: ${patternType}`);
     
-    // Check if winner already declared WITHIN TRANSACTION
-    if (this.winnerDeclared.has(gameId.toString())) {
-      throw new Error('Winner already declared for this game');
+    // Check database for existing winner WITHIN TRANSACTION
+    const existingWinnerInDB = await BingoCard.findOne({ 
+      gameId, 
+      isWinner: true 
+    }).session(session);
+    
+    if (existingWinnerInDB) {
+      console.log(`⚠️ Database shows existing winner: ${existingWinnerInDB.userId}`);
+      await session.abortTransaction();
+      
+      // Sync in-memory state
+      this.winnerDeclared.add(gameId.toString());
+      
+      const winnerInfo = await this.getWinnerInfo(gameId);
+      throw new Error(`Winner already declared: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
     }
 
     const game = await Game.findById(gameId).session(session);
-    if (!game || game.status !== 'ACTIVE') {
-      throw new Error('Game not active');
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    // Check game status
+    if (game.status !== 'ACTIVE') {
+      // Check if there's actually a winner
+      const winningCardCheck = await BingoCard.findOne({ 
+        gameId, 
+        isWinner: true 
+      }).session(session);
+      
+      if (winningCardCheck) {
+        // Fix game status
+        game.status = 'FINISHED';
+        game.winnerId = winningCardCheck.userId;
+        game.endedAt = game.endedAt || new Date();
+        await game.save({ session });
+        
+        this.winnerDeclared.add(gameId.toString());
+        
+        await session.commitTransaction();
+        
+        const winnerInfo = await this.getWinnerInfo(gameId);
+        throw new Error(`Game finished. Winner: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
+      }
+      
+      throw new Error(`Game is not active (status: ${game.status})`);
     }
 
     // IMMEDIATELY STOP number calling for this game
@@ -2037,48 +2207,16 @@ static async restartNumberCallingIfNoWinner(gameId) {
       return true; // Default to allowing join on error
     }
   }
-// Add these methods to the GameService class
 
-static async processBingoClaimWithLock(gameId, userId) {
+
+  // ==================== ADD THIS NEW METHOD ====================
+
+static async processBingoClaimWithLock(gameId, userId, patternType = 'BINGO') {
   const lockKey = `bingo_claim_${gameId}`;
-  
-  // Check if winner already declared BEFORE checking lock
-  if (this.winnerDeclared.has(gameId.toString())) {
-    throw new Error('Winner already declared for this game');
-  }
-  
-  // Only wait if there's an actual claim in progress (not just a lock)
-  if (this.processingGames.has(lockKey)) {
-    console.log(`⏳ [LOCK] Another bingo claim check is in progress for game ${gameId}`);
-    
-    // Short wait for race conditions
-    await new Promise(resolve => setTimeout(resolve, 50));
-    
-    // Check again if winner was declared
-    if (this.winnerDeclared.has(gameId.toString())) {
-      throw new Error('Winner already declared');
-    }
-    
-    // Check if this is the SAME user trying again
-    const gameClaims = Array.from(this.processingGames.entries())
-      .filter(([key]) => key.startsWith(`bingo_claim_${gameId}_`));
-    
-    const sameUserClaim = gameClaims.find(([key, value]) => {
-      return key.includes(userId);
-    });
-    
-    if (sameUserClaim) {
-      throw new Error('You already have a bingo claim in progress');
-    }
-    
-    // Allow concurrent claims from different users with short delay
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
+  const userSpecificLockKey = `bingo_claim_${gameId}_${userId}`;
   
   try {
-    // Use user-specific lock key instead of game-only lock
-    const userSpecificLockKey = `bingo_claim_${gameId}_${userId}`;
-    
+    // Check if this user already has a claim in progress
     if (this.processingGames.has(userSpecificLockKey)) {
       throw new Error('You already have a bingo claim in progress');
     }
@@ -2087,9 +2225,9 @@ static async processBingoClaimWithLock(gameId, userId) {
     
     console.log(`🔐 [LOCK] Processing bingo claim for user ${userId} in game ${gameId}`);
     
-    // Process the claim with timeout
+    // Use the existing claimBingo method with timeout
     const result = await Promise.race([
-      this.claimBingo(gameId, userId, 'BINGO'),
+      this.claimBingo(gameId, userId, patternType),
       new Promise((_, reject) => 
         setTimeout(() => reject(new Error('Bingo claim timeout - please try again')), 5000)
       )
@@ -2099,13 +2237,7 @@ static async processBingoClaimWithLock(gameId, userId) {
     
   } finally {
     // Clean up user-specific lock
-    const userSpecificLockKey = `bingo_claim_${gameId}_${userId}`;
     this.processingGames.delete(userSpecificLockKey);
-    
-    // Also clean up any stale locks for this game
-    setTimeout(() => {
-      this.cleanupStaleLocks(gameId);
-    }, 1000);
   }
 }
 
@@ -2127,23 +2259,77 @@ static cleanupStaleLocks(gameId) {
   });
 }
 
-static async handleBingoClaimWithQueue(gameId, userId) {
+ // ==================== CRITICAL FIX: HANDLE BINGO CLAIM ====================
+
+static async handleBingoClaimWithQueue(gameId, userId, patternType = 'BINGO') {
   try {
-    console.log(`📋 [QUEUE] Bingo claim from ${userId} for game ${gameId}`);
+    console.log(`📋 [QUEUE] Bingo claim from ${userId} for game ${gameId}, pattern: ${patternType}`);
     
-    // Check immediately if winner already declared
-    if (this.winnerDeclared.has(gameId.toString())) {
-      throw new Error('Winner already declared for this game');
+    // CRITICAL: Check database first for existing winner
+    const existingWinnerInDB = await BingoCard.findOne({
+      gameId,
+      isWinner: true
+    });
+    
+    if (existingWinnerInDB) {
+      console.log(`⚠️ Database shows existing winner: ${existingWinnerInDB.userId}`);
+      
+      // Sync in-memory state
+      this.winnerDeclared.add(gameId.toString());
+      
+      const winnerInfo = await this.getWinnerInfo(gameId);
+      throw new Error(`Winner already declared: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
     }
     
-    // Check game status immediately
+    // Check in-memory state
+    if (this.winnerDeclared.has(gameId.toString())) {
+      // Verify with database
+      const dbCheck = await BingoCard.findOne({
+        gameId,
+        isWinner: true
+      });
+      
+      if (dbCheck) {
+        const winnerInfo = await this.getWinnerInfo(gameId);
+        throw new Error(`Winner already declared: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
+      } else {
+        // In-memory state is stale, clear it
+        console.log(`🔄 Clearing stale in-memory winner state for ${gameId}`);
+        this.winnerDeclared.delete(gameId.toString());
+      }
+    }
+    
+    // Check game status
     const game = await Game.findById(gameId);
-    if (!game || game.status !== 'ACTIVE') {
-      throw new Error('Game not active');
+    if (!game) {
+      throw new Error('Game not found');
+    }
+    
+    if (game.status !== 'ACTIVE') {
+      // Check if game actually has winner but status is wrong
+      const winningCard = await BingoCard.findOne({
+        gameId,
+        isWinner: true
+      });
+      
+      if (winningCard) {
+        // Fix game status
+        game.status = 'FINISHED';
+        game.winnerId = winningCard.userId;
+        game.endedAt = game.endedAt || new Date();
+        await game.save();
+        
+        this.winnerDeclared.add(gameId.toString());
+        
+        const winnerInfo = await this.getWinnerInfo(gameId);
+        throw new Error(`Game finished. Winner: ${winnerInfo.winner.username || winnerInfo.winner.telegramId}`);
+      }
+      
+      throw new Error(`Game is not active (status: ${game.status})`);
     }
     
     // Process with user-specific lock
-    return await this.processBingoClaimWithLock(gameId, userId);
+    return await this.processBingoClaimWithLock(gameId, userId, patternType);
     
   } catch (error) {
     console.error('❌ Bingo claim queue error:', error);
@@ -2164,6 +2350,10 @@ static async handleBingoClaimWithQueue(gameId, userId) {
     throw error;
   }
 }
+
+
+
+
   static async disqualifyPlayer(gameId, userId, session, details = {}) {
     try {
       console.log(`⛔ Disqualifying player ${userId} from game ${gameId}`);
@@ -4133,6 +4323,8 @@ static async getWinnerInfo(gameId) {
     }
   }
 }
+// Initialize the service
+GameService.initialize();
 
 // Handle process shutdown
 process.on('SIGINT', () => {
