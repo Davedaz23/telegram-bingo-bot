@@ -2042,33 +2042,89 @@ static async restartNumberCallingIfNoWinner(gameId) {
 static async processBingoClaimWithLock(gameId, userId) {
   const lockKey = `bingo_claim_${gameId}`;
   
+  // Check if winner already declared BEFORE checking lock
+  if (this.winnerDeclared.has(gameId.toString())) {
+    throw new Error('Winner already declared for this game');
+  }
+  
+  // Only wait if there's an actual claim in progress (not just a lock)
   if (this.processingGames.has(lockKey)) {
-    console.log(`⏳ Another bingo claim is being processed for game ${gameId}`);
+    console.log(`⏳ [LOCK] Another bingo claim check is in progress for game ${gameId}`);
     
-    // Wait a bit and retry
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // Short wait for race conditions
+    await new Promise(resolve => setTimeout(resolve, 50));
     
-    // Check if winner was declared while we were waiting
+    // Check again if winner was declared
     if (this.winnerDeclared.has(gameId.toString())) {
       throw new Error('Winner already declared');
     }
     
-    throw new Error('Another bingo claim is being processed. Please try again.');
+    // Check if this is the SAME user trying again
+    const gameClaims = Array.from(this.processingGames.entries())
+      .filter(([key]) => key.startsWith(`bingo_claim_${gameId}_`));
+    
+    const sameUserClaim = gameClaims.find(([key, value]) => {
+      return key.includes(userId);
+    });
+    
+    if (sameUserClaim) {
+      throw new Error('You already have a bingo claim in progress');
+    }
+    
+    // Allow concurrent claims from different users with short delay
+    await new Promise(resolve => setTimeout(resolve, 100));
   }
   
   try {
-    this.processingGames.add(lockKey);
+    // Use user-specific lock key instead of game-only lock
+    const userSpecificLockKey = `bingo_claim_${gameId}_${userId}`;
     
-    // Process the claim with a timeout
-    return await Promise.race([
+    if (this.processingGames.has(userSpecificLockKey)) {
+      throw new Error('You already have a bingo claim in progress');
+    }
+    
+    this.processingGames.add(userSpecificLockKey);
+    
+    console.log(`🔐 [LOCK] Processing bingo claim for user ${userId} in game ${gameId}`);
+    
+    // Process the claim with timeout
+    const result = await Promise.race([
       this.claimBingo(gameId, userId, 'BINGO'),
       new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Bingo claim timeout')), 3000)
+        setTimeout(() => reject(new Error('Bingo claim timeout - please try again')), 5000)
       )
     ]);
+    
+    return result;
+    
   } finally {
-    this.processingGames.delete(lockKey);
+    // Clean up user-specific lock
+    const userSpecificLockKey = `bingo_claim_${gameId}_${userId}`;
+    this.processingGames.delete(userSpecificLockKey);
+    
+    // Also clean up any stale locks for this game
+    setTimeout(() => {
+      this.cleanupStaleLocks(gameId);
+    }, 1000);
   }
+}
+
+// Add this cleanup method
+static cleanupStaleLocks(gameId) {
+  const staleKeys = [];
+  const now = Date.now();
+  
+  // Clean up locks older than 30 seconds
+  for (const [key, timestamp] of this.processingGames.entries()) {
+    if (key.startsWith(`bingo_claim_${gameId}`) && now - timestamp > 30000) {
+      staleKeys.push(key);
+    }
+  }
+  
+  staleKeys.forEach(key => {
+    this.processingGames.delete(key);
+    console.log(`🧹 Cleaned up stale lock: ${key}`);
+  });
 }
 
 static async handleBingoClaimWithQueue(gameId, userId) {
@@ -2086,11 +2142,25 @@ static async handleBingoClaimWithQueue(gameId, userId) {
       throw new Error('Game not active');
     }
     
-    // Process with lock to prevent concurrent claims
+    // Process with user-specific lock
     return await this.processBingoClaimWithLock(gameId, userId);
     
   } catch (error) {
     console.error('❌ Bingo claim queue error:', error);
+    
+    // If it's a lock timeout, send a specific message
+    if (error.message.includes('timeout') || error.message.includes('Another bingo claim')) {
+      // Send WebSocket message to user
+      if (this.webSocketService) {
+        this.sendToUser(userId, {
+          type: 'BINGO_CLAIM_BUSY',
+          gameId: gameId,
+          message: 'The system is processing bingo claims. Please try again in a moment.',
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+    
     throw error;
   }
 }
