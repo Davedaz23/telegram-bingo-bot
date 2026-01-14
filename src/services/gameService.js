@@ -1521,6 +1521,13 @@ class GameService {
           status: 'FINISHED',
           winnerId: winningUserId
         });
+        this.broadcastToGame(gameId, {
+  type: 'GAME_STATUS_UPDATED',
+  gameId: game._id,
+  status: 'FINISHED',
+  winnerId: winningUserId,
+  timestamp: new Date().toISOString()
+});
 
         // Also send detailed winner info
         if (winnerInfo) {
