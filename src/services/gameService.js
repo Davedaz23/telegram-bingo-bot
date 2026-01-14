@@ -97,7 +97,7 @@ class GameService {
     // Sync winner state on startup
     setTimeout(() => {
       this.syncWinnerStateWithDatabase();
-    }, 3000);
+    }, 5000);
 
     // Periodic sync
     setInterval(() => {
