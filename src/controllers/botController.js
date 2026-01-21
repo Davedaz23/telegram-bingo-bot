@@ -127,7 +127,7 @@ class BotController {
 
         // ALL BUTTONS FOR REGULAR USERS
         const keyboardButtons = [
-          [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+          [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')],
           [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
           [Markup.button.callback('📊 My Stats & History', 'show_stats')],
           [Markup.button.callback('💼 My Wallet', 'show_wallet')]
@@ -150,7 +150,7 @@ class BotController {
         await ctx.replyWithMarkdown(
           `🎯 *Welcome to Bingo Bot!*\n\nWe're setting up your account...\n\nClick below to play:`,
           Markup.inlineKeyboard([
-            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')]
           ])
         );
       }
@@ -183,7 +183,7 @@ class BotController {
       `;
 
       const helpButtons = [
-        [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+        [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')],
         [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
         [Markup.button.callback('💼 My Wallet', 'show_wallet')],
         [Markup.button.callback('📊 My Stats', 'show_stats')]
@@ -391,7 +391,8 @@ class BotController {
           ...Markup.inlineKeyboard([
             [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
             [Markup.button.callback('📊 Full History', 'show_full_history')],
-            [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
+            [Markup.button.callback('⬅️ Back to Main', 'back_to_start')],
+            [Markup.button.callback('💰 Withdraw Funds', 'withdraw')]
           ])
         });
       } catch (error) {
@@ -422,7 +423,7 @@ Keep playing to improve your stats! 🎯
 
         await ctx.replyWithMarkdown(statsMessage,
           Markup.inlineKeyboard([
-            [Markup.button.webApp('🎮 Play More Games', 'https://bingominiapp.vercel.app')],
+            [Markup.button.webApp('🎮 Play More Games', 'https://desta.et')],
             [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
           ])
         );
@@ -431,7 +432,7 @@ Keep playing to improve your stats! 🎯
         await ctx.replyWithMarkdown(
           `📊 *Your Bingo Stats*\n\n*Games Played:* 0\n*Games Won:* 0\n*Win Rate:* 0%\n\nStart playing to see your stats! 🎯`,
           Markup.inlineKeyboard([
-            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')]
           ])
         );
       }
@@ -451,6 +452,164 @@ Keep playing to improve your stats! 🎯
 
       await this.showAdminPanel(ctx);
     });
+
+// Withdrawal command
+this.bot.command('withdraw', async (ctx) => {
+  try {
+    const user = await UserService.findOrCreateUser(ctx.from);
+    const balanceInfo = await WalletService.getAvailableBalance(ctx.from.id);
+    
+    const message = `
+💰 *Withdraw Funds*
+
+*Your Balance Information:*
+• Total Balance: $${balanceInfo.totalBalance}
+• Available for withdrawal: $${balanceInfo.availableBalance}
+• Locked (pending withdrawals): $${balanceInfo.lockedAmount}
+
+*Withdrawal Methods:*
+🏦 Bank Transfer (CBE, BOA, Dashen)
+📱 Mobile Money (Telebirr, CBE Birr)
+
+*Minimum Withdrawal:* $10
+*Processing Time:* 24-48 hours
+
+*Ready to withdraw?* Click below to start:
+    `;
+
+    await ctx.replyWithMarkdown(message,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('💰 Request Withdrawal', 'start_withdrawal')],
+        [Markup.button.callback('📋 Withdrawal History', 'withdrawal_history')],
+        [Markup.button.callback('💼 My Wallet', 'show_wallet')],
+        [Markup.button.callback('⬅️ Back', 'back_to_start')]
+      ])
+    );
+  } catch (error) {
+    console.error('Error in withdraw command:', error);
+    await ctx.reply('❌ ' + error.message);
+  }
+});
+
+// Start withdrawal process
+this.bot.action('start_withdrawal', async (ctx) => {
+  try {
+    const balanceInfo = await WalletService.getAvailableBalance(ctx.from.id);
+    
+    if (balanceInfo.availableBalance < 10) {
+      await ctx.answerCbQuery(`❌ Minimum withdrawal is $10. Available: $${balanceInfo.availableBalance}`);
+      return;
+    }
+    
+    const message = `
+💳 *Request Withdrawal*
+
+*Available Balance:* $${balanceInfo.availableBalance}
+
+*Select Withdrawal Method:*
+    `;
+
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🏦 CBE Bank', 'withdraw_cbe')],
+        [Markup.button.callback('🏦 Bank of Abysinia', 'withdraw_boa')],
+        [Markup.button.callback('🏦 Dashen Bank', 'withdraw_dashen')],
+        [Markup.button.callback('📱 Telebirr', 'withdraw_telebirr')],
+        [Markup.button.callback('📱 CBE Birr', 'withdraw_cbebirr')],
+        [Markup.button.callback('⬅️ Back', 'withdraw')]
+      ])
+    });
+  } catch (error) {
+    console.error('Error starting withdrawal:', error);
+    await ctx.answerCbQuery('Error: ' + error.message);
+  }
+});
+
+// Withdrawal method selection
+this.bot.action(/withdraw_(.+)/, async (ctx) => {
+  const method = ctx.match[1];
+  const methodNames = {
+    'cbe': 'CBE Bank',
+    'boa': 'Bank of Abysinia',
+    'dashen': 'Dashen Bank',
+    'telebirr': 'Telebirr',
+    'cbebirr': 'CBE Birr'
+  };
+  
+  const methodName = methodNames[method];
+  if (!methodName) return;
+  
+  // Store method in session
+  ctx.session = ctx.session || {};
+  ctx.session.withdrawalMethod = methodName;
+  
+  const message = `
+🏦 *Withdrawal via ${methodName}*
+
+Please enter the amount you want to withdraw:
+
+*Minimum:* $10
+*Available:* [Will be shown after you enter amount]
+
+Type the amount in USD (numbers only):
+Example: 50
+    `;
+  
+  await ctx.editMessageText(message, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('🚫 Cancel', 'withdraw')]
+    ])
+  });
+});
+
+// Withdrawal history
+this.bot.action('withdrawal_history', async (ctx) => {
+  try {
+    const withdrawals = await WalletService.getUserWithdrawals(ctx.from.id, 10);
+    const balanceInfo = await WalletService.getAvailableBalance(ctx.from.id);
+    
+    let message = `
+📋 *Withdrawal History*
+
+*Current Balance:*
+• Total: $${balanceInfo.totalBalance}
+• Available: $${balanceInfo.availableBalance}
+• Locked: $${balanceInfo.lockedAmount}
+
+*Recent Withdrawals:*
+    `;
+    
+    if (withdrawals.length === 0) {
+      message += "\nNo withdrawal history yet.";
+    } else {
+      withdrawals.forEach((withdrawal, index) => {
+        const statusEmoji = withdrawal.status === 'COMPLETED' ? '✅' :
+                          withdrawal.status === 'PENDING' ? '⏳' : '❌';
+        const amount = Math.abs(withdrawal.amount);
+        const date = new Date(withdrawal.createdAt).toLocaleDateString();
+        
+        message += `\n${statusEmoji} $${amount} - ${withdrawal.metadata?.withdrawalMethod || 'Unknown'}`;
+        message += `\n  Status: ${withdrawal.status} | Date: ${date}`;
+      });
+    }
+    
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('💰 New Withdrawal', 'start_withdrawal')],
+        [Markup.button.callback('💼 My Wallet', 'show_wallet')],
+        [Markup.button.callback('⬅️ Back', 'back_to_start')]
+      ])
+    });
+  } catch (error) {
+    console.error('Error getting withdrawal history:', error);
+    await ctx.answerCbQuery('Error loading history');
+  }
+});
+
+
 
     // Admin panel action handler
     this.bot.action('admin_panel', async (ctx) => {
@@ -483,6 +642,7 @@ Keep playing to improve your stats! 🎯
           WalletService.getPendingSMSDeposits(5).catch(() => []),
           WalletService.getAllSMSDeposits(1, 5).catch(() => ({ deposits: [] }))
         ]);
+const withdrawalStats = await WalletService.getWithdrawalStats();
 
         const pendingCount = pendingSMS?.length || 0;
         const recentCount = recentSMS.deposits?.length || 0;
@@ -493,7 +653,7 @@ Keep playing to improve your stats! 🎯
 📊 *Quick Stats:*
 ⏳ Pending SMS: ${pendingCount}
 📥 Recent SMS: ${recentCount}
-
+💰 Pending Withdrawals: ${withdrawalStats.pendingAmount}
 🔧 *SMS Actions:*
         `;
 
@@ -1117,7 +1277,7 @@ Contact developer for technical issues.
           {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-              [Markup.button.webApp('🎮 Play Bingo', 'https://bingominiapp.vercel.app')]
+              [Markup.button.webApp('🎮 Play Bingo', 'https://desta.et')]
             ])
           }
         );
@@ -1307,7 +1467,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
           {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-              [Markup.button.webApp('🎮 Play Bingo', 'https://bingominiapp.vercel.app')]
+              [Markup.button.webApp('🎮 Play Bingo', 'https://desta.et')]
             ])
           }
         );
@@ -1339,7 +1499,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
           {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-              [Markup.button.webApp('🎮 Play Bingo', 'https://bingominiapp.vercel.app')]
+              [Markup.button.webApp('🎮 Play Bingo', 'https://desta.et')]
             ])
           }
         );
@@ -1349,7 +1509,7 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
       }
     });
 
-    // Reject SMS command
+        // Reject SMS command
     this.bot.command(/^rejectsms_(.+)/, async (ctx) => {
          if (!AdminUtils.isAdmin(ctx.from.id)) {
         await ctx.reply('❌ Access denied');
@@ -1379,6 +1539,147 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
         await ctx.reply(`❌ Error rejecting SMS deposit: ${error.message}`);
       }
     });
+
+
+
+// Admin commands for withdrawal management
+this.bot.command(/^approvewithdraw_(.+)/, async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.reply('❌ Access denied');
+    return;
+  }
+
+  const transactionId = ctx.match[1];
+
+  try {
+    const result = await WalletService.approveWithdrawal(transactionId, ctx.from.id);
+
+    await ctx.replyWithMarkdown(
+      `✅ *Withdrawal Approved!*\n\n` +
+      `*User:* ${result.user.firstName || result.user.username}\n` +
+      `*Amount:* $${result.amount}\n` +
+      `*Method:* ${result.withdrawal.metadata.withdrawalMethod}\n` +
+      `*New Balance:* $${result.wallet.balance}`
+    );
+
+    // Notify user
+    await this.bot.telegram.sendMessage(
+      result.user.telegramId,
+      `✅ *Withdrawal Processed!*\n\n` +
+      `Your withdrawal of $${result.amount} has been approved and processed.\n` +
+      `*Method:* ${result.withdrawal.metadata.withdrawalMethod}\n` +
+      `*Transaction ID:* ${result.withdrawal._id}\n\n` +
+      `The funds should reach you within 24 hours.`,
+      { parse_mode: 'Markdown' }
+    );
+
+  } catch (error) {
+    console.error('Error approving withdrawal:', error);
+    await ctx.reply('❌ Error: ' + error.message);
+  }
+});
+
+this.bot.command(/^rejectwithdraw_(.+)/, async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.reply('❌ Access denied');
+    return;
+  }
+
+  const transactionId = ctx.match[1];
+  const reason = ctx.message.text.split(' ').slice(1).join(' ') || 'Withdrawal rejected by admin';
+
+  try {
+    const withdrawal = await WalletService.rejectWithdrawal(transactionId, ctx.from.id, reason);
+
+    await ctx.replyWithMarkdown(
+      `❌ *Withdrawal Rejected!*\n\n` +
+      `*User:* ${withdrawal.userId?.firstName || withdrawal.userId?.username || 'Unknown'}\n` +
+      `*Amount:* $${Math.abs(withdrawal.amount)}\n` +
+      `*Reason:* ${reason}`
+    );
+
+    // Notify user
+    const user = await User.findById(withdrawal.userId);
+    if (user) {
+      await this.bot.telegram.sendMessage(
+        user.telegramId,
+        `❌ *Withdrawal Rejected*\n\n` +
+        `Your withdrawal request of $${Math.abs(withdrawal.amount)} has been rejected.\n` +
+        `*Reason:* ${reason}\n\n` +
+        `The locked amount has been returned to your available balance.`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+  } catch (error) {
+    console.error('Error rejecting withdrawal:', error);
+    await ctx.reply('❌ Error: ' + error.message);
+  }
+});
+
+// View withdrawal details
+this.bot.command(/^viewwithdraw_(.+)/, async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.reply('❌ Access denied');
+    return;
+  }
+
+  const transactionId = ctx.match[1];
+
+  try {
+    const withdrawal = await Transaction.findById(transactionId)
+      .populate('userId', 'firstName username telegramId')
+      .populate('metadata.processedBy', 'firstName username');
+
+    if (!withdrawal || withdrawal.type !== 'WITHDRAWAL') {
+      await ctx.reply('❌ Withdrawal not found');
+      return;
+    }
+
+    const amount = Math.abs(withdrawal.amount);
+    const user = withdrawal.userId;
+
+    const message = `
+💰 *Withdrawal Details*
+
+*User:* ${user.firstName} (${user.username || 'No username'})
+*Telegram ID:* ${user.telegramId}
+*Amount:* $${amount}
+*Method:* ${withdrawal.metadata?.withdrawalMethod || 'Unknown'}
+*Status:* ${withdrawal.status}
+*Requested:* ${new Date(withdrawal.createdAt).toLocaleString()}
+
+*Account Details:*
+\`\`\`
+${JSON.stringify(withdrawal.metadata?.accountDetails || {}, null, 2)}
+\`\`\`
+
+${withdrawal.metadata?.processedBy ? 
+  `*Processed By:* ${withdrawal.metadata.processedBy.firstName} at ${new Date(withdrawal.metadata.processedAt).toLocaleString()}` : 
+  ''}
+
+${withdrawal.metadata?.rejectionReason ? 
+  `*Rejection Reason:* ${withdrawal.metadata.rejectionReason}` : 
+  ''}
+    `;
+
+    const keyboard = [];
+    if (withdrawal.status === 'PENDING') {
+      keyboard.push(
+        [Markup.button.callback('✅ Approve', `admin_approve_withdraw_${withdrawal._id}`)],
+        [Markup.button.callback('❌ Reject', `admin_reject_withdraw_${withdrawal._id}`)]
+      );
+    }
+    keyboard.push([Markup.button.callback('⬅️ Back to List', 'admin_pending_withdrawals')]);
+
+    await ctx.replyWithMarkdown(message, Markup.inlineKeyboard(keyboard));
+
+  } catch (error) {
+    console.error('Error viewing withdrawal:', error);
+    await ctx.reply('❌ Error: ' + error.message);
+  }
+});
+
 
     // ========== ACTION HANDLERS ==========
 
@@ -1509,8 +1810,9 @@ ${method.instructions}
         await ctx.editMessageText(welcomeMessage, {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')],
             [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
+            [Markup.button.callback('💰 Withdraw Funds', 'withdraw')],
             [Markup.button.callback('📊 My Stats & History', 'show_stats')],
             [Markup.button.callback('💼 My Wallet', 'show_wallet')]
           ])
@@ -1522,7 +1824,7 @@ ${method.instructions}
           {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-              [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+              [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')]
             ])
           }
         );
@@ -1597,7 +1899,7 @@ Keep playing to improve your stats! 🎯
         await ctx.editMessageText(statsMessage, {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.webApp('🎮 Play More Games', 'https://bingominiapp.vercel.app')],
+            [Markup.button.webApp('🎮 Play More Games', 'https://desta.et')],
             [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
           ])
         });
@@ -1608,7 +1910,7 @@ Keep playing to improve your stats! 🎯
           {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-              [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+              [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')],
               [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
             ])
           }
@@ -1631,7 +1933,7 @@ Keep playing to improve your stats! 🎯
       await ctx.editMessageText(helpMessage, {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard([
-          [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+          [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')],
           [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
           [Markup.button.callback('💼 My Wallet', 'show_wallet')],
           [Markup.button.callback('📊 My Stats', 'show_stats')]
@@ -1675,7 +1977,7 @@ Keep playing to improve your stats! 🎯
           {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-              [Markup.button.webApp('🎮 Play Bingo', 'https://bingominiapp.vercel.app')]
+              [Markup.button.webApp('🎮 Play Bingo', 'https://desta.et')]
             ])
           }
         );
@@ -1821,10 +2123,213 @@ Keep playing to improve your stats! 🎯
       }
     });
 
+
+    // Confirm withdrawal action
+this.bot.action(/confirm_withdraw_(.+)_(.+)/, async (ctx) => {
+  const amount = parseFloat(ctx.match[1]);
+  const method = ctx.match[2];
+  const accountDetails = ctx.session?.withdrawalAccount;
+  
+  if (!accountDetails) {
+    await ctx.answerCbQuery('❌ Account details not found');
+    return;
+  }
+  
+  try {
+    await ctx.answerCbQuery('🔄 Processing withdrawal request...');
+    
+    const result = await WalletService.createWithdrawalRequest(
+      ctx.from.id,
+      amount,
+      method,
+      accountDetails
+    );
+    
+    // Clear session
+    delete ctx.session.withdrawalMethod;
+    delete ctx.session.withdrawalAmount;
+    delete ctx.session.withdrawalAccount;
+    
+    await ctx.editMessageText(
+      `✅ *Withdrawal Request Submitted!*
+
+*Amount:* $${amount}
+*Method:* ${method}
+*Request ID:* ${result.withdrawal._id}
+
+Your withdrawal request has been submitted and the amount has been locked. Our admin team will process it within 24-48 hours.
+
+You will receive a notification when it's processed.`,
+      { parse_mode: 'Markdown' }
+    );
+    
+    // Notify admins
+    await this.notifyAdminsAboutWithdrawal(result.withdrawal, result.user);
+    
+  } catch (error) {
+    console.error('Error confirming withdrawal:', error);
+    await ctx.answerCbQuery('❌ ' + error.message);
+    await ctx.editMessageText(`❌ Error: ${error.message}`);
+  }
+});
+// Admin withdrawal menu
+this.bot.action('admin_withdrawals_menu', async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
+
+  const message = `
+💰 *Withdrawal Management*
+
+Manage user withdrawal requests.
+
+*Quick Actions:*
+  `;
+
+  await ctx.editMessageText(message, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('⏳ Pending Withdrawals', 'admin_pending_withdrawals')],
+      [Markup.button.callback('✅ Approved', 'admin_approved_withdrawals')],
+      [Markup.button.callback('❌ Rejected', 'admin_rejected_withdrawals')],
+      [Markup.button.callback('📊 Withdrawal Stats', 'admin_withdrawal_stats')],
+      [Markup.button.callback('⬅️ Back to Admin Panel', 'admin_back_to_panel')]
+    ])
+  });
+});
+
+// Pending withdrawals list
+this.bot.action('admin_pending_withdrawals', async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
+
+  try {
+    const pendingWithdrawals = await WalletService.getPendingWithdrawals();
+
+    let message = `⏳ *Pending Withdrawals*\n\n`;
+
+    if (pendingWithdrawals.length === 0) {
+      message += `✅ No pending withdrawal requests. All clear!\n`;
+    } else {
+      pendingWithdrawals.forEach((withdrawal, index) => {
+        const userName = withdrawal.userId?.firstName || withdrawal.userId?.username || 'Unknown User';
+        const telegramId = withdrawal.userId?.telegramId || 'N/A';
+        const amount = Math.abs(withdrawal.amount);
+        const method = withdrawal.metadata?.withdrawalMethod || 'Unknown';
+        
+        message += `━━━━━━━━━━━━━━━━━━\n`;
+        message += `#${index + 1}\n`;
+        message += `👤 User: ${userName}\n`;
+        message += `📞 ID: ${telegramId}\n`;
+        message += `💰 Amount: $${amount}\n`;
+        message += `🏦 Method: ${method}\n`;
+        message += `⏰ Requested: ${new Date(withdrawal.createdAt).toLocaleString()}\n\n`;
+        
+        message += `🔧 Actions:\n`;
+        message += `   • [Approve: /approvewithdraw_${withdrawal._id}]\n`;
+        message += `   • [Reject: /rejectwithdraw_${withdrawal._id}]\n`;
+        message += `   • [View: /viewwithdraw_${withdrawal._id}]\n\n`;
+      });
+    }
+
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔄 Refresh List', 'admin_pending_withdrawals')],
+        [Markup.button.callback('💰 Withdrawals Menu', 'admin_withdrawals_menu')],
+        [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+      ])
+    });
+  } catch (error) {
+    console.error('Error loading pending withdrawals:', error);
+    await ctx.editMessageText('❌ Error loading pending withdrawals');
+  }
+});
     // ========== TEXT HANDLER (MUST BE LAST) ==========
 
     this.bot.on('text', async (ctx) => {
       console.log('📝 Text received:', ctx.message.text.substring(0, 100));
+ //  withdrawal amount handling 
+ if (ctx.session && ctx.session.withdrawalMethod && !isNaN(parseFloat(ctx.message.text))) {
+    const amount = parseFloat(ctx.message.text);
+    const method = ctx.session.withdrawalMethod;
+    
+    try {
+      const balanceInfo = await WalletService.getAvailableBalance(ctx.from.id);
+      
+      // Validate amount
+      if (amount < 10) {
+        await ctx.reply('❌ Minimum withdrawal amount is $10');
+        return;
+      }
+      
+      if (amount > balanceInfo.availableBalance) {
+        await ctx.reply(`❌ Insufficient available balance. Available: $${balanceInfo.availableBalance}`);
+        return;
+      }
+      
+      // Store amount in session
+      ctx.session.withdrawalAmount = amount;
+      
+      // Ask for account details based on method
+      const accountPrompt = this.getAccountPromptForMethod(method);
+      
+      await ctx.replyWithMarkdown(accountPrompt,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('🚫 Cancel', 'withdraw')]
+        ])
+      );
+      
+    } catch (error) {
+      console.error('Error processing withdrawal amount:', error);
+      await ctx.reply('❌ ' + error.message);
+    }
+    return;
+  }
+  
+  // Handle account details input
+  if (ctx.session && ctx.session.withdrawalAmount && ctx.session.withdrawalMethod) {
+    const amount = ctx.session.withdrawalAmount;
+    const method = ctx.session.withdrawalMethod;
+    const accountDetails = ctx.message.text;
+    
+    try {
+      // Show confirmation
+      const confirmationMessage = `
+⚠️ *Confirm Withdrawal Request*
+
+*Amount:* $${amount}
+*Method:* ${method}
+*Account Details:* ${accountDetails}
+
+*Processing Fee:* $0
+*You will receive:* $${amount}
+
+Are you sure you want to proceed?
+      `;
+      
+      await ctx.replyWithMarkdown(confirmationMessage,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('✅ Yes, Confirm', `confirm_withdraw_${amount}_${method}`),
+            Markup.button.callback('❌ Cancel', 'withdraw')
+          ]
+        ])
+      );
+      
+      // Store account details in session
+      ctx.session.withdrawalAccount = accountDetails;
+      
+    } catch (error) {
+      console.error('Error processing account details:', error);
+      await ctx.reply('❌ ' + error.message);
+    }
+    return;
+  }
+  
 
       // Handle SMS deposits with payment method selected
       if (ctx.session && ctx.session.pendingDepositMethod) {
@@ -1877,7 +2382,7 @@ Keep playing to improve your stats! 🎯
             message = `✅ *Deposit Approved!*\n\n*Amount:* $${result.extractedAmount}\n*Method:* ${paymentMethod}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour deposit has been automatically matched and approved! 🎉`;
             keyboard = [
               [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
-              [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+              [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')]
             ];
           } else if (result.status === 'RECEIVED_WAITING_MATCH') {
             const typeText = smsAnalysis.type === 'SENDER' ? 'You sent money' : 'We received money';
@@ -1950,7 +2455,7 @@ Keep playing to improve your stats! 🎯
               `✅ *SMS Auto-Matched & Approved!*\n\n*Amount:* $${result.extractedAmount}\n*Type:* ${messageType}\n*Transaction:* ${identifiers.refNumber || 'N/A'}\n\nYour deposit was automatically matched and approved! 🎉`,
               Markup.inlineKeyboard([
                 [Markup.button.callback('💼 Check Wallet', 'show_wallet')],
-                [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')]
+                [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')]
               ])
             );
           } else {
@@ -2004,7 +2509,7 @@ Keep playing to improve your stats! 🎯
         await ctx.replyWithMarkdown(
           `❓ *Unknown Command*\n\nAvailable commands:\n/start, /help, /deposit, /wallet, /stats`,
           Markup.inlineKeyboard([
-            [Markup.button.webApp('🎮 Play Bingo Now', 'https://bingominiapp.vercel.app')],
+            [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')],
             [Markup.button.callback('📋 Show All Commands', 'show_help')]
           ])
         );
@@ -2012,14 +2517,116 @@ Keep playing to improve your stats! 🎯
         await ctx.replyWithMarkdown(
           'Want to play some Bingo? 🎯 Use /help to see all commands!',
           Markup.inlineKeyboard([
-            [Markup.button.webApp('🎮 YES, PLAY BINGO!', 'https://bingominiapp.vercel.app')],
+            [Markup.button.webApp('🎮 YES, PLAY BINGO!', 'https://desta.et')],
             [Markup.button.callback('📋 Commands Help', 'show_help')]
           ])
         );
       }
     });
-  }
 
+
+    
+  }
+  // Admin notification for withdrawal
+async notifyAdminsAboutWithdrawal(withdrawal, user) {
+  try {
+    const adminIds = AdminUtils.adminIds;
+    const amount = Math.abs(withdrawal.amount);
+    
+    const message = `📤 *New Withdrawal Request*\n\n` +
+      `*User:* ${user.firstName} (${user.username || 'No username'})\n` +
+      `*Telegram ID:* ${user.telegramId}\n` +
+      `*Amount:* $${amount}\n` +
+      `*Method:* ${withdrawal.metadata.withdrawalMethod}\n` +
+      `*Account:* ${JSON.stringify(withdrawal.metadata.accountDetails)}\n\n` +
+      `Approve: /approvewithdraw_${withdrawal._id}\n` +
+      `Reject: /rejectwithdraw_${withdrawal._id}\n` +
+      `View: /viewwithdraw_${withdrawal._id}`;
+    
+    // Notify all admins
+    for (const adminId of adminIds) {
+      try {
+        await this.bot.telegram.sendMessage(adminId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        console.error(`Failed to notify admin ${adminId}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error('Error notifying admins about withdrawal:', error);
+  }
+}
+// Helper method for account prompts
+getAccountPromptForMethod(method) {
+  const prompts = {
+    'CBE Bank': `
+🏦 *CBE Bank Account Details*
+
+Please provide your CBE Bank account details:
+• Account Holder Name:
+• Account Number:
+• Bank Branch (optional):
+
+Example:
+John Doe
+1000123456789
+Bole Branch
+
+Please send the details in this format:
+    `,
+    'Bank of Abysinia': `
+🏦 *BOA Account Details*
+
+Please provide your Bank of Abysinia account details:
+• Account Holder Name:
+• Account Number:
+• Bank Branch (optional):
+
+Example:
+John Doe
+123456789
+Bole Branch
+
+Please send the details in this format:
+    `,
+    'Telebirr': `
+📱 *Telebirr Details*
+
+Please provide your Telebirr details:
+• Phone Number:
+• Account Holder Name:
+
+Example:
+0912345678
+John Doe
+
+Please send the details in this format:
+    `,
+    'CBE Birr': `
+📱 *CBE Birr Details*
+
+Please provide your CBE Birr details:
+• Phone Number:
+• Account Holder Name:
+
+Example:
+0912345678
+John Doe
+
+Please send the details in this format:
+    `
+  };
+  
+  return prompts[method] || `
+💳 *Account Details*
+
+Please provide your account details for ${method}:
+
+Format:
+[Account Information]
+
+Please send the details:
+  `;
+}
   looksLikeBankSMS(text) {
     const sms = text.toLowerCase();
 
@@ -2104,8 +2711,11 @@ Keep playing to improve your stats! 🎯
               Markup.button.callback('🤖 Status', 'admin_bot_status')
             ],
             [
+               [Markup.button.callback('💰 Withdrawals', 'admin_withdrawals_menu')],
               Markup.button.callback('⬅️ Back to Main', 'back_to_start')
             ]
+           
+
           ])
         });
 
@@ -2123,15 +2733,20 @@ Keep playing to improve your stats! 🎯
         const userCount = await UserService.getUserCount ? await UserService.getUserCount() : 0;
         const transactionCount = await WalletService.getTransactionCount ? await WalletService.getTransactionCount() : 0;
         const depositCount = await WalletService.getDepositCount ? await WalletService.getDepositCount() : 0;
-        
+          const withdrawalStats = await WalletService.getWithdrawalStats();
+    const pendingWithdrawals = withdrawalStats.byStatus?.find(s => s._id === 'PENDING');
+    
         return {
           users: userCount,
           transactions: transactionCount,
-          deposits: depositCount
+          deposits: depositCount,
+            pendingWithdrawals: pendingWithdrawals?.count || 0,
+      totalWithdrawals: withdrawalStats.totalAmount?.[0]?.total || 0
         };
       } catch (error) {
         console.error('Error getting system stats:', error);
-        return { users: 0, transactions: 0, deposits: 0 };
+        return { users: 0, transactions: 0, deposits: 0,  pendingWithdrawals: 0,
+      totalWithdrawals: 0};
       }
     }
 

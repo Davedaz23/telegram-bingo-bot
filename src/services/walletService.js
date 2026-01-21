@@ -3749,6 +3749,356 @@ static async walletHealthCheck() {
     };
   }
 }
+
+
+//withdrawal, transfer, bet deduction etc
+
+// walletService.js - ADD THESE METHODS
+
+// Withdrawal Request
+static async createWithdrawalRequest(userId, amount, method, accountDetails) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    console.log('📤 Creating withdrawal request for user:', userId);
+    
+    const mongoUserId = await this.resolveAnyUserId(userId);
+    const user = await User.findById(mongoUserId);
+    
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    // Get wallet and check balance
+    const wallet = await Wallet.findOne({ userId: mongoUserId }).session(session);
+    if (!wallet) {
+      throw new Error('Wallet not found');
+    }
+
+    // Check if user has pending withdrawal
+    const pendingWithdrawal = await Transaction.findOne({
+      userId: mongoUserId,
+      type: 'WITHDRAWAL',
+      status: 'PENDING'
+    }).session(session);
+
+    if (pendingWithdrawal) {
+      throw new Error('You already have a pending withdrawal request');
+    }
+
+    // Validate minimum withdrawal amount
+    const minWithdrawal = 10; // $10 minimum
+    if (amount < minWithdrawal) {
+      throw new Error(`Minimum withdrawal amount is $${minWithdrawal}`);
+    }
+
+    // Check sufficient balance (including any locked amounts)
+    const availableBalance = wallet.balance;
+    if (availableBalance < amount) {
+      throw new Error(`Insufficient balance. Available: $${availableBalance}`);
+    }
+
+    // Lock the amount by creating pending transaction
+    const balanceBefore = wallet.balance;
+    const lockedBalance = balanceBefore - amount;
+
+    const withdrawal = new Transaction({
+      userId: mongoUserId,
+      type: 'WITHDRAWAL',
+      amount: -amount, // Negative amount for withdrawal
+      balanceBefore,
+      balanceAfter: lockedBalance,
+      status: 'PENDING',
+      description: `Withdrawal request via ${method}`,
+      reference: `WITHDRAW-${Date.now()}`,
+      metadata: {
+        withdrawalMethod: method,
+        accountDetails: accountDetails,
+        requestedAmount: amount,
+        processedBy: null,
+        processedAt: null,
+        isLocked: true,
+        lockedAt: new Date()
+      }
+    });
+
+    await withdrawal.save({ session });
+    await session.commitTransaction();
+
+    console.log(`✅ Withdrawal request created for user ${user.telegramId}: $${amount}`);
+
+    return {
+      withdrawal,
+      user,
+      availableBalance: balanceBefore,
+      lockedAmount: amount
+    };
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Error creating withdrawal request:', error);
+    throw error;
+  } finally {
+    session.endSession();
+  }
 }
+
+// Get user's withdrawal history
+static async getUserWithdrawals(userId, limit = 10) {
+  try {
+    const mongoUserId = await this.resolveAnyUserId(userId);
+    
+    return await Transaction.find({
+      userId: mongoUserId,
+      type: 'WITHDRAWAL'
+    })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean();
+  } catch (error) {
+    console.error('❌ Error getting user withdrawals:', error);
+    throw error;
+  }
+}
+
+// Get available balance (excluding locked amounts)
+static async getAvailableBalance(userId) {
+  try {
+    const mongoUserId = await this.resolveAnyUserId(userId);
+    
+    const wallet = await Wallet.findOne({ userId: mongoUserId });
+    if (!wallet) {
+      return 0;
+    }
+
+    // Calculate locked amount from pending withdrawals
+    const pendingWithdrawals = await Transaction.aggregate([
+      {
+        $match: {
+          userId: new mongoose.Types.ObjectId(mongoUserId),
+          type: 'WITHDRAWAL',
+          status: 'PENDING'
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalLocked: { $sum: { $abs: '$amount' } }
+        }
+      }
+    ]);
+
+    const lockedAmount = pendingWithdrawals[0]?.totalLocked || 0;
+    const available = wallet.balance - lockedAmount;
+
+    return {
+      totalBalance: wallet.balance,
+      lockedAmount,
+      availableBalance: Math.max(0, available)
+    };
+  } catch (error) {
+    console.error('❌ Error getting available balance:', error);
+    throw error;
+  }
+}
+
+// Admin: Get all pending withdrawals
+static async getPendingWithdrawals(limit = 50) {
+  try {
+    return await Transaction.find({
+      type: 'WITHDRAWAL',
+      status: 'PENDING'
+    })
+    .populate('userId', 'firstName username telegramId')
+    .sort({ createdAt: 1 })
+    .limit(limit)
+    .lean();
+  } catch (error) {
+    console.error('❌ Error getting pending withdrawals:', error);
+    throw error;
+  }
+}
+
+// Admin: Approve withdrawal
+static async approveWithdrawal(transactionId, adminUserId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    console.log('✅ Admin approving withdrawal:', transactionId);
+    
+    const withdrawal = await Transaction.findById(transactionId)
+      .populate('userId')
+      .session(session);
+    
+    if (!withdrawal) {
+      throw new Error('Withdrawal request not found');
+    }
+
+    if (withdrawal.status !== 'PENDING') {
+      throw new Error(`Withdrawal already ${withdrawal.status}`);
+    }
+
+    if (withdrawal.type !== 'WITHDRAWAL') {
+      throw new Error('Transaction is not a withdrawal');
+    }
+
+    const user = withdrawal.userId;
+    const amount = Math.abs(withdrawal.amount); // Convert negative to positive
+
+    // Get wallet
+    const wallet = await Wallet.findOne({ userId: user._id }).session(session);
+    if (!wallet) {
+      throw new Error('Wallet not found');
+    }
+
+    // Verify wallet has sufficient balance (should have been locked already)
+    if (wallet.balance < amount) {
+      throw new Error('Insufficient wallet balance for withdrawal');
+    }
+
+    // Deduct the amount (it was already locked, now actually deduct it)
+    const balanceBefore = wallet.balance;
+    wallet.balance -= amount;
+    const balanceAfter = wallet.balance;
+
+    // Update withdrawal transaction
+    withdrawal.balanceBefore = balanceBefore;
+    withdrawal.balanceAfter = balanceAfter;
+    withdrawal.status = 'COMPLETED';
+    withdrawal.metadata.processedBy = adminUserId;
+    withdrawal.metadata.processedAt = new Date();
+    withdrawal.metadata.isLocked = false;
+    withdrawal.metadata.completedAt = new Date();
+
+    // Create payment record (optional, for tracking)
+    const paymentRecord = new PaymentRecord({
+      userId: user._id,
+      transactionId: withdrawal._id,
+      type: 'WITHDRAWAL',
+      amount,
+      method: withdrawal.metadata.withdrawalMethod,
+      accountDetails: withdrawal.metadata.accountDetails,
+      status: 'PAID',
+      paidBy: adminUserId,
+      paidAt: new Date()
+    });
+
+    await wallet.save({ session });
+    await withdrawal.save({ session });
+    await paymentRecord.save({ session });
+    await session.commitTransaction();
+
+    console.log(`✅ Withdrawal approved: $${amount} for user ${user.telegramId}`);
+
+    return {
+      withdrawal,
+      wallet,
+      user,
+      amount
+    };
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Error approving withdrawal:', error);
+    throw error;
+  } finally {
+    session.endSession();
+  }
+}
+
+// Admin: Reject withdrawal
+static async rejectWithdrawal(transactionId, adminUserId, reason = '') {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    console.log('❌ Admin rejecting withdrawal:', transactionId);
+    
+    const withdrawal = await Transaction.findById(transactionId)
+      .populate('userId')
+      .session(session);
+    
+    if (!withdrawal) {
+      throw new Error('Withdrawal request not found');
+    }
+
+    if (withdrawal.status !== 'PENDING') {
+      throw new Error(`Withdrawal already ${withdrawal.status}`);
+    }
+
+    // Update withdrawal status (amount will be unlocked automatically)
+    withdrawal.status = 'REJECTED';
+    withdrawal.metadata.processedBy = adminUserId;
+    withdrawal.metadata.processedAt = new Date();
+    withdrawal.metadata.isLocked = false;
+    withdrawal.metadata.rejectionReason = reason;
+    withdrawal.metadata.rejectedAt = new Date();
+
+    await withdrawal.save({ session });
+    await session.commitTransaction();
+
+    console.log(`❌ Withdrawal rejected: $${Math.abs(withdrawal.amount)} for user ${withdrawal.userId.telegramId}`);
+
+    return withdrawal;
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Error rejecting withdrawal:', error);
+    throw error;
+  } finally {
+    session.endSession();
+  }
+}
+
+// Get withdrawal statistics
+static async getWithdrawalStats() {
+  try {
+    const stats = await Transaction.aggregate([
+      {
+        $match: { type: 'WITHDRAWAL' }
+      },
+      {
+        $facet: {
+          totalCount: [{ $count: 'count' }],
+          byStatus: [
+            { $group: { _id: '$status', count: { $sum: 1 }, totalAmount: { $sum: { $abs: '$amount' } } } }
+          ],
+          dailyStats: [
+            {
+              $group: {
+                _id: {
+                  $dateToString: { format: '%Y-%m-%d', date: '$createdAt' }
+                },
+                count: { $sum: 1 },
+                totalAmount: { $sum: { $abs: '$amount' } }
+              }
+            },
+            { $sort: { _id: -1 } },
+            { $limit: 7 }
+          ],
+          totalAmount: [
+            { $group: { _id: null, total: { $sum: { $abs: '$amount' } } } }
+          ],
+          pendingAmount: [
+            { $match: { status: 'PENDING' } },
+            { $group: { _id: null, total: { $sum: { $abs: '$amount' } } } }
+          ]
+        }
+      }
+    ]);
+    
+    return stats[0];
+  } catch (error) {
+    console.error('❌ Error getting withdrawal stats:', error);
+    throw error;
+  }
+}
+
+}
+
+
+
 
 module.exports = WalletService;

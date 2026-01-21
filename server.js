@@ -113,6 +113,7 @@ const initializeBot = () => {
 const corsOptions = {
   origin: [
     'https://bingominiapp.vercel.app', // Your live frontend
+    'https://desta.et', // Your live frontend
     'http://localhost:3001', // Development
     'http://localhost:3000', // Development
     'ws://localhost:3000',   // WebSocket for development
@@ -364,7 +365,7 @@ app.get('/', (req, res) => {
       'Wallet System with Ethiopian Payments',
       'Admin Dashboard'
     ],
-    frontend: 'https://bingominiapp.vercel.app',
+    frontend: 'https://desta.et',
     webSocketInfo: {
       enabled: true,
       endpoint: '/ws/game',

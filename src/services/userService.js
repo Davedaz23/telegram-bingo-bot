@@ -188,6 +188,49 @@ class UserService {
       return false;
     }
   }
+  //withdrwal stats
+  static async getUserWithdrawalStats(userId) {
+  try {
+    const mongoUserId = await WalletService.resolveAnyUserId(userId);
+    
+    const stats = await Transaction.aggregate([
+      {
+        $match: {
+          userId: new mongoose.Types.ObjectId(mongoUserId),
+          type: 'WITHDRAWAL'
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalWithdrawn: { $sum: { $abs: '$amount' } },
+          totalRequests: { $sum: 1 },
+          approvedCount: {
+            $sum: { $cond: [{ $eq: ['$status', 'COMPLETED'] }, 1, 0] }
+          },
+          pendingCount: {
+            $sum: { $cond: [{ $eq: ['$status', 'PENDING'] }, 1, 0] }
+          }
+        }
+      }
+    ]);
+    
+    return stats[0] || {
+      totalWithdrawn: 0,
+      totalRequests: 0,
+      approvedCount: 0,
+      pendingCount: 0
+    };
+  } catch (error) {
+    console.error('Error getting user withdrawal stats:', error);
+    return {
+      totalWithdrawn: 0,
+      totalRequests: 0,
+      approvedCount: 0,
+      pendingCount: 0
+    };
+  }
+}
 }
 
 module.exports = UserService;

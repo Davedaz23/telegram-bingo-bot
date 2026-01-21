@@ -12,6 +12,13 @@ const bingoCardSchema = new mongoose.Schema({
     ref: 'Game',
     required: true
   },
+  // ✅ ADD THIS FIELD for card number
+  cardNumber: {
+    type: Number,
+    required: true,
+    min: 1,
+    max: 400 // or whatever your max cards are
+  },
   numbers: {
     type: [[mongoose.Schema.Types.Mixed]],
     required: true
@@ -28,7 +35,6 @@ const bingoCardSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  // ✅ NEW: Track late joiners
   isLateJoiner: {
     type: Boolean,
     default: false
@@ -37,7 +43,7 @@ const bingoCardSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
-   isDisqualified: {
+  isDisqualified: {
     type: Boolean,
     default: false
   },
@@ -46,7 +52,8 @@ const bingoCardSchema = new mongoose.Schema({
   },
   disqualificationReason: {
     type: String
-  },  winningPatternType: {
+  },
+  winningPatternType: {
     type: String,
     enum: ['BINGO', 'ROW', 'COLUMN', 'DIAGONAL', 'FOUR_CORNERS', 'FULL_CARD'],
     default: null
@@ -55,12 +62,10 @@ const bingoCardSchema = new mongoose.Schema({
     type: Number,
     default: null
   },
-  
   winningPatternPositions: {
     type: [Number],
     default: []
   },
-  // Track which numbers were already called when they joined
   numbersCalledAtJoin: {
     type: [Number],
     default: []
@@ -69,7 +74,8 @@ const bingoCardSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Index for faster queries
+// ✅ Update the index to include cardNumber uniqueness within a game
+bingoCardSchema.index({ gameId: 1, cardNumber: 1 }, { unique: true });
 bingoCardSchema.index({ userId: 1, gameId: 1 }, { unique: true });
 
 module.exports = mongoose.model('BingoCard', bingoCardSchema);
