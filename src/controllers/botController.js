@@ -1,9 +1,12 @@
 // botController.js - UPDATED VERSION WITH SINGLETON PATTERN
-const { Telegraf, Markup } = require('telegraf');
+const { Telegraf, Markup, session } = require('telegraf'); // ADD session import
 const UserService = require('../services/userService');
 const WalletService = require('../services/walletService');
 const SMSDeposit = require('../models/SMSDeposit');
 // ✅ NEW: AdminUtils for multiple admin support
+const mongoose = require('mongoose');
+const Transaction = require('../models/Transaction');
+const User = require('../models/User'); 
 const AdminUtils = {
   adminIds: [],
   
@@ -55,7 +58,16 @@ class BotController {
     
     // ✅ Initialize AdminUtils
     AdminUtils.initialize();
-    
+     this.bot.use(session({
+      defaultSession: () => ({
+        // Default session structure
+        pendingDepositMethod: null,
+        withdrawalMethod: null,
+        withdrawalAmount: null,
+        withdrawalAccount: null,
+        pendingWithdrawalRejection: null
+      })
+    }));
     this.setupHandlers();
     
     BotController.instance = this;
@@ -129,6 +141,7 @@ class BotController {
         const keyboardButtons = [
           [Markup.button.webApp('🎮 Play Bingo Now', 'https://desta.et')],
           [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
+            [Markup.button.callback('📤 Withdraw Funds', 'withdraw')],
           [Markup.button.callback('📊 My Stats & History', 'show_stats')],
           [Markup.button.callback('💼 My Wallet', 'show_wallet')]
         ];
@@ -353,53 +366,65 @@ class BotController {
     });
 
     // Wallet command
-    this.bot.command('wallet', async (ctx) => {
-      try {
-        const user = await UserService.findOrCreateUser(ctx.from);
+  // Update the wallet command to show proper balance information:
+this.bot.command('wallet', async (ctx) => {
+  try {
+    const user = await UserService.findOrCreateUser(ctx.from);
 
-        let balance = 0;
-        let transactions = [];
+    let balanceInfo = { totalBalance: 0, availableBalance: 0, lockedAmount: 0 };
+    let transactions = [];
 
-        try {
-          balance = await WalletService.getBalanceByTelegramId(user.telegramId);
-          transactions = await WalletService.getUserTransactions(user.telegramId);
-        } catch (error) {
-          await WalletService.initializeWallet(user.telegramId);
-          balance = 0;
-        }
+    try {
+      // Get detailed balance info including locked amounts
+      balanceInfo = await WalletService.getAvailableBalance(ctx.from.id);
+      transactions = await WalletService.getUserTransactions(user.telegramId);
+    } catch (error) {
+      console.error('Error getting wallet info:', error);
+      // Initialize wallet if it doesn't exist
+      await WalletService.initializeWallet(user.telegramId);
+      balanceInfo.totalBalance = 0;
+      balanceInfo.availableBalance = 0;
+      balanceInfo.lockedAmount = 0;
+    }
 
-        let message = `💼 *Your Wallet*\n\n*Current Balance:* $${balance}\n\n`;
-        message += `📊 *Recent Transactions:*\n`;
+    let message = `💼 *Your Wallet*\n\n`;
+    message += `*Total Balance:* $${balanceInfo.totalBalance}\n`;
+    message += `*Available:* $${balanceInfo.availableBalance}\n`;
+    if (balanceInfo.lockedAmount > 0) {
+      message += `*Locked (pending withdrawals):* $${balanceInfo.lockedAmount}\n`;
+    }
+    message += `\n📊 *Recent Transactions:*\n`;
 
-        if (transactions.length > 0) {
-          transactions.slice(0, 5).forEach(tx => {
-            const emoji = tx.type === 'DEPOSIT' ? '📥' :
-              tx.type === 'WINNING' ? '🏆' : '🎮';
-            const sign = tx.amount > 0 ? '+' : '';
-            const status = tx.status === 'PENDING' ? '⏳' :
-              tx.status === 'COMPLETED' ? '✅' : '❌';
-            message += `${emoji} ${sign}$${Math.abs(tx.amount)} - ${tx.description} ${status}\n`;
-          });
-        } else {
-          message += `No transactions yet.\n`;
-        }
+    if (transactions.length > 0) {
+      transactions.slice(0, 5).forEach(tx => {
+        const emoji = tx.type === 'DEPOSIT' ? '📥' :
+          tx.type === 'WINNING' ? '🏆' : 
+          tx.type === 'WITHDRAWAL' ? '📤' : '🎮';
+        const sign = tx.amount > 0 ? '+' : '';
+        const status = tx.status === 'PENDING' ? '⏳' :
+          tx.status === 'COMPLETED' ? '✅' : '❌';
+        message += `${emoji} ${sign}$${Math.abs(tx.amount)} - ${tx.description} ${status}\n`;
+      });
+    } else {
+      message += `No transactions yet.\n`;
+    }
 
-        message += `\n*Quick Actions:*`;
+    message += `\n*Quick Actions:*`;
 
-        await ctx.replyWithMarkdown(message, {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
-            [Markup.button.callback('📊 Full History', 'show_full_history')],
-            [Markup.button.callback('⬅️ Back to Main', 'back_to_start')],
-            [Markup.button.callback('💰 Withdraw Funds', 'withdraw')]
-          ])
-        });
-      } catch (error) {
-        console.error('Error in wallet command:', error);
-        await ctx.reply('❌ Please use /start first to set up your account.');
-      }
+    await ctx.replyWithMarkdown(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
+        [Markup.button.callback('📤 Withdraw Funds', 'withdraw')],
+        [Markup.button.callback('📊 Full History', 'show_full_history')],
+        [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
+      ])
     });
+  } catch (error) {
+    console.error('Error in wallet command:', error);
+    await ctx.reply('❌ Please use /start first to set up your account.');
+  }
+});
 
     // Stats command
     this.bot.command('stats', async (ctx) => {
@@ -525,13 +550,51 @@ this.bot.action('start_withdrawal', async (ctx) => {
     await ctx.answerCbQuery('Error: ' + error.message);
   }
 });
+// Handle withdraw button click
 
+this.bot.action('withdraw', async (ctx) => {
+  try {
+    const user = await UserService.findOrCreateUser(ctx.from);
+    const balanceInfo = await WalletService.getAvailableBalance(ctx.from.id);
+    
+    const message = `
+💰 *Withdraw Funds*
+
+*Your Balance Information:*
+• Total Balance: $${balanceInfo.totalBalance}
+• Available for withdrawal: $${balanceInfo.availableBalance}
+• Locked (pending withdrawals): $${balanceInfo.lockedAmount}
+
+*Withdrawal Methods:*
+🏦 Bank Transfer (CBE, BOA, Dashen)
+📱 Mobile Money (Telebirr, CBE Birr)
+
+*Minimum Withdrawal:* $10
+*Processing Time:* 24-48 hours
+
+*Ready to withdraw?* Click below to start:
+    `;
+
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('💰 Request Withdrawal', 'start_withdrawal')],
+        [Markup.button.callback('📋 Withdrawal History', 'withdrawal_history')],
+        [Markup.button.callback('💼 My Wallet', 'show_wallet')],
+        [Markup.button.callback('⬅️ Back', 'back_to_start')]
+      ])
+    });
+  } catch (error) {
+    console.error('Error in withdraw action:', error);
+    await ctx.answerCbQuery('❌ ' + error.message);
+  }
+});
 // Withdrawal method selection
 this.bot.action(/withdraw_(.+)/, async (ctx) => {
   const method = ctx.match[1];
   const methodNames = {
     'cbe': 'CBE Bank',
-    'boa': 'Bank of Abysinia',
+    'boa': 'Bank of Abysinia', 
     'dashen': 'Dashen Bank',
     'telebirr': 'Telebirr',
     'cbebirr': 'CBE Birr'
@@ -540,9 +603,17 @@ this.bot.action(/withdraw_(.+)/, async (ctx) => {
   const methodName = methodNames[method];
   if (!methodName) return;
   
-  // Store method in session
-  ctx.session = ctx.session || {};
+  // Store method in session - CRITICAL: ctx.session should already exist
+  if (!ctx.session) {
+    ctx.session = {};
+  }
+  
+  // Clear any previous withdrawal data
   ctx.session.withdrawalMethod = methodName;
+  ctx.session.withdrawalAmount = null;
+  ctx.session.withdrawalAccount = null;
+  
+  console.log(`💰 Withdrawal method set: ${methodName}, Session:`, ctx.session);
   
   const message = `
 🏦 *Withdrawal via ${methodName}*
@@ -1053,7 +1124,49 @@ Maintenance and diagnostic tools.
         ])
       });
     });
+// admin system stats
+this.bot.action('admin_system_stats', async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
 
+  try {
+    const stats = await this.getSystemStats();
+    const memoryUsage = process.memoryUsage();
+    const uptime = process.uptime();
+    
+    const message = `
+📊 *System Statistics*
+
+*User Statistics:*
+• Total Users: ${stats.users}
+• Total Transactions: ${stats.transactions}
+• Total Deposits: ${stats.deposits}
+• Total Withdrawals: ${stats.totalWithdrawals}
+• Pending Withdrawals: ${stats.pendingWithdrawals}
+
+*Bot Status:*
+• Status: ${this.isRunning ? '✅ Running' : '❌ Stopped'}
+• Uptime: ${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m
+• Memory: ${Math.round(memoryUsage.heapUsed / 1024 / 1024)}MB
+
+*Database:*
+• Active connections: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'}
+    `;
+
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔄 Refresh', 'admin_system_stats')],
+        [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+      ])
+    });
+  } catch (error) {
+    console.error('Error loading system stats:', error);
+    await ctx.answerCbQuery('Error loading stats');
+  }
+});
     // Bot Status
     this.bot.action('admin_bot_status', async (ctx) => {
       if (!AdminUtils.isAdmin(ctx.from.id)) {
@@ -1832,50 +1945,60 @@ ${method.instructions}
     });
 
     this.bot.action('show_wallet', async (ctx) => {
-      try {
-        const user = await UserService.findOrCreateUser(ctx.from);
-        let balance = 0;
-        let transactions = [];
+  try {
+    const user = await UserService.findOrCreateUser(ctx.from);
+    
+    let balanceInfo = { totalBalance: 0, availableBalance: 0, lockedAmount: 0 };
+    let transactions = [];
 
-        try {
-          balance = await WalletService.getBalanceByTelegramId(user.telegramId);
-          transactions = await WalletService.getUserTransactions(user.telegramId);
-        } catch (error) {
-          await WalletService.initializeWallet(user.telegramId);
-          balance = 0;
-        }
+    try {
+      balanceInfo = await WalletService.getAvailableBalance(ctx.from.id);
+      transactions = await WalletService.getUserTransactions(user.telegramId);
+    } catch (error) {
+      await WalletService.initializeWallet(user.telegramId);
+      balanceInfo.totalBalance = 0;
+      balanceInfo.availableBalance = 0;
+      balanceInfo.lockedAmount = 0;
+    }
 
-        let message = `💼 *Your Wallet*\n\n*Current Balance:* $${balance}\n\n`;
-        message += `📊 *Recent Transactions:*\n`;
+    let message = `💼 *Your Wallet*\n\n`;
+    message += `*Total Balance:* $${balanceInfo.totalBalance}\n`;
+    message += `*Available:* $${balanceInfo.availableBalance}\n`;
+    if (balanceInfo.lockedAmount > 0) {
+      message += `*Locked (pending withdrawals):* $${balanceInfo.lockedAmount}\n`;
+    }
+    message += `\n📊 *Recent Transactions:*\n`;
 
-        if (transactions.length > 0) {
-          transactions.slice(0, 5).forEach(tx => {
-            const emoji = tx.type === 'DEPOSIT' ? '📥' :
-              tx.type === 'WINNING' ? '🏆' : '🎮';
-            const sign = tx.amount > 0 ? '+' : '';
-            const status = tx.status === 'PENDING' ? '⏳' :
-              tx.status === 'COMPLETED' ? '✅' : '❌';
-            message += `${emoji} ${sign}$${Math.abs(tx.amount)} - ${tx.description} ${status}\n`;
-          });
-        } else {
-          message += `No transactions yet.\n`;
-        }
+    if (transactions.length > 0) {
+      transactions.slice(0, 5).forEach(tx => {
+        const emoji = tx.type === 'DEPOSIT' ? '📥' :
+          tx.type === 'WINNING' ? '🏆' : 
+          tx.type === 'WITHDRAWAL' ? '📤' : '🎮';
+        const sign = tx.amount > 0 ? '+' : '';
+        const status = tx.status === 'PENDING' ? '⏳' :
+          tx.status === 'COMPLETED' ? '✅' : '❌';
+        message += `${emoji} ${sign}$${Math.abs(tx.amount)} - ${tx.description} ${status}\n`;
+      });
+    } else {
+      message += `No transactions yet.\n`;
+    }
 
-        message += `\n*Quick Actions:*`;
+    message += `\n*Quick Actions:*`;
 
-        await ctx.editMessageText(message, {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
-            [Markup.button.callback('📊 Full History', 'show_full_history')],
-            [Markup.button.callback('⬅️ Back', 'back_to_start')]
-          ])
-        });
-      } catch (error) {
-        console.error('Error showing wallet:', error);
-        await ctx.answerCbQuery('Error loading wallet info');
-      }
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
+        [Markup.button.callback('📤 Withdraw Funds', 'withdraw')],
+        [Markup.button.callback('📊 Full History', 'show_full_history')],
+        [Markup.button.callback('⬅️ Back', 'back_to_start')]
+      ])
     });
+  } catch (error) {
+    console.error('Error showing wallet:', error);
+    await ctx.answerCbQuery('Error loading wallet info');
+  }
+});
 
     this.bot.action('show_stats', async (ctx) => {
       try {
@@ -2131,7 +2254,7 @@ this.bot.action(/confirm_withdraw_(.+)_(.+)/, async (ctx) => {
   const accountDetails = ctx.session?.withdrawalAccount;
   
   if (!accountDetails) {
-    await ctx.answerCbQuery('❌ Account details not found');
+    await ctx.answerCbQuery('❌ Account details not found. Please restart the withdrawal process.');
     return;
   }
   
@@ -2146,9 +2269,9 @@ this.bot.action(/confirm_withdraw_(.+)_(.+)/, async (ctx) => {
     );
     
     // Clear session
-    delete ctx.session.withdrawalMethod;
-    delete ctx.session.withdrawalAmount;
-    delete ctx.session.withdrawalAccount;
+    ctx.session.withdrawalMethod = null;
+    ctx.session.withdrawalAmount = null;
+    ctx.session.withdrawalAccount = null;
     
     await ctx.editMessageText(
       `✅ *Withdrawal Request Submitted!*
@@ -2248,14 +2371,249 @@ this.bot.action('admin_pending_withdrawals', async (ctx) => {
     await ctx.editMessageText('❌ Error loading pending withdrawals');
   }
 });
+this.bot.action('admin_approved_withdrawals', async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
+
+  try {
+    const approvedWithdrawals = await Transaction.find({
+      type: 'WITHDRAWAL',
+      status: 'COMPLETED'
+    })
+    .populate('userId', 'firstName username telegramId')
+    .sort({ createdAt: -1 })
+    .limit(10);
+
+    let message = `✅ *Approved Withdrawals*\n\n`;
+
+    if (approvedWithdrawals.length === 0) {
+      message += `No approved withdrawals yet.\n`;
+    } else {
+      approvedWithdrawals.forEach((withdrawal, index) => {
+        const userName = withdrawal.userId?.firstName || withdrawal.userId?.username || 'Unknown User';
+        const amount = Math.abs(withdrawal.amount);
+        const date = new Date(withdrawal.createdAt).toLocaleString();
+        
+        message += `━━━━━━━━━━━━━━━━━━\n`;
+        message += `#${index + 1}\n`;
+        message += `👤 User: ${userName}\n`;
+        message += `💰 Amount: $${amount}\n`;
+        message += `🏦 Method: ${withdrawal.metadata?.withdrawalMethod || 'Unknown'}\n`;
+        message += `⏰ Approved: ${date}\n\n`;
+      });
+    }
+
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔄 Refresh', 'admin_approved_withdrawals')],
+        [Markup.button.callback('💰 Withdrawals Menu', 'admin_withdrawals_menu')],
+        [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+      ])
+    });
+  } catch (error) {
+    console.error('Error loading approved withdrawals:', error);
+    await ctx.editMessageText('❌ Error loading approved withdrawals');
+  }
+});
+this.bot.action('admin_rejected_withdrawals', async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
+
+  try {
+    const rejectedWithdrawals = await Transaction.find({
+      type: 'WITHDRAWAL',
+      status: 'REJECTED'
+    })
+    .populate('userId', 'firstName username telegramId')
+    .sort({ createdAt: -1 })
+    .limit(10);
+
+    let message = `❌ *Rejected Withdrawals*\n\n`;
+
+    if (rejectedWithdrawals.length === 0) {
+      message += `No rejected withdrawals.\n`;
+    } else {
+      rejectedWithdrawals.forEach((withdrawal, index) => {
+        const userName = withdrawal.userId?.firstName || withdrawal.userId?.username || 'Unknown User';
+        const amount = Math.abs(withdrawal.amount);
+        const date = new Date(withdrawal.createdAt).toLocaleString();
+        const reason = withdrawal.metadata?.rejectionReason || 'No reason provided';
+        
+        message += `━━━━━━━━━━━━━━━━━━\n`;
+        message += `#${index + 1}\n`;
+        message += `👤 User: ${userName}\n`;
+        message += `💰 Amount: $${amount}\n`;
+        message += `🏦 Method: ${withdrawal.metadata?.withdrawalMethod || 'Unknown'}\n`;
+        message += `❓ Reason: ${reason}\n`;
+        message += `⏰ Rejected: ${date}\n\n`;
+      });
+    }
+
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔄 Refresh', 'admin_rejected_withdrawals')],
+        [Markup.button.callback('💰 Withdrawals Menu', 'admin_withdrawals_menu')],
+        [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+      ])
+    });
+  } catch (error) {
+    console.error('Error loading rejected withdrawals:', error);
+    await ctx.editMessageText('❌ Error loading rejected withdrawals');
+  }
+});
+
+// Add a cancel action to clear withdrawal session
+this.bot.action('cancel_withdrawal', async (ctx) => {
+  if (ctx.session) {
+    ctx.session.withdrawalMethod = null;
+    ctx.session.withdrawalAmount = null;
+    ctx.session.withdrawalAccount = null;
+  }
+  
+  await ctx.answerCbQuery('Withdrawal cancelled');
+  await ctx.editMessageText(
+    '💰 *Withdraw Funds*\n\nWithdrawal process cancelled. What would you like to do?',
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('💰 Request Withdrawal', 'start_withdrawal')],
+        [Markup.button.callback('💼 My Wallet', 'show_wallet')],
+        [Markup.button.callback('⬅️ Back', 'back_to_start')]
+      ])
+    }
+  );
+});
+
+this.bot.action('admin_withdrawal_stats', async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
+
+  try {
+    const stats = await WalletService.getWithdrawalStats();
+    
+    let message = `📊 *Withdrawal Statistics*\n\n`;
+    
+    message += `*Total Withdrawals:* ${stats.totalCount?.[0]?.count || 0}\n`;
+    message += `*Total Amount:* $${stats.totalAmount?.[0]?.total || 0}\n\n`;
+    
+    if (stats.byStatus && stats.byStatus.length > 0) {
+      message += `*By Status:*\n`;
+      stats.byStatus.forEach(status => {
+        const emoji = status._id === 'PENDING' ? '⏳' :
+                     status._id === 'COMPLETED' ? '✅' : '❌';
+        message += `${emoji} ${status._id}: ${status.count} ($${status.totalAmount})\n`;
+      });
+    }
+    
+    if (stats.dailyStats && stats.dailyStats.length > 0) {
+      message += `\n*Last 7 Days:*\n`;
+      stats.dailyStats.forEach(day => {
+        message += `📅 ${day._id}: ${day.count} withdrawals ($${day.totalAmount})\n`;
+      });
+    }
+
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔄 Refresh', 'admin_withdrawal_stats')],
+        [Markup.button.callback('💰 Withdrawals Menu', 'admin_withdrawals_menu')],
+        [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+      ])
+    });
+  } catch (error) {
+    console.error('Error loading withdrawal stats:', error);
+    await ctx.editMessageText('❌ Error loading withdrawal statistics');
+  }
+});
+// Admin approve/reject withdrawal actions
+this.bot.action(/admin_approve_withdraw_(.+)/, async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
+
+  const withdrawalId = ctx.match[1];
+
+  try {
+    await ctx.answerCbQuery('🔄 Approving withdrawal...');
+    
+    const result = await WalletService.approveWithdrawal(withdrawalId, ctx.from.id);
+
+    await ctx.editMessageText(
+      `✅ *Withdrawal Approved!*\n\n` +
+      `*User:* ${result.user.firstName || result.user.username}\n` +
+      `*Amount:* $${result.amount}\n` +
+      `*Method:* ${result.withdrawal.metadata.withdrawalMethod}\n` +
+      `*New Balance:* $${result.wallet.balance}`,
+      { parse_mode: 'Markdown' }
+    );
+
+    // Notify user
+    await this.bot.telegram.sendMessage(
+      result.user.telegramId,
+      `✅ *Withdrawal Processed!*\n\n` +
+      `Your withdrawal of $${result.amount} has been approved and processed.\n` +
+      `*Method:* ${result.withdrawal.metadata.withdrawalMethod}\n` +
+      `*Transaction ID:* ${result.withdrawal._id}\n\n` +
+      `The funds should reach you within 24 hours.`,
+      { parse_mode: 'Markdown' }
+    );
+
+  } catch (error) {
+    console.error('Error approving withdrawal:', error);
+    await ctx.answerCbQuery('❌ ' + error.message);
+    await ctx.editMessageText(`❌ Error: ${error.message}`);
+  }
+});
+
+this.bot.action(/admin_reject_withdraw_(.+)/, async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
+
+  const withdrawalId = ctx.match[1];
+  
+  try {
+    await ctx.answerCbQuery('🔄 Asking for rejection reason...');
+    
+    // Store withdrawal ID in session for later
+    ctx.session = ctx.session || {};
+    ctx.session.pendingWithdrawalRejection = withdrawalId;
+    
+    await ctx.editMessageText(
+      `❓ *Rejection Reason*\n\n` +
+      `Please provide a reason for rejecting this withdrawal request:\n\n` +
+      `Type your reason below:`,
+      { parse_mode: 'Markdown' }
+    );
+    
+  } catch (error) {
+    console.error('Error starting rejection:', error);
+    await ctx.answerCbQuery('❌ ' + error.message);
+  }
+});
+
+
     // ========== TEXT HANDLER (MUST BE LAST) ==========
 
     this.bot.on('text', async (ctx) => {
       console.log('📝 Text received:', ctx.message.text.substring(0, 100));
  //  withdrawal amount handling 
- if (ctx.session && ctx.session.withdrawalMethod && !isNaN(parseFloat(ctx.message.text))) {
+ // 1. Handle withdrawal amount input
+  if (ctx.session && ctx.session.withdrawalMethod && !ctx.session.withdrawalAmount && !isNaN(parseFloat(ctx.message.text))) {
     const amount = parseFloat(ctx.message.text);
     const method = ctx.session.withdrawalMethod;
+    
+    console.log(`💰 Processing withdrawal amount: ${amount} for method: ${method}`);
     
     try {
       const balanceInfo = await WalletService.getAvailableBalance(ctx.from.id);
@@ -2273,6 +2631,7 @@ this.bot.action('admin_pending_withdrawals', async (ctx) => {
       
       // Store amount in session
       ctx.session.withdrawalAmount = amount;
+      console.log(`✅ Amount stored: $${amount}`);
       
       // Ask for account details based on method
       const accountPrompt = this.getAccountPromptForMethod(method);
@@ -2290,20 +2649,35 @@ this.bot.action('admin_pending_withdrawals', async (ctx) => {
     return;
   }
   
-  // Handle account details input
-  if (ctx.session && ctx.session.withdrawalAmount && ctx.session.withdrawalMethod) {
+  // 2. Handle withdrawal account details input
+  if (ctx.session && ctx.session.withdrawalMethod && ctx.session.withdrawalAmount && !ctx.session.withdrawalAccount) {
     const amount = ctx.session.withdrawalAmount;
     const method = ctx.session.withdrawalMethod;
     const accountDetails = ctx.message.text;
     
+    console.log(`💳 Processing account details for ${method} withdrawal: ${amount}`);
+    
     try {
+      // Store account details in session
+      ctx.session.withdrawalAccount = accountDetails;
+      console.log(`✅ Account details stored for ${method}`);
+      
+      // Validate account details
+      const validationError = this.validateAccountDetails(method, accountDetails);
+      if (validationError) {
+        await ctx.reply(`❌ ${validationError}\n\nPlease send correct account details:`);
+        // Remove invalid account details
+        ctx.session.withdrawalAccount = null;
+        return;
+      }
+      
       // Show confirmation
       const confirmationMessage = `
 ⚠️ *Confirm Withdrawal Request*
 
 *Amount:* $${amount}
 *Method:* ${method}
-*Account Details:* ${accountDetails}
+*Account Details:* ${this.formatAccountDetailsForDisplay(method, accountDetails)}
 
 *Processing Fee:* $0
 *You will receive:* $${amount}
@@ -2320,9 +2694,6 @@ Are you sure you want to proceed?
         ])
       );
       
-      // Store account details in session
-      ctx.session.withdrawalAccount = accountDetails;
-      
     } catch (error) {
       console.error('Error processing account details:', error);
       await ctx.reply('❌ ' + error.message);
@@ -2330,6 +2701,40 @@ Are you sure you want to proceed?
     return;
   }
   
+  // 3. Handle withdrawal rejection reason input
+  if (ctx.session && ctx.session.pendingWithdrawalRejection) {
+    const withdrawalId = ctx.session.pendingWithdrawalRejection;
+    const reason = ctx.message.text;
+    
+    try {
+      const withdrawal = await WalletService.rejectWithdrawal(withdrawalId, ctx.from.id, reason);
+      delete ctx.session.pendingWithdrawalRejection;
+      
+      await ctx.replyWithMarkdown(
+        `❌ *Withdrawal Rejected!*\n\n` +
+        `*User:* ${withdrawal.userId?.firstName || withdrawal.userId?.username || 'Unknown'}\n` +
+        `*Amount:* $${Math.abs(withdrawal.amount)}\n` +
+        `*Reason:* ${reason}`
+      );
+
+      const user = await User.findById(withdrawal.userId);
+      if (user) {
+        await this.bot.telegram.sendMessage(
+          user.telegramId,
+          `❌ *Withdrawal Rejected*\n\n` +
+          `Your withdrawal request of $${Math.abs(withdrawal.amount)} has been rejected.\n` +
+          `*Reason:* ${reason}\n\n` +
+          `The locked amount has been returned to your available balance.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+    } catch (error) {
+      console.error('Error rejecting withdrawal:', error);
+      await ctx.reply('❌ Error: ' + error.message);
+    }
+    return;
+  }
+
 
       // Handle SMS deposits with payment method selected
       if (ctx.session && ctx.session.pendingDepositMethod) {
@@ -2527,6 +2932,162 @@ Are you sure you want to proceed?
 
     
   }
+
+  // Helper method for account validation
+validateAccountDetails(method, details) {
+  const lines = details.split('\n').map(line => line.trim()).filter(line => line);
+  
+  switch(method) {
+    case 'CBE Bank':
+    case 'Bank of Abysinia':
+    case 'Dashen Bank':
+      // For banks: expect at least account holder name and account number
+      if (lines.length < 2) {
+        return 'Please provide at least:\n1. Account Holder Name\n2. Account Number';
+      }
+      
+      // Check if second line looks like an account number (numbers only)
+      const accountNumber = lines[1].replace(/\s/g, '');
+      if (!/^\d+$/.test(accountNumber)) {
+        return 'Account number should contain only numbers';
+      }
+      
+      if (accountNumber.length < 10) {
+        return 'Account number seems too short';
+      }
+      break;
+      
+    case 'Telebirr':
+    case 'CBE Birr':
+      // For mobile money: expect phone number
+      if (lines.length < 1) {
+        return 'Please provide phone number';
+      }
+      
+      const phone = lines[0].replace(/\s/g, '');
+      if (!/^09\d{8}$/.test(phone)) {
+        return 'Please provide a valid Ethiopian phone number (e.g., 0912345678)';
+      }
+      break;
+  }
+  
+  return null; // No error
+}
+
+// Helper method to format account details for display
+formatAccountDetailsForDisplay(method, details) {
+  const lines = details.split('\n').map(line => line.trim()).filter(line => line);
+  
+  switch(method) {
+    case 'CBE Bank':
+    case 'Bank of Abysinia':
+    case 'Dashen Bank':
+      if (lines.length >= 2) {
+        return `Name: ${lines[0]}\nAccount: ${lines[1]}\n${lines[2] ? `Branch: ${lines[2]}` : ''}`;
+      }
+      break;
+      
+    case 'Telebirr':
+    case 'CBE Birr':
+      if (lines.length >= 1) {
+        const phone = lines[0].replace(/\s/g, '');
+        return `Phone: ${phone}\n${lines[1] ? `Name: ${lines[1]}` : ''}`;
+      }
+      break;
+  }
+  
+  return details;
+}
+
+// Update the getAccountPromptForMethod method:
+getAccountPromptForMethod(method) {
+  const prompts = {
+    'CBE Bank': `
+🏦 *CBE Bank Account Details*
+
+Please provide your CBE Bank account details (one per line):
+1. Account Holder Name (as in bank)
+2. Account Number
+3. Bank Branch (optional)
+
+Example:
+Alemayehu Yalew
+1000143822668
+Bole Branch
+
+Please send the details in this format:
+`,
+    'Bank of Abysinia': `
+🏦 *BOA Account Details*
+
+Please provide your Bank of Abysinia account details (one per line):
+1. Account Holder Name (as in bank)
+2. Account Number
+3. Bank Branch (optional)
+
+Example:
+Alemayehu Yalew
+145633257
+Bole Branch
+
+Please send the details in this format:
+`,
+    'Dashen Bank': `
+🏦 *Dashen Bank Account Details*
+
+Please provide your Dashen Bank account details (one per line):
+1. Account Holder Name (as in bank)
+2. Account Number
+3. Bank Branch (optional)
+
+Example:
+Alemayehu Yalew
+123456789012
+Bole Branch
+
+Please send the details in this format:
+`,
+    'Telebirr': `
+📱 *Telebirr Details*
+
+Please provide your Telebirr details (one per line):
+1. Phone Number (e.g., 0912345678)
+2. Account Holder Name (optional)
+
+Example:
+0968546687
+Alemayehu Yalew
+
+Please send the details in this format:
+`,
+    'CBE Birr': `
+📱 *CBE Birr Details*
+
+Please provide your CBE Birr details (one per line):
+1. Phone Number (e.g., 0912345678)
+2. Account Holder Name (optional)
+
+Example:
+0912345678
+Alemayehu Yalew
+
+Please send the details in this format:
+`
+  };
+  
+  return prompts[method] || `
+💳 *Account Details*
+
+Please provide your account details for ${method} (one item per line):
+
+Format:
+[Line 1]
+[Line 2]
+[Line 3]
+
+Please send the details:
+`;
+}
   // Admin notification for withdrawal
 async notifyAdminsAboutWithdrawal(withdrawal, user) {
   try {
@@ -2666,66 +3227,70 @@ Please send the details:
 
     return isBankSMS || (hasAmount && hasTransactionWords && reasonableLength);
   }
-     async showAdminPanel(ctx) {
-      try {
-        console.log('✅ Admin access granted, loading admin panel...');
+async showAdminPanel(ctx) {
+  try {
+    console.log('✅ Admin access granted, loading admin panel...');
 
-        const [pendingDeposits, pendingSMS, systemStats] = await Promise.all([
-          WalletService.getPendingDeposits().catch(() => []),
-          WalletService.getPendingSMSDeposits(5).catch(() => []),
-          this.getSystemStats().catch(() => ({ users: 0, transactions: 0, deposits: 0 }))
-        ]);
+    const [pendingDeposits, pendingSMS, systemStats] = await Promise.all([
+      WalletService.getPendingDeposits().catch(() => []),
+      WalletService.getPendingSMSDeposits(5).catch(() => []),
+      this.getSystemStats().catch(() => ({ users: 0, transactions: 0, deposits: 0, pendingWithdrawals: 0, totalWithdrawals: 0 }))
+    ]);
 
-        const message = `
+    const message = `
 👑 *ADMIN PANEL*
 
 📊 *Quick Overview:*
 • ⏳ Pending Deposits: ${pendingDeposits.length}
 • 📱 Pending SMS: ${pendingSMS.length}
+• 💰 Pending Withdrawals: ${systemStats.pendingWithdrawals}
 • 👥 Total Users: ${systemStats.users}
 • 💰 Total Deposits: ${systemStats.deposits}
 
 🏠 *Main Sections:*
         `;
 
-        await ctx.editMessageText(message, {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            // First row: Main categories
-            [
-              Markup.button.callback('📱 SMS', 'admin_sms_menu'),
-              Markup.button.callback('👥 Users', 'admin_users_menu')
-            ],
-            [
-              Markup.button.callback('💳 Transactions', 'admin_transactions_menu'),
-              Markup.button.callback('🔧 Tools', 'admin_tools_menu')
-            ],
-            // Second row: Quick actions
-            [
-              Markup.button.callback('⏳ Pending', 'admin_pending_deposits'),
-              Markup.button.callback('🤖 Auto-Approve', 'admin_auto_approve')
-            ],
-            // Third row: Info and back
-            [
-              Markup.button.callback('📖 Help', 'admin_help_menu'),
-              Markup.button.callback('🤖 Status', 'admin_bot_status')
-            ],
-            [
-               [Markup.button.callback('💰 Withdrawals', 'admin_withdrawals_menu')],
-              Markup.button.callback('⬅️ Back to Main', 'back_to_start')
-            ]
-           
+    // FIXED KEYBOARD ARRAY - No nested arrays within arrays
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        // First row: Main categories - each button is in its own array
+        [
+          Markup.button.callback('📱 SMS', 'admin_sms_menu'),
+          Markup.button.callback('👥 Users', 'admin_users_menu')
+        ],
+        [
+          Markup.button.callback('💳 Transactions', 'admin_transactions_menu'),
+          Markup.button.callback('💰 Withdrawals', 'admin_withdrawals_menu')
+        ],
+        [
+          Markup.button.callback('🔧 Tools', 'admin_tools_menu'),
+          Markup.button.callback('📊 Stats', 'admin_system_stats')
+        ],
+        // Second row: Quick actions
+        [
+          Markup.button.callback('⏳ Pending Deposits', 'admin_pending_deposits'),
+          Markup.button.callback('🤖 Auto-Approve', 'admin_auto_approve')
+        ],
+        // Third row: Info and back
+        [
+          Markup.button.callback('📖 Help', 'admin_help_menu'),
+          Markup.button.callback('🤖 Status', 'admin_bot_status')
+        ],
+        // Fourth row: Single button for back
+        [
+          Markup.button.callback('⬅️ Back to Main', 'back_to_start')
+        ]
+      ])
+    });
 
-          ])
-        });
+    console.log('✅ Admin panel loaded successfully');
 
-        console.log('✅ Admin panel loaded successfully');
-
-      } catch (error) {
-        console.error('❌ Admin panel error:', error);
-        await ctx.reply('❌ Error loading admin panel: ' + error.message);
-      }
-    }
+  } catch (error) {
+    console.error('❌ Admin panel error:', error);
+    await ctx.reply('❌ Error loading admin panel: ' + error.message);
+  }
+}
 
      async getSystemStats() {
       try {
