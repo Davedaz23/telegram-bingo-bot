@@ -40,7 +40,8 @@ const smsDepositSchema = new mongoose.Schema({
       'AUTO_APPROVED', 
       'PROCESSING',
       'CONFIRMED',
-      'AUTO_MATCHED'
+      'AUTO_MATCHED',
+      "DUPLICATE"
     ],
     default: 'RECEIVED'
   },

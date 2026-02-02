@@ -3,7 +3,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
-const http = require('http'); // Add HTTP for WebSocket
+const http = require('http');
 require('dotenv').config();
 
 const authRoutes = require('./src/routes/auth');
@@ -13,14 +13,10 @@ const testRoutes = require('./src/routes/test');
 const cron = require('node-cron');
 const WebSocketService = require('./src/services/webSocketService');  
 const ReconciliationService = require('./src/services/reconciliationService');
-// Import WalletService to initialize payment methods
 const WalletService = require('./src/services/walletService');
-// Import GameService - make sure the path is correct
 const GameService = require('./src/services/gameService');
 
 const app = express();
-
-// Create HTTP server for WebSocket
 const server = http.createServer(app);
 
 // Connect to MongoDB
@@ -28,21 +24,20 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected successfully'))
   .catch(err => console.error('MongoDB connection error:', err));
 
-// ✅ FIXED: Simplified bot initialization with singleton pattern
+// ✅ FIXED: Bot initialization with better error handling
 let botController = null;
-let servicesInitialized = false; // Add flag to track initialization
-let webSocketService = null; // WebSocket service instance
+let servicesInitialized = false;
+let webSocketService = null;
+let botInitializationAttempts = 0;
+const MAX_BOT_RETRIES = 5;
 
 const AdminUtils = {
   adminIds: [],
   
   initialize() {
-    // Get admin IDs from environment variables
-    // Support both ADMIN_TELEGRAM_ID (single) and ADMIN_TELEGRAM_IDS (multiple)
     const singleAdmin = process.env.ADMIN_TELEGRAM_ID || '';
     const multipleAdmins = process.env.ADMIN_TELEGRAM_IDS || '';
     
-    // Combine both - remove empty strings and duplicates
     let allAdmins = [];
     
     if (singleAdmin) {
@@ -54,7 +49,6 @@ const AdminUtils = {
       allAdmins = [...allAdmins, ...ids];
     }
     
-    // Remove duplicates
     this.adminIds = [...new Set(allAdmins)].filter(id => id !== '');
     
     console.log(`👑 AdminUtils initialized with ${this.adminIds.length} admins: ${this.adminIds.join(', ')}`);
@@ -78,46 +72,109 @@ const AdminUtils = {
   }
 };
 
-const initializeBot = () => {
+// ✅ FIXED: Better bot initialization with retry mechanism
+const initializeBot = async (retryCount = 0) => {
   try {
     if (!process.env.BOT_TOKEN) {
       console.warn('⚠️ BOT_TOKEN not found - Telegram bot disabled');
       return null;
     }
 
-    console.log('🤖 Initializing Telegram bot...');
+    console.log(`🤖 Initializing Telegram bot (Attempt ${retryCount + 1}/${MAX_BOT_RETRIES})...`);
+    
+    // Clear any existing instance first
+    if (botController) {
+      try {
+        botController.stop();
+      } catch (e) {
+        console.log('⚠️ Could not stop existing bot instance:', e.message);
+      }
+      botController = null;
+    }
     
     // Initialize AdminUtils first
     AdminUtils.initialize();
     
-    // Use the BotController - it will use AdminUtils internally
+    // Import and create BotController
     const BotController = require('./src/controllers/botController');
-    botController = new BotController(
-      process.env.BOT_TOKEN,
-      process.env.ADMIN_TELEGRAM_ID || '' // Keep for backward compatibility
-    );
+    
+    // Use singleton pattern properly
+    if (BotController._instance) {
+      console.log('🤖 Reusing existing bot instance');
+      botController = BotController._instance;
+    } else {
+      botController = new BotController(
+        process.env.BOT_TOKEN,
+        process.env.ADMIN_TELEGRAM_ID || ''
+      );
+    }
     
     // Launch the bot immediately
     botController.launch();
     console.log('✅ Telegram Bot launched successfully');
     
+    // Reset retry counter on success
+    botInitializationAttempts = 0;
+    
     return botController;
   } catch (error) {
-    console.error('❌ Failed to initialize Telegram bot:', error);
-    console.error('Error details:', error.stack);
+    console.error('❌ Failed to initialize Telegram bot:', error.message);
+    
+    // Retry logic
+    if (retryCount < MAX_BOT_RETRIES - 1) {
+      const delay = Math.min(5000 * (retryCount + 1), 30000); // Exponential backoff, max 30s
+      console.log(`🔄 Retrying bot initialization in ${delay/1000} seconds...`);
+      
+      setTimeout(() => {
+        initializeBot(retryCount + 1);
+      }, delay);
+    } else {
+      console.error(`❌ Bot initialization failed after ${MAX_BOT_RETRIES} attempts`);
+      console.error('Bot error details:', error.stack);
+      
+      // Schedule retry in 1 minute
+      setTimeout(() => {
+        console.log('🔄 Scheduled bot retry after failure...');
+        initializeBot(0);
+      }, 60000);
+    }
+    
     return null;
   }
 };
 
-// CORS configuration - UPDATED with your live frontend URL
+// ✅ FIXED: Bot health monitoring
+const checkBotHealth = () => {
+  if (!botController) {
+    console.warn('🤖 Bot controller not initialized');
+    return false;
+  }
+  
+  try {
+    // Try to send a test message to check if bot is alive
+    const isRunning = botController.isRunning || false;
+    
+    if (!isRunning) {
+      console.warn('🤖 Bot is marked as not running, attempting restart...');
+      initializeBot();
+    }
+    
+    return isRunning;
+  } catch (error) {
+    console.error('❌ Bot health check failed:', error.message);
+    return false;
+  }
+};
+
+// CORS configuration
 const corsOptions = {
   origin: [
-    'https://bingominiapp.vercel.app', // Your live frontend
-    'https://desta.et', // Your live frontend
-    'http://localhost:3001', // Development
-    'http://localhost:3000', // Development
-    'ws://localhost:3000',   // WebSocket for development
-    'ws://localhost:3001'    // WebSocket for development
+    'https://bingominiapp.vercel.app',
+    'https://desta.et',
+    'http://localhost:3001',
+    'http://localhost:3000',
+    'ws://localhost:3000',
+    'ws://localhost:3001'
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
@@ -127,7 +184,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 // Middleware
-app.use(express.json({ limit: '10mb' })); // Increased for receipt images if needed
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '../public')));
 
@@ -136,7 +193,6 @@ app.use('/api/auth', authRoutes);
 app.use('/api/games', gameRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api', testRoutes);
-// ✅ ADD: Admin routes for wallet management
 app.use('/api/admin', require('./src/routes/admin'));
 
 // WebSocket info endpoint
@@ -188,9 +244,8 @@ app.get('/test-quick', async (req, res) => {
   }
 });
 
-// ✅ MODIFIED: Initialize services with proper error handling and singleton pattern
+// ✅ FIXED: Initialize services with better error handling
 const initializeServices = async () => {
-  // Check if services are already initialized
   if (servicesInitialized) {
     console.log('✅ Services already initialized, skipping...');
     return;
@@ -198,8 +253,7 @@ const initializeServices = async () => {
 
   try {
     console.log('🔄 Initializing all services...');
-    servicesInitialized = true;
-
+    
     // 1. Initialize WebSocket service
     console.log('🔗 Initializing WebSocket service...');
     webSocketService = new WebSocketService(server);
@@ -222,29 +276,37 @@ const initializeServices = async () => {
       GameService.startAutoGameService();
       console.log('✅ Auto-game service initialized successfully');
     } else {
-      console.error('❌ GameService.startAutoGameService is not available');
+      console.warn('⚠️ GameService.startAutoGameService is not available');
     }
 
-    // 5. Initialize Telegram bot
+    // 5. Initialize Telegram bot (async but don't wait for it)
     console.log('🤖 Initializing Telegram bot...');
-    botController = initializeBot();
-    
-    if (botController) {
-      console.log('✅ Telegram bot initialized successfully');
-    } else {
-      console.warn('⚠️ Telegram bot not initialized (check BOT_TOKEN in .env)');
-    }
+    initializeBot().then(controller => {
+      if (controller) {
+        console.log('✅ Telegram bot initialized successfully');
+      } else {
+        console.warn('⚠️ Telegram bot not initialized (check BOT_TOKEN in .env)');
+      }
+    }).catch(error => {
+      console.error('❌ Telegram bot initialization failed:', error);
+    });
 
+    servicesInitialized = true;
     console.log('🎉 All services initialized successfully!');
     
   } catch (error) {
     console.error('❌ Failed to initialize services:', error);
     console.error('Error details:', error.message);
-    servicesInitialized = false; // Reset flag on error
+    
+    // Schedule retry
+    setTimeout(() => {
+      console.log('🔄 Retrying services initialization...');
+      initializeServices();
+    }, 10000);
   }
 };
 
-// Enhanced health check with wallet status and WebSocket
+// ✅ FIXED: Enhanced health check with bot status verification
 app.get('/health', async (req, res) => {
   try {
     // MongoDB health check
@@ -260,7 +322,12 @@ app.get('/health', async (req, res) => {
       status: 'PENDING'
     });
 
-    const botStatus = botController ? '✅ Running' : '❌ Not running';
+    // Check bot status with verification
+    let botStatus = '❌ Not running';
+    if (botController) {
+      botStatus = botController.isRunning ? '✅ Running' : '❌ Not running';
+    }
+
     const webSocketStatus = webSocketService ? '✅ Running' : '❌ Not running';
     const activeConnections = webSocketService ? webSocketService.getConnectionCount() : 0;
 
@@ -272,7 +339,12 @@ app.get('/health', async (req, res) => {
         totalWallets,
         pendingDeposits
       },
-      telegramBot: botStatus,
+      telegramBot: {
+        status: botStatus,
+        instance: botController ? 'Initialized' : 'Not initialized',
+        attempts: botInitializationAttempts,
+        adminIds: AdminUtils.getAdminIds()
+      },
       webSocket: {
         status: webSocketStatus,
         activeConnections,
@@ -325,14 +397,26 @@ app.get('/admin/health', async (req, res) => {
       messagesReceived: webSocketService.getMessagesReceived()
     } : null;
 
+    // Bot status with details
+    let botDetails = { status: 'Not running' };
+    if (botController) {
+      botDetails = {
+        status: botController.isRunning ? 'Running' : 'Not running',
+        isRunning: botController.isRunning,
+        adminCount: AdminUtils.getAdminCount(),
+        initialized: true
+      };
+    }
+
     res.json({
       status: 'OK',
       system: 'Bingo Admin Dashboard',
       timestamp: new Date().toISOString(),
       stats,
-      telegramBot: botController ? 'Running' : 'Not running',
+      telegramBot: botDetails,
       webSocket: webSocketStats,
-      servicesInitialized
+      servicesInitialized,
+      botInitializationAttempts
     });
   } catch (error) {
     res.status(500).json({
@@ -344,7 +428,11 @@ app.get('/admin/health', async (req, res) => {
 
 // Root route
 app.get('/', (req, res) => {
-  const botStatus = botController ? '✅ Running' : '❌ Not running';
+  let botStatus = '❌ Not running';
+  if (botController) {
+    botStatus = botController.isRunning ? '✅ Running' : '❌ Not running';
+  }
+  
   const webSocketStatus = webSocketService ? '✅ Running' : '❌ Not running';
   
   res.json({
@@ -409,7 +497,6 @@ app.use('*', (req, res) => {
 app.use((err, req, res, next) => {
   console.error('Error Stack:', err.stack);
 
-  // MongoDB duplicate key error
   if (err.code === 11000) {
     return res.status(409).json({
       success: false,
@@ -417,7 +504,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // MongoDB validation error
   if (err.name === 'ValidationError') {
     const errors = Object.values(err.errors).map(e => e.message);
     return res.status(400).json({
@@ -427,7 +513,6 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // Wallet service errors
   if (err.message.includes('Wallet') || err.message.includes('balance')) {
     return res.status(400).json({
       success: false,
@@ -439,6 +524,12 @@ app.use((err, req, res, next) => {
     success: false,
     error: process.env.NODE_ENV === 'production' ? 'Something went wrong!' : err.message
   });
+});
+
+// ✅ ADD: Scheduled bot health check
+cron.schedule('*/5 * * * *', () => {
+  console.log('🩺 Running scheduled bot health check...');
+  checkBotHealth();
 });
 
 cron.schedule('0 * * * *', async () => {
@@ -470,6 +561,21 @@ cron.schedule('0 * * * *', () => {
   }
 });
 
+// ✅ ADD: Service restart scheduler (in case of failures)
+cron.schedule('0 */6 * * *', () => {
+  console.log('🔄 Running scheduled services health check...');
+  if (!servicesInitialized) {
+    console.log('🔄 Services not initialized, attempting restart...');
+    initializeServices();
+  }
+  
+  // Check bot status
+  if (!botController || !botController.isRunning) {
+    console.log('🤖 Bot not running, attempting restart...');
+    initializeBot();
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 // Start server and THEN initialize services
@@ -478,14 +584,14 @@ server.listen(PORT, () => {
   console.log(`💰 Wallet System: Enabled`);
   console.log(`🔗 WebSocket: Enabled`);
   console.log(`🤖 Telegram Bot: ${process.env.BOT_TOKEN ? 'Enabled' : 'Disabled'}`);
-  console.log(`👑 Admin ID: ${process.env.ADMIN_TELEGRAM_ID || 'Not set'}`);
+  console.log(`👑 Admin IDs: ${AdminUtils.getAdminList() || 'Not set'}`);
   console.log(`🌐 CORS enabled for:`);
   console.log(`   - https://bingominiapp.vercel.app (Production)`);
   console.log(`   - http://localhost:3001 (Development)`);
   console.log(`   - http://localhost:3000 (Development)`);
   console.log(`   - WebSocket support enabled`);
 
-  // Initialize services after server is running - only once
+  // Initialize services after server is running
   console.log('🔄 Initializing services...');
   initializeServices();
 });
@@ -494,7 +600,7 @@ server.listen(PORT, () => {
 process.on('SIGINT', async () => {
   console.log('🛑 Server shutting down gracefully...');
   
-  servicesInitialized = false; // Reset flag
+  servicesInitialized = false;
 
   // Clean up game service intervals
   if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
@@ -510,8 +616,12 @@ process.on('SIGINT', async () => {
 
   // Stop bot if running
   if (botController && botController.bot) {
-    botController.bot.stop();
-    console.log('✅ Telegram bot stopped');
+    try {
+      botController.stop('SIGINT');
+      console.log('✅ Telegram bot stopped');
+    } catch (error) {
+      console.error('❌ Error stopping bot:', error);
+    }
   }
 
   // Close MongoDB connection
@@ -527,7 +637,7 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
   console.log('🛑 Server terminating gracefully...');
   
-  servicesInitialized = false; // Reset flag
+  servicesInitialized = false;
 
   // Clean up game service intervals
   if (GameService && typeof GameService.cleanupAllIntervals === 'function') {
@@ -543,8 +653,12 @@ process.on('SIGTERM', async () => {
 
   // Stop bot if running
   if (botController && botController.bot) {
-    botController.bot.stop();
-    console.log('✅ Telegram bot stopped');
+    try {
+      botController.stop('SIGTERM');
+      console.log('✅ Telegram bot stopped');
+    } catch (error) {
+      console.error('❌ Error stopping bot:', error);
+    }
   }
 
   // Close MongoDB connection
@@ -557,26 +671,31 @@ process.on('SIGTERM', async () => {
   });
 });
 
-// WebSocket upgrade handling for express routes
-// server.on('upgrade', (request, socket, head) => {
-//   const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+// ✅ ADD: Process error handlers to restart bot on crash
+process.on('uncaughtException', (error) => {
+  console.error('⚠️ Uncaught Exception:', error);
+  console.error('Error stack:', error.stack);
   
-//   // Route WebSocket connections based on path
-//   if (pathname.startsWith('/ws/')) {
-//     // Let WebSocketService handle the upgrade
-//     if (webSocketService && webSocketService.wss) {
-//       webSocketService.wss.handleUpgrade(request, socket, head, (ws) => {
-//         webSocketService.wss.emit('connection', ws, request);
-//       });
-//     } else {
-//       console.warn('⚠️ WebSocket service not ready, rejecting connection');
-//       socket.destroy();
-//     }
-//   } else {
-//     // Not a WebSocket path, close connection
-//     socket.destroy();
-//   }
-// });
+  // Don't exit, but restart bot if it's a bot error
+  if (error.message.includes('bot') || error.message.includes('telegram')) {
+    console.log('🔄 Bot crashed, attempting restart...');
+    setTimeout(() => {
+      initializeBot();
+    }, 5000);
+  }
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
+  
+  // Restart bot if it's related to bot operations
+  if (reason.message && (reason.message.includes('bot') || reason.message.includes('telegram'))) {
+    console.log('🔄 Bot promise rejection, attempting restart...');
+    setTimeout(() => {
+      initializeBot();
+    }, 5000);
+  }
+});
 
 // Export for use in other files
 module.exports = { app, server, webSocketService };

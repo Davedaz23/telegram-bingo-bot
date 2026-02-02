@@ -12,6 +12,11 @@ const walletSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
+  lockedAmount: { // ✅ ADD THIS FIELD for tracking pending withdrawals
+    type: Number,
+    default: 0,
+    min: 0
+  },
   currency: {
     type: String,
     default: 'USD'
@@ -19,6 +24,10 @@ const walletSchema = new mongoose.Schema({
   isActive: {
     type: Boolean,
     default: true
+  },
+  metadata: { // ✅ Optional: Add metadata for additional tracking
+    type: Object,
+    default: {}
   }
 }, {
   timestamps: true
@@ -26,5 +35,15 @@ const walletSchema = new mongoose.Schema({
 
 // Index for faster queries
 walletSchema.index({ userId: 1 });
+
+// Virtual for available balance
+walletSchema.virtual('availableBalance').get(function() {
+  return Math.max(0, this.balance - (this.lockedAmount || 0));
+});
+
+// Virtual for total balance (available + locked)
+walletSchema.virtual('totalBalance').get(function() {
+  return this.balance;
+});
 
 module.exports = mongoose.model('Wallet', walletSchema);
