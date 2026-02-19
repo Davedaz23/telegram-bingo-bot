@@ -30,7 +30,7 @@ class WebSocketService {
     this.wss.on('connection', (ws, req) => {
       console.log('🔗 New WebSocket connection:', req.url);
       
-      const url = new URL(req.url, `http://${req.headers.host}`);
+      const url = new URL(req.url, `https://${req.headers.host}`);
       const userId = url.searchParams.get('userId');
       const gameId = url.searchParams.get('gameId');
       

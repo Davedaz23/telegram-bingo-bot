@@ -2888,7 +2888,7 @@ static async matchCBE_SMS(newSMSDeposit, smsText) {
             if (!wallet) {
                 wallet = new Wallet({
                     userId: user._id,
-                    balance: 0,
+                    balance: 20,
                     currency: 'USD'
                 });
             }
@@ -3011,7 +3011,7 @@ static async matchCBE_SMS(newSMSDeposit, smsText) {
         if (!wallet) {
           wallet = new Wallet({
             userId: user._id,
-            balance: 0,
+            balance: 20,
             currency: 'USD'
           });
         }
@@ -3314,7 +3314,7 @@ static async matchCBE_SMS(newSMSDeposit, smsText) {
         if (!wallet) {
           wallet = new Wallet({
             userId: user._id,
-            balance: 0,
+            balance: 20,
             currency: 'USD'
           });
         }
@@ -3411,7 +3411,7 @@ static async matchCBE_SMS(newSMSDeposit, smsText) {
         if (!wallet) {
           wallet = new Wallet({
             userId: user._id,
-            balance: 0,
+            balance: 20,
             currency: 'USD'
           });
         }
@@ -4793,7 +4793,7 @@ static calculateTelebirrMatchScore(identifiers, smsDeposit) {
           console.log('💰 Creating new wallet for user:', user.telegramId);
           wallet = new Wallet({
             userId: user._id,
-            balance: 0,
+            balance: 20, // Initialize with a default balance of 20
             currency: 'USD'
           });
         }
@@ -4999,7 +4999,7 @@ static calculateTelebirrMatchScore(identifiers, smsDeposit) {
             console.log('💰 Creating new wallet for user:', user.telegramId);
             wallet = new Wallet({
               userId: user._id,
-              balance: 0,
+              balance: 20,
               currency: 'USD'
             });
           }
@@ -5149,7 +5149,7 @@ static async approveTelebirrMatchedSMS(userSMS, adminSMS) {
         if (!wallet) {
             wallet = new Wallet({
                 userId: user._id,
-                balance: 0,
+                balance: 20, // Initialize with a default balance of 20
                 currency: 'USD'
             });
         }
@@ -5340,7 +5340,7 @@ static async approveTelebirrMatchedSMS(userSMS, adminSMS) {
           if (!wallet) {
             wallet = new Wallet({
               userId: mongoUserId,
-              balance: 0,
+              balance: 20, // Initialize with a default balance of 20
               currency: 'USD'
             });
             await wallet.save();
@@ -7102,6 +7102,818 @@ static async storeSMSMessage(userId, smsText, paymentMethod = 'UNKNOWN') {
         throw error;
       }
     }
+
+
+
+    // ========== FRAUD DETECTION & MONITORING METHODS ==========
+
+/**
+ * Get all users with their wallet balances and transaction summaries
+ * Useful for admin monitoring and fraud detection
+ */
+static async getAllUsersWithBalances(page = 1, limit = 50, minBalance = 0, sortBy = 'balance_desc') {
+    try {
+        const skip = (page - 1) * limit;
+        
+        // Determine sort order
+        let sortOptions = {};
+        switch(sortBy) {
+            case 'balance_desc':
+                sortOptions = { balance: -1 };
+                break;
+            case 'balance_asc':
+                sortOptions = { balance: 1 };
+                break;
+            case 'newest':
+                sortOptions = { 'user.createdAt': -1 };
+                break;
+            case 'oldest':
+                sortOptions = { 'user.createdAt': 1 };
+                break;
+            case 'most_transactions':
+                sortOptions = { transactionCount: -1 };
+                break;
+            default:
+                sortOptions = { balance: -1 };
+        }
+        
+        // Aggregate pipeline to get users with wallet info and transaction counts
+        const pipeline = [
+            {
+                $lookup: {
+                    from: 'wallets',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'wallet'
+                }
+            },
+            {
+                $unwind: {
+                    path: '$wallet',
+                    preserveNullAndEmptyArrays: true
+                }
+            },
+            {
+                $match: {
+                    'wallet.balance': { $gte: minBalance }
+                }
+            },
+            {
+                $lookup: {
+                    from: 'transactions',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'transactions'
+                }
+            },
+            {
+                $addFields: {
+                    transactionCount: { $size: '$transactions' },
+                    totalDeposits: {
+                        $sum: {
+                            $map: {
+                                input: {
+                                    $filter: {
+                                        input: '$transactions',
+                                        as: 'tx',
+                                        cond: { $eq: ['$$tx.type', 'DEPOSIT'] }
+                                    }
+                                },
+                                as: 'tx',
+                                in: '$$tx.amount'
+                            }
+                        }
+                    },
+                    totalWithdrawals: {
+                        $abs: {
+                            $sum: {
+                                $map: {
+                                    input: {
+                                        $filter: {
+                                            input: '$transactions',
+                                            as: 'tx',
+                                            cond: { $eq: ['$$tx.type', 'WITHDRAWAL'] }
+                                        }
+                                    },
+                                    as: 'tx',
+                                    in: '$$tx.amount'
+                                }
+                            }
+                        }
+                    },
+                    totalWinnings: {
+                        $sum: {
+                            $map: {
+                                input: {
+                                    $filter: {
+                                        input: '$transactions',
+                                        as: 'tx',
+                                        cond: { $eq: ['$$tx.type', 'WINNING'] }
+                                    }
+                                },
+                                as: 'tx',
+                                in: '$$tx.amount'
+                            }
+                        }
+                    },
+                    lastTransactionDate: {
+                        $max: '$transactions.createdAt'
+                    },
+                    pendingWithdrawals: {
+                        $size: {
+                            $filter: {
+                                input: '$transactions',
+                                as: 'tx',
+                                cond: {
+                                    $and: [
+                                        { $eq: ['$$tx.type', 'WITHDRAWAL'] },
+                                        { $eq: ['$$tx.status', 'PENDING'] }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                $project: {
+                    _id: 1,
+                    telegramId: 1,
+                    firstName: 1,
+                    lastName: 1,
+                    username: 1,
+                    createdAt: 1,
+                    lastActive: 1,
+                    'wallet.balance': 1,
+                    'wallet.lockedAmount': 1,
+                    'wallet.availableBalance': {
+                        $subtract: [
+                            { $ifNull: ['$wallet.balance', 0] },
+                            { $ifNull: ['$wallet.lockedAmount', 0] }
+                        ]
+                    },
+                    transactionCount: 1,
+                    totalDeposits: { $ifNull: ['$totalDeposits', 0] },
+                    totalWithdrawals: { $ifNull: ['$totalWithdrawals', 0] },
+                    totalWinnings: { $ifNull: ['$totalWinnings', 0] },
+                    lastTransactionDate: 1,
+                    pendingWithdrawals: 1,
+                    netFlow: {
+                        $add: [
+                            { $ifNull: ['$totalDeposits', 0] },
+                            { $ifNull: ['$totalWinnings', 0] },
+                            { $multiply: [{ $ifNull: ['$totalWithdrawals', 0] }, -1] }
+                        ]
+                    }
+                }
+            },
+            { $sort: sortOptions },
+            { $skip: skip },
+            { $limit: limit }
+        ];
+        
+        const users = await User.aggregate(pipeline);
+        
+        // Get total count for pagination
+        const countPipeline = [
+            {
+                $lookup: {
+                    from: 'wallets',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'wallet'
+                }
+            },
+            {
+                $unwind: {
+                    path: '$wallet',
+                    preserveNullAndEmptyArrays: true
+                }
+            },
+            {
+                $match: {
+                    'wallet.balance': { $gte: minBalance }
+                }
+            },
+            { $count: 'total' }
+        ];
+        
+        const countResult = await User.aggregate(countPipeline);
+        const total = countResult[0]?.total || 0;
+        
+        // Get summary statistics
+        const summaryPipeline = [
+            {
+                $lookup: {
+                    from: 'wallets',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'wallet'
+                }
+            },
+            {
+                $unwind: '$wallet'
+            },
+            {
+                $group: {
+                    _id: null,
+                    totalUsers: { $sum: 1 },
+                    totalBalance: { $sum: '$wallet.balance' },
+                    totalLocked: { $sum: { $ifNull: ['$wallet.lockedAmount', 0] } },
+                    avgBalance: { $avg: '$wallet.balance' },
+                    maxBalance: { $max: '$wallet.balance' },
+                    usersWithBalance: {
+                        $sum: { $cond: [{ $gt: ['$wallet.balance', 0] }, 1, 0] }
+                    },
+                    usersWithLargeBalance: {
+                        $sum: { $cond: [{ $gt: ['$wallet.balance', 1000] }, 1, 0] }
+                    }
+                }
+            }
+        ];
+        
+        const summary = await User.aggregate(summaryPipeline);
+        
+        return {
+            users,
+            pagination: {
+                page,
+                limit,
+                total,
+                pages: Math.ceil(total / limit)
+            },
+            summary: summary[0] || {
+                totalUsers: 0,
+                totalBalance: 0,
+                totalLocked: 0,
+                avgBalance: 0,
+                maxBalance: 0,
+                usersWithBalance: 0,
+                usersWithLargeBalance: 0
+            }
+        };
+    } catch (error) {
+        console.error('❌ Error getting all users with balances:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get users with suspicious activity patterns for fraud detection
+ */
+static async getSuspiciousUsers(thresholds = {}) {
+    try {
+        const {
+            rapidWithdrawalThreshold = 3, // More than 3 withdrawals in 24h
+            largeWithdrawalThreshold = 500, // Withdrawals over $500
+            unusualActivityScore = 0.7, // Suspicious activity score threshold
+            minBalanceThreshold = 1000 // Minimum balance to check
+        } = thresholds;
+        
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+        
+        const pipeline = [
+            {
+                $lookup: {
+                    from: 'wallets',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'wallet'
+                }
+            },
+            {
+                $unwind: '$wallet'
+            },
+            {
+                $match: {
+                    'wallet.balance': { $gte: minBalanceThreshold }
+                }
+            },
+            {
+                $lookup: {
+                    from: 'transactions',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'recentTransactions',
+                    pipeline: [
+                        {
+                            $match: {
+                                createdAt: { $gte: oneDayAgo }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                $lookup: {
+                    from: 'transactions',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'withdrawals24h',
+                    pipeline: [
+                        {
+                            $match: {
+                                type: 'WITHDRAWAL',
+                                createdAt: { $gte: oneDayAgo }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                $lookup: {
+                    from: 'transactions',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'largeWithdrawals',
+                    pipeline: [
+                        {
+                            $match: {
+                                type: 'WITHDRAWAL',
+                                $expr: { $gt: [{ $abs: '$amount' }, largeWithdrawalThreshold] }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                $lookup: {
+                    from: 'smsdeposits',
+                    localField: 'telegramId',
+                    foreignField: 'telegramId',
+                    as: 'recentSMS',
+                    pipeline: [
+                        {
+                            $match: {
+                                createdAt: { $gte: threeDaysAgo }
+                            }
+                        },
+                        { $sort: { createdAt: -1 } },
+                        { $limit: 10 }
+                    ]
+                }
+            },
+            {
+                $addFields: {
+                    withdrawalCount24h: { $size: '$withdrawals24h' },
+                    largeWithdrawalCount: { $size: '$largeWithdrawals' },
+                    smsCount3d: { $size: '$recentSMS' },
+                    hasRapidWithdrawals: {
+                        $gt: [{ $size: '$withdrawals24h' }, rapidWithdrawalThreshold]
+                    },
+                    hasLargeWithdrawals: {
+                        $gt: [{ $size: '$largeWithdrawals' }, 0]
+                    },
+                    // Calculate suspicious score based on multiple factors
+                    suspiciousScore: {
+                        $add: [
+                            // Factor 1: Rapid withdrawals (0-0.3)
+                            {
+                                $multiply: [
+                                    { $min: [{ $divide: [{ $size: '$withdrawals24h' }, 10] }, 1] },
+                                    0.3
+                                ]
+                            },
+                            // Factor 2: Large withdrawals (0-0.2)
+                            {
+                                $multiply: [
+                                    { $min: [{ $divide: [{ $size: '$largeWithdrawals' }, 3] }, 1] },
+                                    0.2
+                                ]
+                            },
+                            // Factor 3: High SMS activity (0-0.2)
+                            {
+                                $multiply: [
+                                    { $min: [{ $divide: [{ $size: '$recentSMS' }, 10] }, 1] },
+                                    0.2
+                                ]
+                            },
+                            // Factor 4: High balance vs low transaction history (0-0.3)
+                            {
+                                $multiply: [
+                                    {
+                                        $cond: [
+                                            { $gt: [{ $size: '$recentTransactions' }, 0] },
+                                            { $divide: ['$wallet.balance', 10000] },
+                                            0.5 // Suspicious if no recent activity but high balance
+                                        ]
+                                    },
+                                    0.3
+                                ]
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                $match: {
+                    $or: [
+                        { hasRapidWithdrawals: true },
+                        { hasLargeWithdrawals: true },
+                        { suspiciousScore: { $gte: unusualActivityScore } }
+                    ]
+                }
+            },
+            {
+                $project: {
+                    _id: 1,
+                    telegramId: 1,
+                    firstName: 1,
+                    lastName: 1,
+                    username: 1,
+                    createdAt: 1,
+                    lastActive: 1,
+                    'wallet.balance': 1,
+                    'wallet.lockedAmount': 1,
+                    withdrawalCount24h: 1,
+                    largeWithdrawalCount: 1,
+                    smsCount3d: 1,
+                    suspiciousScore: 1,
+                    recentWithdrawals: {
+                        $slice: ['$withdrawals24h', 5]
+                    },
+                    recentSMS: {
+                        $slice: ['$recentSMS', 5]
+                    }
+                }
+            },
+            { $sort: { suspiciousScore: -1 } }
+        ];
+        
+        const suspiciousUsers = await User.aggregate(pipeline);
+        
+        return suspiciousUsers;
+    } catch (error) {
+        console.error('❌ Error getting suspicious users:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get detailed user activity with transaction patterns
+ */
+static async getUserActivityDetails(telegramId, days = 30) {
+    try {
+        const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        
+        const user = await User.findOne({ telegramId: telegramId.toString() });
+        if (!user) {
+            throw new Error('User not found');
+        }
+        
+        const [wallet, transactions, smsDeposits] = await Promise.all([
+            Wallet.findOne({ userId: user._id }),
+            Transaction.find({
+                userId: user._id,
+                createdAt: { $gte: startDate }
+            }).sort({ createdAt: -1 }),
+            SMSDeposit.find({
+                telegramId: telegramId.toString(),
+                createdAt: { $gte: startDate }
+            }).sort({ createdAt: -1 })
+        ]);
+        
+        // Analyze transaction patterns
+        const deposits = transactions.filter(t => t.type === 'DEPOSIT' && t.status === 'COMPLETED');
+        const withdrawals = transactions.filter(t => t.type === 'WITHDRAWAL' && t.status === 'COMPLETED');
+        const winnings = transactions.filter(t => t.type === 'WINNING');
+        const gameEntries = transactions.filter(t => t.type === 'GAME_ENTRY');
+        
+        // Group by day for activity pattern
+        const activityByDay = {};
+        transactions.forEach(t => {
+            const day = t.createdAt.toISOString().split('T')[0];
+            if (!activityByDay[day]) {
+                activityByDay[day] = { deposits: 0, withdrawals: 0, games: 0, totalAmount: 0 };
+            }
+            if (t.type === 'DEPOSIT') activityByDay[day].deposits += t.amount;
+            if (t.type === 'WITHDRAWAL') activityByDay[day].withdrawals += Math.abs(t.amount);
+            if (t.type === 'GAME_ENTRY') activityByDay[day].games += 1;
+            activityByDay[day].totalAmount += Math.abs(t.amount);
+        });
+        
+        // Calculate risk indicators
+        const riskIndicators = {
+            rapidWithdrawals: withdrawals.filter(w => 
+                Math.abs(w.amount) > 500 && 
+                withdrawals.some(w2 => 
+                    w2._id !== w._id && 
+                    Math.abs(w2.createdAt - w.createdAt) < 3600000 // Within 1 hour
+                )
+            ).length > 0,
+            multipleWithdrawalsPerDay: Object.values(activityByDay).some(day => day.withdrawals > 3),
+            highWithdrawalRatio: (withdrawals.reduce((sum, w) => sum + Math.abs(w.amount), 0) / 
+                                 (deposits.reduce((sum, d) => sum + d.amount, 0) || 1)) > 0.8,
+            inconsistentSMS: smsDeposits.filter(s => s.status === 'RECEIVED_WAITING_MATCH').length > 5,
+            smsMatchRate: smsDeposits.length > 0 ? 
+                smsDeposits.filter(s => s.status === 'APPROVED' || s.status === 'AUTO_APPROVED').length / smsDeposits.length : 0
+        };
+        
+        return {
+            user: {
+                _id: user._id,
+                telegramId: user.telegramId,
+                firstName: user.firstName,
+                username: user.username,
+                createdAt: user.createdAt,
+                lastActive: user.lastActive
+            },
+            wallet: wallet || { balance: 0, lockedAmount: 0 },
+            activity: {
+                period: `${days} days`,
+                transactionCount: transactions.length,
+                smsCount: smsDeposits.length,
+                totalDeposits: deposits.reduce((sum, t) => sum + t.amount, 0),
+                totalWithdrawals: withdrawals.reduce((sum, t) => sum + Math.abs(t.amount), 0),
+                totalWinnings: winnings.reduce((sum, t) => sum + t.amount, 0),
+                totalGameEntries: gameEntries.length,
+                netProfit: (winnings.reduce((sum, t) => sum + t.amount, 0) - 
+                           gameEntries.reduce((sum, t) => sum + Math.abs(t.amount), 0)),
+                averageDeposit: deposits.length > 0 ? 
+                    deposits.reduce((sum, t) => sum + t.amount, 0) / deposits.length : 0,
+                averageWithdrawal: withdrawals.length > 0 ?
+                    withdrawals.reduce((sum, t) => sum + Math.abs(t.amount), 0) / withdrawals.length : 0,
+                largestDeposit: deposits.length > 0 ? Math.max(...deposits.map(t => t.amount)) : 0,
+                largestWithdrawal: withdrawals.length > 0 ? 
+                    Math.max(...withdrawals.map(t => Math.abs(t.amount))) : 0,
+                activityByDay
+            },
+            riskIndicators,
+            recentTransactions: transactions.slice(0, 20),
+            recentSMS: smsDeposits.slice(0, 10),
+            suspiciousScore: Object.values(riskIndicators).filter(Boolean).length / 
+                            Object.keys(riskIndicators).length
+        };
+    } catch (error) {
+        console.error('❌ Error getting user activity details:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get system-wide fraud detection summary
+ */
+static async getFraudDetectionSummary() {
+    try {
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        
+        const pipeline = [
+            {
+                $facet: {
+                    // Users with high balances
+                    highBalanceUsers: [
+                        {
+                            $lookup: {
+                                from: 'wallets',
+                                localField: '_id',
+                                foreignField: 'userId',
+                                as: 'wallet'
+                            }
+                        },
+                        {
+                            $unwind: '$wallet'
+                        },
+                        {
+                            $match: {
+                                'wallet.balance': { $gt: 1000 }
+                            }
+                        },
+                        {
+                            $count: 'count'
+                        }
+                    ],
+                    
+                    // Users with pending withdrawals
+                    pendingWithdrawals: [
+                        {
+                            $lookup: {
+                                from: 'transactions',
+                                localField: '_id',
+                                foreignField: 'userId',
+                                as: 'pendingWithdrawals',
+                                pipeline: [
+                                    {
+                                        $match: {
+                                            type: 'WITHDRAWAL',
+                                            status: 'PENDING'
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            $match: {
+                                'pendingWithdrawals.0': { $exists: true }
+                            }
+                        },
+                        {
+                            $count: 'count'
+                        }
+                    ],
+                    
+                    // Users with rapid withdrawals today
+                    rapidWithdrawals: [
+                        {
+                            $lookup: {
+                                from: 'transactions',
+                                localField: '_id',
+                                foreignField: 'userId',
+                                as: 'withdrawals24h',
+                                pipeline: [
+                                    {
+                                        $match: {
+                                            type: 'WITHDRAWAL',
+                                            createdAt: { $gte: oneDayAgo }
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            $match: {
+                                $expr: { $gt: [{ $size: '$withdrawals24h' }, 3] }
+                            }
+                        },
+                        {
+                            $count: 'count'
+                        }
+                    ],
+                    
+                    // SMS matching success rate
+                    smsStats: [
+                        {
+                            $lookup: {
+                                from: 'smsdeposits',
+                                localField: 'telegramId',
+                                foreignField: 'telegramId',
+                                as: 'sms'
+                            }
+                        },
+                        {
+                            $unwind: '$sms'
+                        },
+                        {
+                            $group: {
+                                _id: null,
+                                totalSMS: { $sum: 1 },
+                                approvedSMS: {
+                                    $sum: {
+                                        $cond: [
+                                            { $in: ['$sms.status', ['APPROVED', 'AUTO_APPROVED']] },
+                                            1,
+                                            0
+                                        ]
+                                    }
+                                },
+                                pendingSMS: {
+                                    $sum: {
+                                        $cond: [
+                                            { $eq: ['$sms.status', 'RECEIVED_WAITING_MATCH'] },
+                                            1,
+                                            0
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    ],
+                    
+                    // Transaction volume
+                    transactionVolume: [
+                        {
+                            $lookup: {
+                                from: 'transactions',
+                                localField: '_id',
+                                foreignField: 'userId',
+                                as: 'tx'
+                            }
+                        },
+                        {
+                            $unwind: '$tx'
+                        },
+                        {
+                            $match: {
+                                'tx.createdAt': { $gte: sevenDaysAgo }
+                            }
+                        },
+                        {
+                            $group: {
+                                _id: null,
+                                totalDeposits: {
+                                    $sum: {
+                                        $cond: [
+                                            { $eq: ['$tx.type', 'DEPOSIT'] },
+                                            { $abs: '$tx.amount' },
+                                            0
+                                        ]
+                                    }
+                                },
+                                totalWithdrawals: {
+                                    $sum: {
+                                        $cond: [
+                                            { $eq: ['$tx.type', 'WITHDRAWAL'] },
+                                            { $abs: '$tx.amount' },
+                                            0
+                                        ]
+                                    }
+                                },
+                                transactionCount: { $sum: 1 }
+                            }
+                        }
+                    ]
+                }
+            }
+        ];
+        
+        const results = await User.aggregate(pipeline);
+        const summary = results[0] || {};
+        
+        return {
+            timestamp: new Date().toISOString(),
+            highBalanceUsers: summary.highBalanceUsers?.[0]?.count || 0,
+            usersWithPendingWithdrawals: summary.pendingWithdrawals?.[0]?.count || 0,
+            usersWithRapidWithdrawals: summary.rapidWithdrawals?.[0]?.count || 0,
+            smsStats: summary.smsStats?.[0] || { totalSMS: 0, approvedSMS: 0, pendingSMS: 0 },
+            transactionVolume: summary.transactionVolume?.[0] || { 
+                totalDeposits: 0, 
+                totalWithdrawals: 0, 
+                transactionCount: 0 
+            },
+            smsMatchRate: summary.smsStats?.[0]?.totalSMS > 0 ? 
+                (summary.smsStats[0].approvedSMS / summary.smsStats[0].totalSMS * 100).toFixed(1) + '%' : 'N/A'
+        };
+    } catch (error) {
+        console.error('❌ Error getting fraud detection summary:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get top users by balance with transaction history
+ */
+static async getTopUsersByBalance(limit = 20) {
+    try {
+        const pipeline = [
+            {
+                $lookup: {
+                    from: 'wallets',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'wallet'
+                }
+            },
+            {
+                $unwind: '$wallet'
+            },
+            {
+                $match: {
+                    'wallet.balance': { $gt: 0 }
+                }
+            },
+            {
+                $lookup: {
+                    from: 'transactions',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'recentTransactions',
+                    pipeline: [
+                        { $sort: { createdAt: -1 } },
+                        { $limit: 5 }
+                    ]
+                }
+            },
+            {
+                $project: {
+                    _id: 1,
+                    telegramId: 1,
+                    firstName: 1,
+                    username: 1,
+                    createdAt: 1,
+                    lastActive: 1,
+                    balance: '$wallet.balance',
+                    lockedAmount: { $ifNull: ['$wallet.lockedAmount', 0] },
+                    availableBalance: {
+                        $subtract: [
+                            '$wallet.balance',
+                            { $ifNull: ['$wallet.lockedAmount', 0] }
+                        ]
+                    },
+                    recentTransactions: 1,
+                    transactionCount: { $size: '$recentTransactions' }
+                }
+            },
+            { $sort: { balance: -1 } },
+            { $limit: limit }
+        ];
+        
+        return await User.aggregate(pipeline);
+    } catch (error) {
+        console.error('❌ Error getting top users by balance:', error);
+        throw error;
+    }
+}
 
     }
 
