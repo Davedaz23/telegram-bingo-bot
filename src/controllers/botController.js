@@ -1329,10 +1329,10 @@ ${processedBy ? `*Processed By:* ${processedBy.firstName} at ${new Date(transact
 
       const depositButtons = [
         [Markup.button.callback('🏦 CBE Bank', 'deposit_cbe')],
-        [Markup.button.callback('🏦 Bank of Abysinia', 'deposit_boa')],
-        [Markup.button.callback('🏦 Dashen Bank', 'deposit_dashen')],
+        // [Markup.button.callback('🏦 Bank of Abysinia', 'deposit_boa')],
+        // [Markup.button.callback('🏦 Dashen Bank', 'deposit_dashen')],
         [Markup.button.callback('📱 Telebirr', 'deposit_telebirr')],
-        [Markup.button.callback('📱 CBE Birr', 'deposit_cbebirr')],
+        // [Markup.button.callback('📱 CBE Birr', 'deposit_cbebirr')],
         [Markup.button.callback('⬅️ Back', 'back_to_start')]
       ];
 
@@ -4392,59 +4392,110 @@ if (ctx.session && ctx.session.supportAction === 'CREATING_TICKET') {
       const ticketId = result.chat._id.toString();
       const shortTicketId = ticketId.slice(-6);
       
-      // Build message
+      // Build message with proper escaping
       const message = 
         '✅ *Support Ticket Created!*\n\n' +
         `Ticket #${shortTicketId}\n` +
         `Subject: ${escapedSubject}\n\n` +
         'Our support team will respond shortly. ' +
-        `You can view your ticket using /ticket_${ticketId}`;
+        `You can view your ticket using \`/ticket_${ticketId}\``;
       
-      await ctx.replyWithMarkdown(
-        message,
-        Markup.inlineKeyboard([
-          [Markup.button.callback('💬 View Ticket', `ticket_refresh_${ticketId}`)],
-          [Markup.button.callback('📞 Support Menu', 'support')]
-        ])
-      );
+      // Try to send with Markdown, fallback to plain text
+      try {
+        await ctx.replyWithMarkdown(
+          message,
+          Markup.inlineKeyboard([
+            [Markup.button.callback('💬 View Ticket', `ticket_refresh_${ticketId}`)],
+            [Markup.button.callback('📞 Support Menu', 'support')]
+          ])
+        );
+      } catch (markdownError) {
+        console.error('Markdown error in ticket creation, sending plain text:', markdownError);
+        
+        // Remove Markdown formatting and send as plain text
+        const plainMessage = message.replace(/[*_`]/g, '');
+        await ctx.reply(
+          plainMessage,
+          Markup.inlineKeyboard([
+            [Markup.button.callback('💬 View Ticket', `ticket_refresh_${ticketId}`)],
+            [Markup.button.callback('📞 Support Menu', 'support')]
+          ])
+        );
+      }
       
       // Notify admins
       await this.notifyAdminsAboutNewTicket(result.chat, user);
     } else {
-      await ctx.replyWithMarkdown(
-        `❌ *Cannot Create Ticket*\n\n${this.escapeMarkdown(result.message)}`,
-        Markup.inlineKeyboard([
-          [Markup.button.callback('💬 View Existing Ticket', `ticket_refresh_${result.chat._id}`)],
-          [Markup.button.callback('📞 Support Menu', 'support')]
-        ])
-      );
+      // Handle existing ticket case
+      ctx.session.supportAction = null;
+      
+      if (result.chat && result.chat._id) {
+        const existingTicketId = result.chat._id.toString();
+        const shortExistingId = existingTicketId.slice(-6);
+        
+        const message = 
+          `❌ *Cannot Create Ticket*\n\n` +
+          `You already have an open ticket #${shortExistingId}.\n\n` +
+          `Please continue your conversation there.`;
+        
+        try {
+          await ctx.replyWithMarkdown(
+            message,
+            Markup.inlineKeyboard([
+              [Markup.button.callback('💬 View Existing Ticket', `ticket_refresh_${existingTicketId}`)],
+              [Markup.button.callback('📞 Support Menu', 'support')]
+            ])
+          );
+        } catch (markdownError) {
+          const plainMessage = message.replace(/[*_`]/g, '');
+          await ctx.reply(
+            plainMessage,
+            Markup.inlineKeyboard([
+              [Markup.button.callback('💬 View Existing Ticket', `ticket_refresh_${existingTicketId}`)],
+              [Markup.button.callback('📞 Support Menu', 'support')]
+            ])
+          );
+        }
+      } else {
+        // Generic error message
+        await ctx.reply(
+          '❌ Cannot create ticket. Please try again later.',
+          Markup.inlineKeyboard([
+            [Markup.button.callback('📞 Support Menu', 'support')]
+          ])
+        );
+      }
     }
   } catch (error) {
     console.error('Support ticket creation error:', error);
-    console.error('Error details:', JSON.stringify(error, null, 2));
-    
-    // Log the full error for debugging
-    if (error.response) {
-      console.error('Telegram API Error:', error.response);
-    }
     
     // More informative error message
     let errorMessage = 'Error creating ticket. ';
     
-    if (error.message && error.message.includes('400')) {
-      errorMessage += 'There was a formatting issue. Please try a different subject.';
-    } else if (error.message && error.message.includes('500')) {
-      errorMessage += 'Server error. Please try again later.';
+    if (error.message) {
+      if (error.message.includes('400')) {
+        errorMessage += 'There was a formatting issue. Please try a different subject.';
+      } else if (error.message.includes('500')) {
+        errorMessage += 'Server error. Please try again later.';
+      } else if (error.message.includes('duplicate') || error.message.includes('already exists')) {
+        errorMessage += 'You may already have an open ticket.';
+      } else {
+        errorMessage += error.message;
+      }
     } else {
       errorMessage += 'Please try again later.';
     }
     
-    await ctx.reply(
-      errorMessage,
-      Markup.inlineKeyboard([
-        [Markup.button.callback('📞 Support Menu', 'support')]
-      ])
-    );
+    try {
+      await ctx.reply(
+        errorMessage,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('📞 Support Menu', 'support')]
+        ])
+      );
+    } catch (replyError) {
+      console.error('Failed to send error message:', replyError);
+    }
   }
   return;
 }
@@ -6014,204 +6065,72 @@ this.bot.action(/admin_user_sms_(.+)/, async (ctx) => {
   }
 });
   // Admin view ticket
-// ========== FIXED ADMIN TICKET COMMAND HANDLER ==========
-this.bot.command(/^admin_ticket_(.+)/, async (ctx) => {
-  if (!AdminUtils.isAdmin(ctx.from.id)) {
-    await ctx.reply('❌ Access denied');
-    return;
-  }
-
-  try {
-    const chatId = ctx.match[1];
-    const admin = await User.findOne({ telegramId: ctx.from.id.toString() });
-    
-    if (!admin) {
-      await ctx.reply('❌ Admin user not found in database');
+  this.bot.command(/^admin_ticket_(.+)/, async (ctx) => {
+    if (!AdminUtils.isAdmin(ctx.from.id)) {
+      await ctx.reply('❌ Access denied');
       return;
     }
-    
-    const result = await SupportService.getChatMessages(chatId, admin._id, true, 1, 20);
-    
-    // Check if user exists and extract IDs
-    let user = result.chat.userId;
-    let hasValidUser = false;
-    let userTelegramId = null;
-    let userMongoId = null;
-    let userDisplayName = 'Unknown';
-    let userUsername = 'N/A';
-    
-    if (user) {
-      // User object exists
-      if (typeof user === 'object') {
-        // It's a populated user object
-        userMongoId = user._id ? user._id.toString() : null;
-        userTelegramId = user.telegramId || null;
-        userDisplayName = user.firstName || 'Unknown';
-        userUsername = user.username || 'N/A';
-        hasValidUser = !!(userMongoId || userTelegramId);
-      } else if (mongoose.Types.ObjectId.isValid(user)) {
-        // It's just a MongoDB ID, try to fetch the user
-        userMongoId = user.toString();
-        try {
-          const fetchedUser = await User.findById(user).lean();
-          if (fetchedUser) {
-            user = fetchedUser;
-            userTelegramId = fetchedUser.telegramId;
-            userDisplayName = fetchedUser.firstName || 'Unknown';
-            userUsername = fetchedUser.username || 'N/A';
-            hasValidUser = true;
-          }
-        } catch (fetchError) {
-          console.error('Error fetching user:', fetchError);
-        }
-      } else {
-        // Maybe it's a Telegram ID stored as string
-        try {
-          const fetchedUser = await User.findOne({ telegramId: user.toString() }).lean();
-          if (fetchedUser) {
-            user = fetchedUser;
-            userMongoId = fetchedUser._id.toString();
-            userTelegramId = fetchedUser.telegramId;
-            userDisplayName = fetchedUser.firstName || 'Unknown';
-            userUsername = fetchedUser.username || 'N/A';
-            hasValidUser = true;
-          }
-        } catch (fetchError) {
-          console.error('Error fetching user by telegramId:', fetchError);
-        }
-      }
-    }
-    
-    console.log('📞 Ticket user info:', { 
-      hasValidUser, 
-      userTelegramId, 
-      userMongoId,
-      userDisplayName,
-      userUsername,
-      userType: typeof user,
-      isObject: user && typeof user === 'object'
-    });
 
-    // Escape function for Markdown
-    const escapeMarkdown = (text) => {
-      if (!text) return '';
-      return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
-    };
-
-    let message = `📞 *Support Ticket #${chatId.slice(-6)}*\n\n`;
-    
-    if (hasValidUser) {
-      const escapedFirstName = escapeMarkdown(userDisplayName);
-      const escapedUsername = escapeMarkdown(userUsername);
-      message += `*User:* ${escapedFirstName} (@${escapedUsername})\n`;
-      if (userTelegramId) {
-        message += `*Telegram ID:* \`${userTelegramId}\`\n`;
-      }
-      if (userMongoId) {
-        message += `*MongoDB ID:* \`${userMongoId}\`\n`;
-      }
-    } else {
-      message += `*User:* ⚠️ *USER DATA MISSING*\n`;
-      message += `*Status:* The user who created this ticket may have been deleted or the reference is broken.\n`;
-      
-      // Try to extract user info from the chat object
-      if (result.chat.userId) {
-        message += `\n*Raw user reference:* \`${result.chat.userId}\`\n`;
-      }
-    }
-    
-    const escapedSubject = escapeMarkdown(result.chat.subject);
-    message += `*Subject:* ${escapedSubject}\n`;
-    message += `*Status:* ${this.getStatusEmoji(result.chat.status)} ${result.chat.status}\n`;
-    message += `*Priority:* ${this.getPriorityEmoji(result.chat.priority)} ${result.chat.priority}\n`;
-    
-    if (result.chat.assignedTo) {
-      const assignedName = escapeMarkdown(result.chat.assignedTo.firstName || 'Support Agent');
-      message += `*Assigned to:* ${assignedName}\n`;
-    }
-    
-    message += `\n*Messages:*\n━━━━━━━━━━━━━━━━━━\n\n`;
-    
-    result.messages.forEach(msg => {
-      const sender = msg.senderType === 'USER' ? '👤 User' : '👨‍💼 You';
-      const time = new Date(msg.createdAt).toLocaleTimeString();
-      const escapedMsg = escapeMarkdown(msg.message);
-      
-      message += `*${sender}* [${time}]:\n`;
-      message += `${escapedMsg}\n\n`;
-    });
-    
-    message += `━━━━━━━━━━━━━━━━━━\n`;
-    message += `Type your reply below:`;
-
-    ctx.session = ctx.session || {};
-    ctx.session.activeAdminTicket = chatId;
-    // Store the ticket ID for back navigation
-    ctx.session.lastTicketId = chatId;
-
-    const keyboard = [
-      [Markup.button.callback('🔄 Refresh', `admin_ticket_refresh_${chatId}`)]
-    ];
-    
-    if (!result.chat.assignedTo) {
-      keyboard.push([Markup.button.callback('📌 Assign to Me', `admin_ticket_assign_${chatId}`)]);
-    }
-    
-    if (result.chat.status !== 'RESOLVED') {
-      keyboard.push([Markup.button.callback('✅ Resolve', `admin_ticket_resolve_${chatId}`)]);
-    }
-    
-    // Build second row of buttons based on what IDs we have
-    const secondRow = [];
-    
-    if (hasValidUser) {
-      if (userTelegramId) {
-        // We have a valid Telegram ID - use it (primary method)
-        secondRow.push(Markup.button.callback('👤 View User', `admin_user_${userTelegramId}`));
-      } else if (userMongoId) {
-        // We have a MongoDB ID but no Telegram ID - use that
-        secondRow.push(Markup.button.callback('👤 View User (Mongo)', `admin_user_mongo_${userMongoId}`));
-      }
-    } else {
-      // No valid user - add diagnostic button
-      secondRow.push(Markup.button.callback('🔍 Diagnose Ticket', `admin_diagnose_ticket_${chatId}`));
-    }
-    
-    secondRow.push(Markup.button.callback('📋 Open Tickets', 'admin_support_open'));
-    keyboard.push(secondRow);
-
-    // Try to send with Markdown, fallback to plain text
     try {
+      const chatId = ctx.match[1];
+      // const mongoUserId= await WalletService.resolveUserId(ctx.from.id);
+      const admin = await User.findOne({ telegramId: ctx.from.id.toString() });
+      
+      const result = await SupportService.getChatMessages(chatId, admin._id, true, 1, 20);
+      const user = result.chat.userId;
+      
+      let message = `📞 *Support Ticket #${chatId.slice(-6)}*\n\n`;
+      message += `*User: * ${admin?.firstName || 'Unknown'} (@${admin?.username || 'N/A'})\n`;
+      message += `*Subject:* ${result.chat.subject}\n`;
+      message += `*Status:* ${this.getStatusEmoji(result.chat.status)} ${result.chat.status}\n`;
+      message += `*Priority:* ${this.getPriorityEmoji(result.chat.priority)} ${result.chat.priority}\n`;
+      
+      if (result.chat.assignedTo) {
+        message += `*Assigned to:* ${result.chat.assignedTo.firstName || 'Support Agent'}\n`;
+      }
+      
+      message += `\n*Messages:*\n━━━━━━━━━━━━━━━━━━\n\n`;
+      
+      result.messages.forEach(msg => {
+        const sender = msg.senderType === 'USER' ? '👤 User' : '👨‍💼 You';
+        const time = new Date(msg.createdAt).toLocaleTimeString();
+        
+        message += `*${sender}* [${time}]:\n`;
+        message += `${msg.message}\n\n`;
+      });
+      
+      message += `━━━━━━━━━━━━━━━━━━\n`;
+      message += `Type your reply below:`;
+
+      ctx.session = ctx.session || {};
+      ctx.session.activeAdminTicket = chatId;
+
+      const keyboard = [
+        [Markup.button.callback('🔄 Refresh', `admin_ticket_refresh_${chatId}`)]
+      ];
+      
+      if (!result.chat.assignedTo) {
+        keyboard.push([Markup.button.callback('📌 Assign to Me', `admin_ticket_assign_${chatId}`)]);
+      }
+      
+      if (result.chat.status !== 'RESOLVED') {
+        keyboard.push([Markup.button.callback('✅ Resolve', `admin_ticket_resolve_${chatId}`)]);
+      }
+      
+      keyboard.push([
+        Markup.button.callback('👤 View User', `admin_user_${admin.telegramId}`),
+        Markup.button.callback('📋 Open Tickets', 'admin_support_open')
+      ]);
+
       await ctx.replyWithMarkdown(message, {
         parse_mode: 'Markdown',
         ...Markup.inlineKeyboard(keyboard)
       });
-    } catch (markdownError) {
-      console.error('Markdown error, sending plain text:', markdownError);
-      const plainMessage = message.replace(/[*_`]/g, '');
-      await ctx.reply(plainMessage, {
-        parse_mode: '',
-        ...Markup.inlineKeyboard(keyboard)
-      });
+    } catch (error) {
+      console.error('Admin view ticket error:', error.toString());
+      await ctx.reply('❌ Error loading ticket: ' + ctx.from.id.toString() + ' - ' + error.toString());
     }
-    
-  } catch (error) {
-    console.error('Admin view ticket error:', error);
-    
-    // Provide more helpful error message
-    let errorMessage = '❌ Error loading ticket';
-    if (error.message) {
-      errorMessage += ': ' + error.message;
-    }
-    
-    await ctx.reply(errorMessage, {
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('📞 Support Menu', 'admin_support_menu')],
-        [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
-      ])
-    });
-  }
-});
+  });
 
   // Admin ticket actions
 // Admin view user's support tickets
