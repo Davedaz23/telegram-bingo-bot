@@ -25,16 +25,14 @@ class GameService {
   static webSocketService = null;
 
   // Constants
-  
   static MIN_PLAYERS_TO_START = 2;
   static CARD_SELECTION_DURATION = 30000;
   static AUTO_START_DELAY = 30000;
-  static NUMBER_CALL_INTERVAL = 5000;
+static NUMBER_CALL_INTERVAL = 5000; // 5 seconds
   static GAME_RESTART_COOLDOWN = 60000;
   static ENTRY_FEE = 10;
   static gameStates = new Map(); // gameId -> { calledNumbers, status, currentNumber, lastUpdate }
-static lastCallTime = new Map(); // Track last call time per game
-static callInProgress = new Map(); // Track if call is in progress
+
 
   // ==================== CRITICAL FIX: SYNC WINNER STATE ====================
 
@@ -107,50 +105,53 @@ static initialize() {
   }, 30000);
   
   // Start monitoring service
-  // setInterval(() => {
-  //   this.monitorAutoCallingSystem();
-  // }, 15000); // Check every 15 seconds
+  setInterval(() => {
+    this.monitorAutoCallingSystem();
+  }, 15000); // Check every 15 seconds
   
-  // // Health check for active games
- setInterval(async () => {
-  try {
-    const activeGames = await Game.find({
-      status: 'ACTIVE',
-      archived: { $ne: true }
-    });
-    
-    for (const game of activeGames) {
-      const gameIdStr = game._id.toString();
+  // Health check for active games
+  setInterval(async () => {
+    try {
+      const activeGames = await Game.find({
+        status: 'ACTIVE',
+        archived: { $ne: true }
+      });
       
-      // Skip if winner declared
-      if (this.winnerDeclared.has(gameIdStr)) continue;
-      
-      // Check if auto-calling is running
-      if (!this.activeIntervals.has(gameIdStr)) {
-        console.warn(`⚠️ Game ${game.code} is ACTIVE but no auto-calling interval`);
+      for (const game of activeGames) {
+        const gameIdStr = game._id.toString();
         
-        // Don't restart immediately - check if numbers are already all called
-        // if (game.numbersCalled?.length < 75) {
-        //   console.log(`🔄 Starting auto-calling for ${game.code}`);
-        //   this.startAutoNumberCalling(game._id);
-        // }
-      } else {
-        // Check if interval is actually working
-        const intervalInfo = this.activeIntervals.get(gameIdStr);
-        if (intervalInfo.lastCallAt) {
-          const timeSinceLastCall = Date.now() - intervalInfo.lastCallAt;
+        // Ensure auto-calling is running
+        if (!this.activeIntervals.has(gameIdStr)) {
+          console.warn(`⚠️ Game ${game.code} is ACTIVE but no auto-calling interval`);
           
-          // if (timeSinceLastCall > this.NUMBER_CALL_INTERVAL * 6 && game.numbersCalled?.length < 75) {
-          //   console.warn(`⚠️ Game ${game.code} stuck - last call ${Math.floor(timeSinceLastCall/1000)}s ago`);
-          //   this.restartAutoCallingIfNeeded(game._id);
-          // }
+          // Don't restart if winner declared
+          if (!this.winnerDeclared.has(gameIdStr)) {
+            console.log(`🔄 Starting auto-calling for ${game.code}`);
+            this.startAutoNumberCalling(game._id);
+          }
+        }
+        
+        // Check if numbers are being called
+        const calledNumbers = game.numbersCalled || [];
+        const updatedAt = game.updatedAt || game.startedAt;
+        
+        if (updatedAt) {
+          const timeSinceUpdate = Date.now() - updatedAt.getTime();
+          
+          if (timeSinceUpdate > 30000 && calledNumbers.length < 75) {
+            console.warn(`⚠️ Game ${game.code} stuck - last update ${Math.floor(timeSinceUpdate/1000)}s ago`);
+            
+            if (!this.winnerDeclared.has(gameIdStr)) {
+              this.restartAutoCallingIfNeeded(game._id);
+            }
+          }
         }
       }
+    } catch (error) {
+      console.error('❌ Health check error:', error);
     }
-  } catch (error) {
-    console.error('❌ Health check error:', error);
-  }
-}, 30000); // Check every 30 seconds instead of 10
+  }, 10000); // Check every 10 seconds
+  
   console.log('🚀 GameService initialized with enhanced monitoring');
 }
   // ==================== WEBSOCKET INTEGRATION ====================
@@ -1491,7 +1492,7 @@ static async stopAutoNumberCalling(gameId) {
 }
 // ==================== IMPROVED CALL NUMBER METHOD ====================
 
- static async callNumber(gameId) {
+static async callNumber(gameId) {
   const session = await mongoose.startSession();
   
   try {
@@ -1522,10 +1523,58 @@ static async stopAutoNumberCalling(gameId) {
       return null;
     }
     
-    // Generate unique number
+    // ==================== CRITICAL: ENFORCE 4-SECOND GAP WITH WHILE LOOP ====================
+    const MIN_GAP_MS = 4000; // 4 seconds minimum between saves
+    let waitTime = 0;
+    
+    // Check the last update time from the database
+    if (game.updatedAt) {
+      const now = Date.now();
+      const lastUpdateTime = game.updatedAt.getTime();
+      const timeSinceLastUpdate = now - lastUpdateTime;
+      
+      console.log(`⏱️ Time since last DB update: ${Math.round(timeSinceLastUpdate)}ms`);
+      
+      // If not enough time has passed, calculate how long to wait
+      if (timeSinceLastUpdate < MIN_GAP_MS) {
+        waitTime = MIN_GAP_MS - timeSinceLastUpdate;
+        console.log(`⏳ Need to wait ${waitTime}ms before next save (${Math.round(timeSinceLastUpdate)}ms since last save)`);
+        
+        // Abort current transaction
+        await session.abortTransaction();
+        session.endSession();
+        
+        // Wait the required time
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        
+        // Recursive retry after waiting
+        console.log(`🔄 Retrying callNumber after ${waitTime}ms wait`);
+        return this.callNumber(gameId);
+      }
+    }
+    
+    // Also check our in-memory state as a backup
+    const gameState = this.gameStates.get(gameIdStr);
+    if (gameState && gameState.lastSaveTimestamp) {
+      const now = Date.now();
+      const timeSinceLastSave = now - gameState.lastSaveTimestamp;
+      
+      if (timeSinceLastSave < MIN_GAP_MS) {
+        waitTime = MIN_GAP_MS - timeSinceLastSave;
+        console.log(`⏳ [STATE] Need to wait ${waitTime}ms before next save`);
+        
+        await session.abortTransaction();
+        session.endSession();
+        
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        return this.callNumber(gameId);
+      }
+    }
+    
+    // ==================== GENERATE UNIQUE NUMBER ====================
     let newNumber;
     let attempts = 0;
-    const maxAttempts = 150; // Increased for safety
+    const maxAttempts = 150;
     
     do {
       newNumber = Math.floor(Math.random() * 75) + 1;
@@ -1550,27 +1599,35 @@ static async stopAutoNumberCalling(gameId) {
     // Add to called numbers
     calledNumbers.push(newNumber);
     game.numbersCalled = calledNumbers;
-    game.updatedAt = new Date();
+    game.updatedAt = new Date(); // Set to current time after waiting
     game.markModified('numbersCalled');
     
+    // Save to database
     await game.save({ session });
     await session.commitTransaction();
     
     const totalCalled = calledNumbers.length;
     const letter = GameUtils.getNumberLetter(newNumber);
     
-    console.log(`🔢 [CALL] Game ${game.code}: #${newNumber} (${letter}) - Total: ${totalCalled}/75`);
+    // Calculate actual gap for logging
+    let actualGap = 'N/A';
+    if (gameState && gameState.lastSaveTimestamp) {
+      actualGap = Math.round((Date.now() - gameState.lastSaveTimestamp) / 1000) + 's';
+    }
     
-    // Update game state
+    console.log(`🔢 [CALL] Game ${game.code}: #${newNumber} (${letter}) - Total: ${totalCalled}/75 - Gap: ${actualGap}`);
+    
+    // Update game state with save timestamp
     this.gameStates.set(gameIdStr, {
       calledNumbers,
       currentNumber: newNumber,
       letter: letter,
       timestamp: Date.now(),
+      lastSaveTimestamp: Date.now(),
       sequence: totalCalled
     });
     
-    // Broadcast with enhanced error handling
+    // Broadcast
     try {
       this.broadcastToGame(gameId, {
         type: 'NUMBER_CALLED',
@@ -1581,22 +1638,14 @@ static async stopAutoNumberCalling(gameId) {
         calledNumbers: calledNumbers,
         sequence: totalCalled,
         timestamp: Date.now(),
-        serverTime: Date.now()
+        serverTime: Date.now(),
+        nextCallIn: 5000
       });
       
       console.log(`📤 Broadcast number ${newNumber} for ${game.code}`);
       
     } catch (broadcastError) {
       console.error('❌ Broadcast error (non-critical):', broadcastError.message);
-      // Continue even if broadcast fails
-    }
-    
-    // Health check: ensure interval is still running
-    if (!this.activeIntervals.has(gameIdStr)) {
-      console.warn(`⚠️ Auto-calling interval missing for ${game.code}, restarting...`);
-      setTimeout(() => {
-        this.startAutoNumberCalling(gameId);
-      }, 2000);
     }
     
     return {
@@ -1617,7 +1666,7 @@ static async stopAutoNumberCalling(gameId) {
     // Try to recover by restarting auto-calling
     setTimeout(() => {
       this.restartAutoCallingIfNeeded(gameId);
-    }, 3000);
+    }, 5000);
     
     throw error;
   } finally {
@@ -1626,11 +1675,56 @@ static async stopAutoNumberCalling(gameId) {
     }
   }
 }
+static async restartAutoCallingIfNeeded(gameId) {
+  const gameIdStr = gameId.toString();
+  
+  // Check if winner already declared
+  if (this.winnerDeclared.has(gameIdStr)) {
+    console.log(`🛑 Winner declared for ${gameId}, not restarting auto-calling`);
+    return;
+  }
+  
+  // Check if game is still active
+  const game = await Game.findById(gameId);
+  if (!game || game.status !== 'ACTIVE') {
+    console.log(`⚠️ Game ${gameId} not active (${game?.status}), not restarting`);
+    return;
+  }
+  
+  // Check if all numbers called
+  if (game.numbersCalled?.length >= 75) {
+    console.log(`🎯 All numbers called for ${game.code}, not restarting`);
+    return;
+  }
+  
+  console.log(`🔄 Restarting auto-calling for game ${game.code}`);
+  
+  // Stop existing interval
+  this.stopAutoNumberCalling(gameId);
+  
+  // Start new interval after delay
+  setTimeout(() => {
+    this.startAutoNumberCalling(gameId);
+  }, 2000);
+}
 
+// ==================== FIXED: stopAutoNumberCalling method ====================
 
+static stopAutoNumberCalling(gameId) {
+  const gameIdStr = gameId.toString();
+  
+  if (this.activeIntervals.has(gameIdStr)) {
+    const intervalInfo = this.activeIntervals.get(gameIdStr);
+    
+    if (intervalInfo && intervalInfo.interval) {
+      clearInterval(intervalInfo.interval);
+      console.log(`🛑 Stopped auto-calling interval for game ${gameId}`);
+    }
+    
+    this.activeIntervals.delete(gameIdStr);
+  }
+}
 // ==================== NEW: MONITORING METHOD ====================
-
-// ==================== IMPROVED MONITORING ====================
 
 static monitorAutoCallingSystem() {
   console.log('🔍 Monitoring auto-calling system...');
@@ -1639,71 +1733,239 @@ static monitorAutoCallingSystem() {
   const issues = [];
   
   for (const [gameIdStr, intervalInfo] of this.activeIntervals.entries()) {
-    if (!intervalInfo.lastCallAt) continue;
+    const timeSinceStart = now - intervalInfo.startedAt;
+    const timeSinceLastCall = intervalInfo.lastCallAt ? now - intervalInfo.lastCallAt : null;
     
-    const timeSinceLastCall = now - intervalInfo.lastCallAt;
-    
-    // CRITICAL: Only warn if no calls for 3x interval (15 seconds)
-    if (timeSinceLastCall > this.NUMBER_CALL_INTERVAL * 3) {
+    if (timeSinceLastCall && timeSinceLastCall > this.NUMBER_CALL_INTERVAL * 3) {
+      issues.push({
+        gameId: gameIdStr,
+        issue: `No call for ${Math.floor(timeSinceLastCall/1000)}s`,
+        lastCallAt: intervalInfo.lastCallAt
+      });
+      
       console.warn(`⚠️ Game ${gameIdStr}: No call for ${Math.floor(timeSinceLastCall/1000)}s`);
       
-      // Auto-restart if stuck for too long (30 seconds)
-      if (timeSinceLastCall > this.NUMBER_CALL_INTERVAL * 6) {
-        console.log(`🔄 Auto-restarting stuck auto-calling for ${gameIdStr}`);
-        setTimeout(() => {
-          this.restartAutoCallingIfNeeded(intervalInfo.gameId);
-        }, 2000);
-      }
+      // Auto-restart if stuck
+      setTimeout(() => {
+        this.restartAutoCallingIfNeeded(intervalInfo.gameId);
+      }, 2000);
     }
   }
+  
+  if (issues.length > 0) {
+    console.warn(`⚠️ ${issues.length} games with auto-calling issues`);
+  }
+  
+  return issues;
 }
 
 // ==================== NEW: AUTO-CALLING HEALTH CHECK ====================
 
-static async restartAutoCallingIfNeeded(gameId) {
+
+static async startAutoNumberCalling(gameId) {
   const gameIdStr = gameId.toString();
   
-  // Don't restart if winner declared
-  if (this.winnerDeclared.has(gameIdStr)) {
-    console.log(`🛑 Winner declared for ${gameId}, not restarting auto-calling`);
-    return;
+  // CRITICAL: Atomic check with lock to prevent duplicate intervals
+  const lockKey = `auto_call_lock_${gameIdStr}`;
+  
+  if (this.processingGames.has(lockKey)) {
+    console.log(`⏳ Auto-calling already being started for ${gameId}`);
+    return null;
   }
   
-  // Check game status
-  const game = await Game.findById(gameId);
-  if (!game) {
-    console.log(`❌ Game ${gameId} not found`);
-    return;
-  }
-  
-  if (game.status !== 'ACTIVE') {
-    console.log(`🛑 Game ${game.code} not active (${game.status}), not restarting`);
-    return;
-  }
-  
-  // Check if auto-calling is already running
-  if (this.activeIntervals.has(gameIdStr)) {
-    console.log(`✅ Auto-calling already running for ${game.code}`);
+  try {
+    this.processingGames.add(lockKey);
     
-    // Verify interval is actually working
-    const intervalInfo = this.activeIntervals.get(gameIdStr);
-    if (intervalInfo.lastCallAt) {
-      const timeSinceLastCall = Date.now() - intervalInfo.lastCallAt;
-      if (timeSinceLastCall > this.NUMBER_CALL_INTERVAL * 3) {
-        console.warn(`⚠️ No calls for ${Math.floor(timeSinceLastCall/1000)}s, restarting...`);
-        this.stopAutoNumberCalling(gameId);
+    // Check if interval already exists AND is working
+    if (this.activeIntervals.has(gameIdStr)) {
+      const existingInterval = this.activeIntervals.get(gameIdStr);
+      
+      if (existingInterval.lastCallAt) {
+        const timeSinceLastCall = Date.now() - existingInterval.lastCallAt;
         
-        setTimeout(() => {
-          this.startAutoNumberCalling(gameId);
-        }, 1000);
+        // If last call was less than 4.5 seconds ago, consider it working
+        if (timeSinceLastCall < 4500) {
+          console.log(`✅ Auto-calling already running for ${gameId}, last call ${timeSinceLastCall}ms ago`);
+          return existingInterval.interval;
+        } else {
+          // Stale interval - clean it up
+          console.log(`🧹 Cleaning up stale interval for ${gameId} (last call ${timeSinceLastCall}ms ago)`);
+          this.stopAutoNumberCalling(gameId);
+        }
+      } else {
+        // No last call timestamp - clean it up
+        this.stopAutoNumberCalling(gameId);
       }
     }
-    return;
+    
+    // Check if winner already declared
+    if (this.winnerDeclared.has(gameIdStr)) {
+      console.log(`🛑 Winner already declared for ${gameId}, not starting auto-calling`);
+      return null;
+    }
+
+    // Get fresh game state
+    const game = await Game.findById(gameId);
+    
+    if (!game) {
+      console.log(`❌ Game ${gameId} not found`);
+      return null;
+    }
+    
+    if (game.status !== 'ACTIVE') {
+      console.log(`❌ Game ${game.code} is not ACTIVE (status: ${game.status})`);
+      return null;
+    }
+    
+    // Check if all numbers have been called
+    if (game.numbersCalled?.length >= 75) {
+      console.log(`🎯 All 75 numbers already called for ${game.code}`);
+      await this.endGameDueToNoWinner(gameId);
+      return null;
+    }
+    
+    console.log(`🔢 [AUTO-CALL START] Starting auto-number calling for ${game.code}`);
+    console.log(`📊 Current numbers called: ${game.numbersCalled?.length || 0}/75`);
+    
+    // Clear any stale winner state
+    this.winnerDeclared.delete(gameIdStr);
+    
+    let errorCount = 0;
+    const MAX_ERRORS = 5;
+    let lastCallTime = Date.now(); // Track last call time
+    let callInProgress = false; // Prevent overlapping calls
+    
+    // CRITICAL: Create interval with proper timing control
+    const interval = setInterval(async () => {
+      const now = Date.now();
+      const timeSinceLastCall = now - lastCallTime;
+      
+      // CRITICAL: Prevent calls faster than 4.5 seconds
+      if (timeSinceLastCall < 4500) {
+        console.log(`⏱️ Throttling: Only ${Math.round(timeSinceLastCall/1000)}s since last call, skipping`);
+        return;
+      }
+      
+      // Prevent overlapping calls
+      if (callInProgress) {
+        console.log(`⏱️ Previous call still in progress, skipping`);
+        return;
+      }
+      
+      try {
+        callInProgress = true;
+        
+        // Check if we should stop
+        if (this.winnerDeclared.has(gameIdStr)) {
+          console.log(`🛑 Winner declared, stopping auto-calling for ${game.code}`);
+          this.stopAutoNumberCalling(gameId);
+          return;
+        }
+        
+        // Get fresh game state
+        const currentGame = await Game.findById(gameId);
+        
+        if (!currentGame) {
+          console.log(`🛑 Game ${gameId} not found, stopping auto-calling`);
+          this.stopAutoNumberCalling(gameId);
+          return;
+        }
+        
+        if (currentGame.status !== 'ACTIVE') {
+          console.log(`🛑 Game ${currentGame.code} no longer active (${currentGame.status})`);
+          this.stopAutoNumberCalling(gameId);
+          return;
+        }
+        
+        // Check if all numbers have been called
+        const calledNumbers = currentGame.numbersCalled || [];
+        if (calledNumbers.length >= 75) {
+          console.log(`🎯 All 75 numbers called for ${currentGame.code}`);
+          this.stopAutoNumberCalling(gameId);
+          await this.endGameDueToNoWinner(gameId);
+          return;
+        }
+        
+        // Call the next number
+        const callResult = await this.callNumber(gameId);
+        
+        if (callResult) {
+          errorCount = 0;
+          lastCallTime = Date.now(); // Update last call time on success
+          
+          // Update interval info
+          if (this.activeIntervals.has(gameIdStr)) {
+            const intervalInfo = this.activeIntervals.get(gameIdStr);
+            intervalInfo.lastCallAt = lastCallTime;
+            intervalInfo.callCount = (intervalInfo.callCount || 0) + 1;
+          }
+          
+          // CRITICAL: Log actual interval
+          console.log(`✅ [${currentGame.code}] Called #${callResult.number} - Actual interval: ${Math.round(timeSinceLastCall/1000)}s - Total: ${callResult.totalCalled}/75`);
+        }
+        
+      } catch (error) {
+        errorCount++;
+        console.error(`❌ [AUTO-CALL ERROR ${errorCount}/${MAX_ERRORS}] for game ${gameId}:`, error.message);
+        
+        if (errorCount >= MAX_ERRORS) {
+          console.error(`🚨 Too many errors (${errorCount}), stopping auto-calling for ${gameId}`);
+          this.stopAutoNumberCalling(gameId);
+          
+          // Try to restart after a delay
+          setTimeout(() => {
+            this.restartAutoCallingIfNeeded(gameId);
+          }, 10000);
+        }
+      } finally {
+        callInProgress = false;
+      }
+    }, this.NUMBER_CALL_INTERVAL);
+    
+    // Store interval info with tracking
+    this.activeIntervals.set(gameIdStr, {
+      interval: interval,
+      gameId: gameId,
+      startedAt: new Date(),
+      lastCallAt: lastCallTime,
+      callCount: 0
+    });
+    
+    console.log(`✅ Auto-calling started for ${game.code} (interval: ${this.NUMBER_CALL_INTERVAL}ms)`);
+    
+    // Make immediate first call after 1 second
+    setTimeout(async () => {
+      try {
+        if (!this.winnerDeclared.has(gameIdStr) && this.activeIntervals.has(gameIdStr)) {
+          const callResult = await this.callNumber(gameId);
+          if (callResult) {
+            const intervalInfo = this.activeIntervals.get(gameIdStr);
+            if (intervalInfo) {
+              intervalInfo.lastCallAt = Date.now();
+              intervalInfo.callCount = 1;
+            }
+            console.log(`✅ [${game.code}] First number called: #${callResult.number}`);
+          }
+        }
+      } catch (error) {
+        console.error('❌ Error in initial auto-call:', error);
+      }
+    }, 1000);
+    
+    return interval;
+    
+  } catch (error) {
+    console.error('❌ Error starting auto-calling:', error);
+    
+    // Try to restart after delay
+    setTimeout(() => {
+      this.restartAutoCallingIfNeeded(gameId);
+    }, 5000);
+    
+    return null;
+  } finally {
+    this.processingGames.delete(lockKey);
   }
-  
-  // Restart auto-calling
-  console.log(`🔄 Restarting auto-calling for ${game.code}`);
-  this.startAutoNumberCalling(gameId);
 }
 
   // In GameService.js, add this method:

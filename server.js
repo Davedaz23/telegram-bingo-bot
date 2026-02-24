@@ -173,8 +173,8 @@ const corsOptions = {
     'https://desta.et',
     'http://localhost:3001',
     'http://localhost:3000',
-    'ws://localhost:3000',
-    'ws://localhost:3001'
+    'https://backend.desta.et',  // Add this
+    'wss://backend.desta.et'      // Add this
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
@@ -576,11 +576,12 @@ cron.schedule('0 */6 * * *', () => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 
 // Start server and THEN initialize services
 server.listen(PORT, () => {
   console.log(`🚀 Server is running on port ${PORT}`);
+   console.log(`🔌 WebSocket endpoint: ws://localhost:${PORT}/ws`); // Add this line
   console.log(`💰 Wallet System: Enabled`);
   console.log(`🔗 WebSocket: Enabled`);
   console.log(`🤖 Telegram Bot: ${process.env.BOT_TOKEN ? 'Enabled' : 'Disabled'}`);

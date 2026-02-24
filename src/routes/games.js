@@ -1187,35 +1187,35 @@ router.post('/:id/claim-bingo', async (req, res) => {
 });
 
 // Also update the mark-number route to remove auto-win checking
-router.post('/:id/mark-number', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { userId, number } = req.body;
+// router.post('/:id/mark-number', async (req, res) => {
+//   try {
+//     const { id } = req.params;
+//     const { userId, number } = req.body;
     
-    console.log(`🎯 Mark number request: gameId=${id}, userId=${userId}, number=${number}`);
+//     console.log(`🎯 Mark number request: gameId=${id}, userId=${userId}, number=${number}`);
     
-    if (!userId || !number) {
-      return res.status(400).json({
-        success: false,
-        error: 'userId and number are required',
-      });
-    }
+//     if (!userId || !number) {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'userId and number are required',
+//       });
+//     }
 
-    const result = await GameService.markNumber(id, userId, number);
+//     const result = await GameService.markNumber(id, userId, number);
     
-    res.json({
-      success: true,
-      ...result,
-      message: 'Number marked successfully'
-    });
-  } catch (error) {
-    console.error('❌ Mark number error:', error);
-    res.status(400).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+//     res.json({
+//       success: true,
+//       ...result,
+//       message: 'Number marked successfully'
+//     });
+//   } catch (error) {
+//     console.error('❌ Mark number error:', error);
+//     res.status(400).json({
+//       success: false,
+//       error: error.message,
+//     });
+//   }
+// });
 //claim
 
 // ==================== DEPRECATED ROUTES (for backward compatibility) ====================
