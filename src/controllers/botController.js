@@ -10,6 +10,7 @@ const Wallet = require('../models/Wallet');
 const SupportService = require('../services/supportService');
 const SupportChat = require('../models/SupportChat');  // ADD THIS LINE
 const SupportMessage = require('../models/SupportMessage');  // ADD THIS LINE (optional, for complet
+const GameService = require('../services/gameService'); // For game-related admin actions
 // ✅ AdminUtils for multiple admin support
 const AdminUtils = {
   adminIds: [],
@@ -1094,6 +1095,23 @@ ${smsDeposit.processedBy ? `*Processed By:* ${smsDeposit.processedBy.firstName} 
         await ctx.reply(`❌ Error approving deposit: ${error.message}`);
       }
     });
+
+// - temporary recovery command
+this.bot.command('recovergame', async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.reply('❌ Access denied');
+    return;
+  }
+  
+  try {
+    // Use your specific game ID
+    const gameId = '69a87965a006eb3e0d68793b';
+    const result = await GameService.manuallyRecoverGame(gameId);
+    await ctx.reply(`✅ Recovery result: ${JSON.stringify(result)}`);
+  } catch (error) {
+    await ctx.reply(`❌ Error: ${error.message}`);
+  }
+});
 
     // ========== WITHDRAWAL ADMIN COMMANDS ==========
 

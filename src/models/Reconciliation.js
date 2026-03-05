@@ -53,7 +53,7 @@ const reconciliationSchema = new mongoose.Schema({
     },
     status: {
       type: String,
-      enum: ['PENDING', 'COMPLETED', 'FAILED'],
+      enum: ['PENDING', 'COMPLETED', 'FAILED','ALREADY_PAID'],
       default: 'PENDING'
     },
     timestamp: {

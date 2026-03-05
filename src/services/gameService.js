@@ -108,7 +108,10 @@ static initialize() {
   setInterval(() => {
     this.monitorAutoCallingSystem();
   }, 15000); // Check every 15 seconds
-  
+   // **ADD THIS: Recover stuck card selection games**
+  setInterval(() => {
+    this.recoverStuckCardSelectionGames();
+  }, 60000); // Check every minute
   // Health check for active games
   setInterval(async () => {
     try {
@@ -566,8 +569,42 @@ static initialize() {
       this.processingGames.delete(lockKey);
     }
   }
-
-
+//====================== CRITICAL: RECOVER STUCK CARD SELECTION GAMES ====================
+static async manuallyRecoverGame(gameId) {
+  try {
+    console.log(`🔧 Manually recovering game: ${gameId}`);
+    
+    const game = await Game.findById(gameId);
+    if (!game) {
+      throw new Error('Game not found');
+    }
+    
+    console.log(`📊 Game ${game.code} status: ${game.status}`);
+    
+    const playersWithCards = await BingoCard.countDocuments({ gameId: game._id });
+    
+    if (game.status === 'CARD_SELECTION') {
+      if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
+        console.log(`✅ Starting game with ${playersWithCards} players`);
+        await this.startGame(game._id);
+        return { success: true, message: 'Game started successfully', newStatus: 'ACTIVE' };
+      } else {
+        console.log(`⚠️ Resetting to WAITING_FOR_PLAYERS (${playersWithCards}/${this.MIN_PLAYERS_TO_START})`);
+        game.status = 'WAITING_FOR_PLAYERS';
+        game.cardSelectionStartTime = null;
+        game.cardSelectionEndTime = null;
+        game.autoStartEndTime = new Date(Date.now() + this.AUTO_START_DELAY);
+        await game.save();
+        return { success: true, message: 'Game reset to waiting', newStatus: 'WAITING_FOR_PLAYERS' };
+      }
+    }
+    
+    return { success: false, message: `Game not in CARD_SELECTION state (current: ${game.status})` };
+  } catch (error) {
+    console.error('❌ Manual recovery error:', error);
+    return { success: false, message: error.message };
+  }
+}
   // ==================== FIND WAITING OR CARD SELECTION GAME ====================
   static async findWaitingOrCardSelectionGame() {
     const game = await Game.findOne({
@@ -3097,6 +3134,87 @@ static async startAutoNumberCalling(gameId) {
       }, 5000);
     }
   }
+/**
+ * Force recovery of stuck games in CARD_SELECTION state
+ * This should be called periodically to ensure games don't get stuck
+ */
+static async recoverStuckCardSelectionGames() {
+  try {
+    console.log('🔍 [RECOVERY] Checking for stuck CARD_SELECTION games...');
+    console.log(`🔍 [RECOVERY] Current time: ${new Date().toISOString()}`);
+    
+    const now = new Date();
+    const cutoffTime = new Date(now.getTime() - 120000);
+    
+    console.log(`🔍 [RECOVERY] Looking for games with cardSelectionEndTime < ${cutoffTime.toISOString()}`);
+    
+    // First, log ALL games in CARD_SELECTION regardless of end time
+    const allCardSelectionGames = await Game.find({
+      status: 'CARD_SELECTION',
+      archived: { $ne: true }
+    });
+    
+    console.log(`🔍 [RECOVERY] Found ${allCardSelectionGames.length} total games in CARD_SELECTION`);
+    
+    if (allCardSelectionGames.length > 0) {
+      allCardSelectionGames.forEach(game => {
+        console.log(`🔍 [RECOVERY] - Game ${game.code}: endTime=${game.cardSelectionEndTime?.toISOString()}, now=${now.toISOString()}, ended=${game.cardSelectionEndTime < now}`);
+      });
+    }
+    
+    // Now find the stuck ones
+    const stuckGames = await Game.find({
+      status: 'CARD_SELECTION',
+      cardSelectionEndTime: { $lt: cutoffTime },
+      archived: { $ne: true }
+    });
+    
+    if (stuckGames.length === 0) {
+      console.log('✅ [RECOVERY] No stuck CARD_SELECTION games found by query');
+      return;
+    }
+    
+    console.log(`⚠️ [RECOVERY] Found ${stuckGames.length} stuck CARD_SELECTION games`);
+    
+    for (const game of stuckGames) {
+      console.log(`🔄 [RECOVERY] Processing stuck game: ${game.code}`);
+      console.log(`   - ID: ${game._id}`);
+      console.log(`   - Ended at: ${game.cardSelectionEndTime?.toISOString()}`);
+      console.log(`   - Current time: ${now.toISOString()}`);
+      console.log(`   - Time since end: ${Math.floor((now - game.cardSelectionEndTime) / 1000)} seconds`);
+      
+      // Count players with cards
+      const playersWithCards = await BingoCard.countDocuments({ gameId: game._id });
+      console.log(`   - Players with cards: ${playersWithCards}`);
+      
+      if (playersWithCards >= this.MIN_PLAYERS_TO_START) {
+        console.log(`✅ [RECOVERY] Starting game with ${playersWithCards} players`);
+        try {
+          await this.startGame(game._id);
+          console.log(`✅ [RECOVERY] Game ${game.code} started successfully`);
+        } catch (startError) {
+          console.error(`❌ [RECOVERY] Failed to start game:`, startError);
+        }
+      } else {
+        console.log(`⚠️ [RECOVERY] Only ${playersWithCards} players - resetting to WAITING`);
+        
+        // Reset to waiting state
+        game.status = 'WAITING_FOR_PLAYERS';
+        game.cardSelectionStartTime = null;
+        game.cardSelectionEndTime = null;
+        game.autoStartEndTime = new Date(Date.now() + this.AUTO_START_DELAY);
+        await game.save();
+        
+        console.log(`✅ [RECOVERY] Game ${game.code} reset to WAITING_FOR_PLAYERS`);
+      }
+    }
+    
+    console.log('✅ [RECOVERY] Stuck game recovery completed');
+  } catch (error) {
+    console.error('❌ [RECOVERY] Error recovering stuck games:', error);
+    console.error(error.stack);
+  }
+}
 
   // ==================== ESSENTIAL METHODS ====================
 
