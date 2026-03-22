@@ -231,6 +231,53 @@ class UserService {
     };
   }
 }
+// Get all users with pagination
+  static async getAllUsers(page = 1, limit = 10) {
+  try {
+    const skip = (page - 1) * limit;
+    
+    const users = await User.find({})
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+    
+    const total = await User.countDocuments();
+    
+    return {
+      users: users,  // This is the array you need
+      pagination: {
+        page: page,
+        limit: limit,
+        total: total,
+        pages: Math.ceil(total / limit)
+      }
+    };
+  } catch (error) {
+    console.error('Error getting all users:', error);
+    return {
+      users: [],  // Return empty array on error
+      pagination: {
+        page: page,
+        limit: limit,
+        total: 0,
+        pages: 0
+      }
+    };
+  }
+}
+
+  // Get user count (for stats)
+  static async getUserCount() {
+    try {
+      return await User.countDocuments();
+    } catch (error) {
+      console.error('Error getting user count:', error);
+      return 0;
+    }
+  }
+
+
 }
 
 module.exports = UserService;

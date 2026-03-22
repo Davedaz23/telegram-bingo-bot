@@ -1306,11 +1306,9 @@ static async manuallyRecoverGame(gameId) {
   }
   // ==================== AUTO-CALLING SYSTEM ====================
 
-
 static async startAutoNumberCalling(gameId) {
   const gameIdStr = gameId.toString();
   
-  // CRITICAL: Atomic check with lock to prevent duplicate intervals
   const lockKey = `auto_call_lock_${gameIdStr}`;
   
   if (this.processingGames.has(lockKey)) {
@@ -1321,35 +1319,30 @@ static async startAutoNumberCalling(gameId) {
   try {
     this.processingGames.add(lockKey);
     
-    // Check if interval already exists AND is working
+    // Check if interval already exists
     if (this.activeIntervals.has(gameIdStr)) {
       const existingInterval = this.activeIntervals.get(gameIdStr);
       
       if (existingInterval.lastCallAt) {
         const timeSinceLastCall = Date.now() - existingInterval.lastCallAt;
         
-        // If last call was less than 4.5 seconds ago, consider it working
-        if (timeSinceLastCall < 4500) {
+        if (timeSinceLastCall < 5000) {
           console.log(`✅ Auto-calling already running for ${gameId}, last call ${timeSinceLastCall}ms ago`);
           return existingInterval.interval;
         } else {
-          // Stale interval - clean it up
           console.log(`🧹 Cleaning up stale interval for ${gameId} (last call ${timeSinceLastCall}ms ago)`);
           this.stopAutoNumberCalling(gameId);
         }
       } else {
-        // No last call timestamp - clean it up
         this.stopAutoNumberCalling(gameId);
       }
     }
     
-    // Check if winner already declared
     if (this.winnerDeclared.has(gameIdStr)) {
       console.log(`🛑 Winner already declared for ${gameId}, not starting auto-calling`);
       return null;
     }
 
-    // Get fresh game state
     const game = await Game.findById(gameId);
     
     if (!game) {
@@ -1362,7 +1355,6 @@ static async startAutoNumberCalling(gameId) {
       return null;
     }
     
-    // Check if all numbers have been called
     if (game.numbersCalled?.length >= 75) {
       console.log(`🎯 All 75 numbers already called for ${game.code}`);
       await this.endGameDueToNoWinner(gameId);
@@ -1372,26 +1364,14 @@ static async startAutoNumberCalling(gameId) {
     console.log(`🔢 [AUTO-CALL START] Starting auto-number calling for ${game.code}`);
     console.log(`📊 Current numbers called: ${game.numbersCalled?.length || 0}/75`);
     
-    // Clear any stale winner state
     this.winnerDeclared.delete(gameIdStr);
     
     let errorCount = 0;
     const MAX_ERRORS = 5;
-    let lastCallTime = Date.now(); // Track last call time
-    let callInProgress = false; // Prevent overlapping calls
+    let lastCallTime = Date.now();
+    let callInProgress = false;
     
-    // CRITICAL: Create interval with proper timing control
     const interval = setInterval(async () => {
-      const now = Date.now();
-      const timeSinceLastCall = now - lastCallTime;
-      
-      // CRITICAL: Prevent calls faster than 4.5 seconds
-      if (timeSinceLastCall < 4500) {
-        console.log(`⏱️ Throttling: Only ${Math.round(timeSinceLastCall/1000)}s since last call, skipping`);
-        return;
-      }
-      
-      // Prevent overlapping calls
       if (callInProgress) {
         console.log(`⏱️ Previous call still in progress, skipping`);
         return;
@@ -1400,14 +1380,12 @@ static async startAutoNumberCalling(gameId) {
       try {
         callInProgress = true;
         
-        // Check if we should stop
         if (this.winnerDeclared.has(gameIdStr)) {
           console.log(`🛑 Winner declared, stopping auto-calling for ${game.code}`);
           this.stopAutoNumberCalling(gameId);
           return;
         }
         
-        // Get fresh game state
         const currentGame = await Game.findById(gameId);
         
         if (!currentGame) {
@@ -1422,7 +1400,6 @@ static async startAutoNumberCalling(gameId) {
           return;
         }
         
-        // Check if all numbers have been called
         const calledNumbers = currentGame.numbersCalled || [];
         if (calledNumbers.length >= 75) {
           console.log(`🎯 All 75 numbers called for ${currentGame.code}`);
@@ -1431,22 +1408,19 @@ static async startAutoNumberCalling(gameId) {
           return;
         }
         
-        // Call the next number
         const callResult = await this.callNumber(gameId);
         
         if (callResult) {
           errorCount = 0;
-          lastCallTime = Date.now(); // Update last call time on success
+          lastCallTime = Date.now();
           
-          // Update interval info
           if (this.activeIntervals.has(gameIdStr)) {
             const intervalInfo = this.activeIntervals.get(gameIdStr);
             intervalInfo.lastCallAt = lastCallTime;
             intervalInfo.callCount = (intervalInfo.callCount || 0) + 1;
           }
           
-          // CRITICAL: Log actual interval
-          console.log(`✅ [${currentGame.code}] Called #${callResult.number} - Actual interval: ${Math.round(timeSinceLastCall/1000)}s - Total: ${callResult.totalCalled}/75`);
+          console.log(`✅ [${currentGame.code}] Called #${callResult.number} - Total: ${callResult.totalCalled}/75`);
         }
         
       } catch (error) {
@@ -1457,7 +1431,6 @@ static async startAutoNumberCalling(gameId) {
           console.error(`🚨 Too many errors (${errorCount}), stopping auto-calling for ${gameId}`);
           this.stopAutoNumberCalling(gameId);
           
-          // Try to restart after a delay
           setTimeout(() => {
             this.restartAutoCallingIfNeeded(gameId);
           }, 10000);
@@ -1465,9 +1438,8 @@ static async startAutoNumberCalling(gameId) {
       } finally {
         callInProgress = false;
       }
-    }, this.NUMBER_CALL_INTERVAL);
+    }, this.NUMBER_CALL_INTERVAL); // 5000ms
     
-    // Store interval info with tracking
     this.activeIntervals.set(gameIdStr, {
       interval: interval,
       gameId: gameId,
@@ -1478,31 +1450,28 @@ static async startAutoNumberCalling(gameId) {
     
     console.log(`✅ Auto-calling started for ${game.code} (interval: ${this.NUMBER_CALL_INTERVAL}ms)`);
     
-    // Make immediate first call after 1 second
-    setTimeout(async () => {
-      try {
-        if (!this.winnerDeclared.has(gameIdStr) && this.activeIntervals.has(gameIdStr)) {
-          const callResult = await this.callNumber(gameId);
-          if (callResult) {
-            const intervalInfo = this.activeIntervals.get(gameIdStr);
-            if (intervalInfo) {
-              intervalInfo.lastCallAt = Date.now();
-              intervalInfo.callCount = 1;
-            }
-            console.log(`✅ [${game.code}] First number called: #${callResult.number}`);
+    // Make immediate first call WITHOUT DELAY
+    try {
+      if (!this.winnerDeclared.has(gameIdStr) && this.activeIntervals.has(gameIdStr)) {
+        const callResult = await this.callNumber(gameId);
+        if (callResult) {
+          const intervalInfo = this.activeIntervals.get(gameIdStr);
+          if (intervalInfo) {
+            intervalInfo.lastCallAt = Date.now();
+            intervalInfo.callCount = 1;
           }
+          console.log(`✅ [${game.code}] First number called: #${callResult.number}`);
         }
-      } catch (error) {
-        console.error('❌ Error in initial auto-call:', error);
       }
-    }, 1000);
+    } catch (error) {
+      console.error('❌ Error in initial auto-call:', error);
+    }
     
     return interval;
     
   } catch (error) {
     console.error('❌ Error starting auto-calling:', error);
     
-    // Try to restart after delay
     setTimeout(() => {
       this.restartAutoCallingIfNeeded(gameId);
     }, 5000);
@@ -1560,54 +1529,6 @@ static async callNumber(gameId) {
       return null;
     }
     
-    // ==================== CRITICAL: ENFORCE 4-SECOND GAP WITH WHILE LOOP ====================
-    const MIN_GAP_MS = 4000; // 4 seconds minimum between saves
-    let waitTime = 0;
-    
-    // Check the last update time from the database
-    if (game.updatedAt) {
-      const now = Date.now();
-      const lastUpdateTime = game.updatedAt.getTime();
-      const timeSinceLastUpdate = now - lastUpdateTime;
-      
-      console.log(`⏱️ Time since last DB update: ${Math.round(timeSinceLastUpdate)}ms`);
-      
-      // If not enough time has passed, calculate how long to wait
-      if (timeSinceLastUpdate < MIN_GAP_MS) {
-        waitTime = MIN_GAP_MS - timeSinceLastUpdate;
-        console.log(`⏳ Need to wait ${waitTime}ms before next save (${Math.round(timeSinceLastUpdate)}ms since last save)`);
-        
-        // Abort current transaction
-        await session.abortTransaction();
-        session.endSession();
-        
-        // Wait the required time
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-        
-        // Recursive retry after waiting
-        console.log(`🔄 Retrying callNumber after ${waitTime}ms wait`);
-        return this.callNumber(gameId);
-      }
-    }
-    
-    // Also check our in-memory state as a backup
-    const gameState = this.gameStates.get(gameIdStr);
-    if (gameState && gameState.lastSaveTimestamp) {
-      const now = Date.now();
-      const timeSinceLastSave = now - gameState.lastSaveTimestamp;
-      
-      if (timeSinceLastSave < MIN_GAP_MS) {
-        waitTime = MIN_GAP_MS - timeSinceLastSave;
-        console.log(`⏳ [STATE] Need to wait ${waitTime}ms before next save`);
-        
-        await session.abortTransaction();
-        session.endSession();
-        
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-        return this.callNumber(gameId);
-      }
-    }
-    
     // ==================== GENERATE UNIQUE NUMBER ====================
     let newNumber;
     let attempts = 0;
@@ -1636,7 +1557,7 @@ static async callNumber(gameId) {
     // Add to called numbers
     calledNumbers.push(newNumber);
     game.numbersCalled = calledNumbers;
-    game.updatedAt = new Date(); // Set to current time after waiting
+    game.updatedAt = new Date();
     game.markModified('numbersCalled');
     
     // Save to database
@@ -1646,15 +1567,9 @@ static async callNumber(gameId) {
     const totalCalled = calledNumbers.length;
     const letter = GameUtils.getNumberLetter(newNumber);
     
-    // Calculate actual gap for logging
-    let actualGap = 'N/A';
-    if (gameState && gameState.lastSaveTimestamp) {
-      actualGap = Math.round((Date.now() - gameState.lastSaveTimestamp) / 1000) + 's';
-    }
+    console.log(`🔢 [CALL] Game ${game.code}: #${newNumber} (${letter}) - Total: ${totalCalled}/75`);
     
-    console.log(`🔢 [CALL] Game ${game.code}: #${newNumber} (${letter}) - Total: ${totalCalled}/75 - Gap: ${actualGap}`);
-    
-    // Update game state with save timestamp
+    // Update game state
     this.gameStates.set(gameIdStr, {
       calledNumbers,
       currentNumber: newNumber,
@@ -1799,211 +1714,7 @@ static monitorAutoCallingSystem() {
 // ==================== NEW: AUTO-CALLING HEALTH CHECK ====================
 
 
-static async startAutoNumberCalling(gameId) {
-  const gameIdStr = gameId.toString();
-  
-  // CRITICAL: Atomic check with lock to prevent duplicate intervals
-  const lockKey = `auto_call_lock_${gameIdStr}`;
-  
-  if (this.processingGames.has(lockKey)) {
-    console.log(`⏳ Auto-calling already being started for ${gameId}`);
-    return null;
-  }
-  
-  try {
-    this.processingGames.add(lockKey);
-    
-    // Check if interval already exists AND is working
-    if (this.activeIntervals.has(gameIdStr)) {
-      const existingInterval = this.activeIntervals.get(gameIdStr);
-      
-      if (existingInterval.lastCallAt) {
-        const timeSinceLastCall = Date.now() - existingInterval.lastCallAt;
-        
-        // If last call was less than 4.5 seconds ago, consider it working
-        if (timeSinceLastCall < 4500) {
-          console.log(`✅ Auto-calling already running for ${gameId}, last call ${timeSinceLastCall}ms ago`);
-          return existingInterval.interval;
-        } else {
-          // Stale interval - clean it up
-          console.log(`🧹 Cleaning up stale interval for ${gameId} (last call ${timeSinceLastCall}ms ago)`);
-          this.stopAutoNumberCalling(gameId);
-        }
-      } else {
-        // No last call timestamp - clean it up
-        this.stopAutoNumberCalling(gameId);
-      }
-    }
-    
-    // Check if winner already declared
-    if (this.winnerDeclared.has(gameIdStr)) {
-      console.log(`🛑 Winner already declared for ${gameId}, not starting auto-calling`);
-      return null;
-    }
 
-    // Get fresh game state
-    const game = await Game.findById(gameId);
-    
-    if (!game) {
-      console.log(`❌ Game ${gameId} not found`);
-      return null;
-    }
-    
-    if (game.status !== 'ACTIVE') {
-      console.log(`❌ Game ${game.code} is not ACTIVE (status: ${game.status})`);
-      return null;
-    }
-    
-    // Check if all numbers have been called
-    if (game.numbersCalled?.length >= 75) {
-      console.log(`🎯 All 75 numbers already called for ${game.code}`);
-      await this.endGameDueToNoWinner(gameId);
-      return null;
-    }
-    
-    console.log(`🔢 [AUTO-CALL START] Starting auto-number calling for ${game.code}`);
-    console.log(`📊 Current numbers called: ${game.numbersCalled?.length || 0}/75`);
-    
-    // Clear any stale winner state
-    this.winnerDeclared.delete(gameIdStr);
-    
-    let errorCount = 0;
-    const MAX_ERRORS = 5;
-    let lastCallTime = Date.now(); // Track last call time
-    let callInProgress = false; // Prevent overlapping calls
-    
-    // CRITICAL: Create interval with proper timing control
-    const interval = setInterval(async () => {
-      const now = Date.now();
-      const timeSinceLastCall = now - lastCallTime;
-      
-      // CRITICAL: Prevent calls faster than 4.5 seconds
-      if (timeSinceLastCall < 4500) {
-        console.log(`⏱️ Throttling: Only ${Math.round(timeSinceLastCall/1000)}s since last call, skipping`);
-        return;
-      }
-      
-      // Prevent overlapping calls
-      if (callInProgress) {
-        console.log(`⏱️ Previous call still in progress, skipping`);
-        return;
-      }
-      
-      try {
-        callInProgress = true;
-        
-        // Check if we should stop
-        if (this.winnerDeclared.has(gameIdStr)) {
-          console.log(`🛑 Winner declared, stopping auto-calling for ${game.code}`);
-          this.stopAutoNumberCalling(gameId);
-          return;
-        }
-        
-        // Get fresh game state
-        const currentGame = await Game.findById(gameId);
-        
-        if (!currentGame) {
-          console.log(`🛑 Game ${gameId} not found, stopping auto-calling`);
-          this.stopAutoNumberCalling(gameId);
-          return;
-        }
-        
-        if (currentGame.status !== 'ACTIVE') {
-          console.log(`🛑 Game ${currentGame.code} no longer active (${currentGame.status})`);
-          this.stopAutoNumberCalling(gameId);
-          return;
-        }
-        
-        // Check if all numbers have been called
-        const calledNumbers = currentGame.numbersCalled || [];
-        if (calledNumbers.length >= 75) {
-          console.log(`🎯 All 75 numbers called for ${currentGame.code}`);
-          this.stopAutoNumberCalling(gameId);
-          await this.endGameDueToNoWinner(gameId);
-          return;
-        }
-        
-        // Call the next number
-        const callResult = await this.callNumber(gameId);
-        
-        if (callResult) {
-          errorCount = 0;
-          lastCallTime = Date.now(); // Update last call time on success
-          
-          // Update interval info
-          if (this.activeIntervals.has(gameIdStr)) {
-            const intervalInfo = this.activeIntervals.get(gameIdStr);
-            intervalInfo.lastCallAt = lastCallTime;
-            intervalInfo.callCount = (intervalInfo.callCount || 0) + 1;
-          }
-          
-          // CRITICAL: Log actual interval
-          console.log(`✅ [${currentGame.code}] Called #${callResult.number} - Actual interval: ${Math.round(timeSinceLastCall/1000)}s - Total: ${callResult.totalCalled}/75`);
-        }
-        
-      } catch (error) {
-        errorCount++;
-        console.error(`❌ [AUTO-CALL ERROR ${errorCount}/${MAX_ERRORS}] for game ${gameId}:`, error.message);
-        
-        if (errorCount >= MAX_ERRORS) {
-          console.error(`🚨 Too many errors (${errorCount}), stopping auto-calling for ${gameId}`);
-          this.stopAutoNumberCalling(gameId);
-          
-          // Try to restart after a delay
-          setTimeout(() => {
-            this.restartAutoCallingIfNeeded(gameId);
-          }, 10000);
-        }
-      } finally {
-        callInProgress = false;
-      }
-    }, this.NUMBER_CALL_INTERVAL);
-    
-    // Store interval info with tracking
-    this.activeIntervals.set(gameIdStr, {
-      interval: interval,
-      gameId: gameId,
-      startedAt: new Date(),
-      lastCallAt: lastCallTime,
-      callCount: 0
-    });
-    
-    console.log(`✅ Auto-calling started for ${game.code} (interval: ${this.NUMBER_CALL_INTERVAL}ms)`);
-    
-    // Make immediate first call after 1 second
-    setTimeout(async () => {
-      try {
-        if (!this.winnerDeclared.has(gameIdStr) && this.activeIntervals.has(gameIdStr)) {
-          const callResult = await this.callNumber(gameId);
-          if (callResult) {
-            const intervalInfo = this.activeIntervals.get(gameIdStr);
-            if (intervalInfo) {
-              intervalInfo.lastCallAt = Date.now();
-              intervalInfo.callCount = 1;
-            }
-            console.log(`✅ [${game.code}] First number called: #${callResult.number}`);
-          }
-        }
-      } catch (error) {
-        console.error('❌ Error in initial auto-call:', error);
-      }
-    }, 1000);
-    
-    return interval;
-    
-  } catch (error) {
-    console.error('❌ Error starting auto-calling:', error);
-    
-    // Try to restart after delay
-    setTimeout(() => {
-      this.restartAutoCallingIfNeeded(gameId);
-    }, 5000);
-    
-    return null;
-  } finally {
-    this.processingGames.delete(lockKey);
-  }
-}
 
   // In GameService.js, add this method:
   static broadcastWinnerInfo(gameId, winnerInfo) {
@@ -2398,13 +2109,19 @@ static async startAutoNumberCalling(gameId) {
         console.log(`❌ INVALID BINGO CLAIM by ${userId} - DISQUALIFYING PERMANENTLY`);
 
         // Disqualify the player from the game
-        await this.disqualifyPlayer(gameId, mongoUserId, session, {
-          reason: 'False bingo claim',
-          claimedPattern: patternType,
-          markedPositions: manuallyMarkedPositions.length,
-          calledNumbersAtClaim: calledNumbers.length
-        });
-
+           await this.disqualifyPlayer(gameId, mongoUserId, session, {
+    reason: 'False bingo claim',
+    claimedPattern: patternType,
+    markedPositions: manuallyMarkedPositions.length,
+    calledNumbersAtClaim: calledNumbers.length
+  });
+setImmediate(async () => {
+    try {
+      await this.checkForAutoWinDueToDisqualifications(gameId);
+    } catch (error) {
+      console.error('❌ Error checking auto-win after false claim:', error);
+    }
+  });
         // Also mark the card as disqualified
         bingoCard.isDisqualified = true;
         bingoCard.disqualifiedAt = new Date();
@@ -2425,7 +2142,7 @@ static async startAutoNumberCalling(gameId) {
         }
 
         // Decrement current players count
-        game.currentPlayers = Math.max(0, game.currentPlayers - 1);
+        // game.currentPlayers = Math.max(0, game.currentPlayers - 1);
         await game.save({ session });
 
         // Record the claim as disqualified
@@ -2682,162 +2399,362 @@ static async startAutoNumberCalling(gameId) {
 
   // ==================== CARD MANAGEMENT ====================
 
-  static async selectCard(gameId, userId, cardNumbers, cardNumber) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
+ // services/gameService.js - FIXED selectCard for concurrency
 
-    try {
-      const canJoin = await this.canPlayerJoinGame(gameId, userId);
-      if (!canJoin) {
-        throw new Error('You are disqualified from this game and cannot select a card');
+static async selectCard(gameId, userId, cardNumbers, cardNumber) {
+  // Use a lightweight lock per game/card combination
+  const lockKey = `card_select_${gameId}_${cardNumber}`;
+  
+  // Check if this specific card is being selected
+  if (this.processingGames.has(lockKey)) {
+    throw new Error('This card is being selected by another player. Please try again.');
+  }
+
+  try {
+    this.processingGames.add(lockKey);
+
+    // First, do all validations WITHOUT transaction
+    const canJoin = await this.canPlayerJoinGame(gameId, userId);
+    if (!canJoin) {
+      throw new Error('You are disqualified from this game and cannot select a card');
+    }
+
+    const game = await Game.findById(gameId);
+    if (!game) {
+      throw new Error('Game not found');
+    }
+
+    if (game.status !== 'WAITING_FOR_PLAYERS' && game.status !== 'CARD_SELECTION') {
+      throw new Error('Cannot select card - game not accepting players');
+    }
+
+    // QUICK CHECK: See if card is taken (without transaction)
+    const existingCardWithNumber = await BingoCard.findOne({
+      gameId,
+      cardNumber
+    });
+
+    if (existingCardWithNumber) {
+      // If it's the same user, allow it
+      let userIdToCheck = userId;
+      if (!mongoose.Types.ObjectId.isValid(userIdToCheck)) {
+        const user = await User.findOne({ telegramId: userId });
+        userIdToCheck = user?._id;
       }
 
-      const game = await Game.findById(gameId).session(session);
-
-      if (!game) {
-        throw new Error('Game not found');
-      }
-
-      if (game.status !== 'WAITING_FOR_PLAYERS' && game.status !== 'CARD_SELECTION') {
-        throw new Error('Cannot select card - game not accepting players');
-      }
-
-      const existingCardWithNumber = await BingoCard.findOne({
-        gameId,
-        cardNumber
-      }).session(session);
-
-      if (existingCardWithNumber && existingCardWithNumber.userId.toString() !== userId.toString()) {
+      if (!existingCardWithNumber.userId.equals(userIdToCheck)) {
         throw new Error(`Card #${cardNumber} is already taken by another player`);
       }
+    }
 
-      let user;
-      if (mongoose.Types.ObjectId.isValid(userId)) {
-        user = await User.findById(userId).session(session);
-      } else {
-        user = await User.findOne({ telegramId: userId }).session(session);
-      }
+    // Get or create user
+    let user;
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId);
+    } else {
+      user = await User.findOne({ telegramId: userId });
+    }
 
-      if (!user) {
-        user = await User.create([{
-          telegramId: userId,
-          firstName: `Player_${userId.slice(0, 8)}`,
-          username: `player_${userId}`,
-          role: 'user'
-        }], { session });
-        user = user[0];
-      }
+    if (!user) {
+      user = await User.create({
+        telegramId: userId,
+        firstName: `Player_${userId.slice(0, 8)}`,
+        username: `player_${userId}`,
+        role: 'user'
+      });
+    }
 
-      const mongoUserId = user._id;
+    const mongoUserId = user._id;
 
-      const existingPlayer = await GamePlayer.findOne({
-        gameId,
-        userId: mongoUserId
-      }).session(session);
+    // Now use atomic operations for the actual update
+    // This avoids long-running transactions
 
-      if (!existingPlayer) {
-        await GamePlayer.create([{
+    // 1. Handle GamePlayer creation/update atomically
+    const playerUpdate = await GamePlayer.findOneAndUpdate(
+      { gameId, userId: mongoUserId },
+      {
+        $setOnInsert: {
           userId: mongoUserId,
           gameId: gameId,
           isReady: true,
           playerType: 'PLAYER',
           joinedAt: new Date()
-        }], { session });
-
-        game.currentPlayers += 1;
-        await game.save({ session });
-
-        console.log(`✅ User ${userId} joined ${game.code}. Total: ${game.currentPlayers}`);
-
-        // Broadcast user joined
-        this.broadcastToGame(gameId, {
-          type: 'USER_JOINED',
-          gameId: game._id,
-          userId: mongoUserId,
-          telegramId: userId,
-          currentPlayers: game.currentPlayers,
-          timestamp: new Date().toISOString()
-        }, [mongoUserId.toString()]);
+        }
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true
       }
+    );
 
-      const existingCard = await BingoCard.findOne({
-        gameId,
-        userId: mongoUserId
-      }).session(session);
+    // If this was a new player, increment game counter
+    if (playerUpdate.joinedAt > new Date(Date.now() - 1000)) {
+      await Game.findByIdAndUpdate(gameId, {
+        $inc: { currentPlayers: 1 }
+      });
+    }
 
-      if (existingCard) {
-        if (existingCard.cardNumber === cardNumber) {
-          console.log(`✅ User ${userId} already has card #${cardNumber}`);
+    // 2. Handle BingoCard update atomically with retry logic
+    let retries = 3;
+    let bingoCard = null;
+    
+    while (retries > 0 && !bingoCard) {
+      try {
+        // Try to find existing card
+        const existingCard = await BingoCard.findOne({
+          gameId,
+          userId: mongoUserId
+        });
 
-          await session.commitTransaction();
+        if (existingCard) {
+          if (existingCard.cardNumber === cardNumber) {
+            // User already has this card - success
+            console.log(`✅ User ${userId} already has card #${cardNumber}`);
+            
+            this.updateCardSelection(gameId, cardNumber, mongoUserId);
+            
+            // Broadcast updates asynchronously
+            setImmediate(async () => {
+              const takenCards = await this.getTakenCards(gameId);
+              this.broadcastTakenCardsUpdate(gameId, takenCards);
+            });
 
-          return {
-            success: true,
-            message: 'Card already selected',
-            action: 'ALREADY_SELECTED',
-            cardId: existingCard._id,
-            cardNumber: cardNumber
-          };
+            return {
+              success: true,
+              message: 'Card already selected',
+              action: 'ALREADY_SELECTED',
+              cardId: existingCard._id,
+              cardNumber: cardNumber
+            };
+          }
+
+          // User is changing cards - delete old one
+          await BingoCard.deleteOne({ _id: existingCard._id });
         }
 
-        console.log(`🔄 User ${userId} replacing card #${existingCard.cardNumber} with #${cardNumber}`);
+        // Try to insert new card with optimistic concurrency
+        // Use findOneAndUpdate with upsert to ensure atomicity
+        bingoCard = await BingoCard.findOneAndUpdate(
+          { 
+            gameId, 
+            cardNumber,
+            // Only succeed if no one has taken it yet
+            userId: { $exists: false }
+          },
+          {
+            $set: {
+              userId: mongoUserId,
+              numbers: cardNumbers,
+              markedPositions: [12],
+              isLateJoiner: game.status === 'CARD_SELECTION' || game.status === 'ACTIVE',
+              joinedAt: new Date(),
+              numbersCalledAtJoin: game.status === 'CARD_SELECTION' || game.status === 'ACTIVE' ? 
+                (game.numbersCalled || []) : []
+            },
+            $setOnInsert: {
+              gameId,
+              cardNumber,
+              createdAt: new Date()
+            }
+          },
+          {
+            upsert: true,
+            new: true,
+            runValidators: true,
+            // Use a short write concern for better performance
+            writeConcern: { w: 1, j: false }
+          }
+        );
 
-        await BingoCard.deleteOne({
-          _id: existingCard._id
-        }).session(session);
+      } catch (error) {
+        // Check for duplicate key error (E11000)
+        if (error.code === 11000) {
+          retries--;
+          if (retries === 0) {
+            throw new Error(`Card #${cardNumber} was just taken by another player`);
+          }
+          // Wait a tiny bit before retrying
+          await new Promise(resolve => setTimeout(resolve, 50));
+        } else {
+          throw error;
+        }
       }
-
-      const newCard = await BingoCard.create([{
-        userId: mongoUserId,
-        gameId,
-        cardNumber: cardNumber,
-        numbers: cardNumbers,
-        markedPositions: [12],
-        isLateJoiner: game.status === 'CARD_SELECTION' || game.status === 'ACTIVE',
-        joinedAt: new Date(),
-        numbersCalledAtJoin: game.status === 'CARD_SELECTION' || game.status === 'ACTIVE' ? (game.numbersCalled || []) : []
-      }], { session });
-
-      await session.commitTransaction();
-
-      console.log(`✅ User ${user._id} selected card #${cardNumber} for ${game.code}`);
-
-      this.updateCardSelection(gameId, cardNumber, mongoUserId);
-
-      // Broadcast card selected
-      this.broadcastToGame(gameId, {
-        type: 'CARD_SELECTED',
-        gameId: game._id,
-        userId: mongoUserId,
-        cardNumber: cardNumber,
-        action: existingCard ? 'REPLACED' : 'SELECTED',
-        timestamp: new Date().toISOString()
-      }, [mongoUserId.toString()]);
-
-      // Broadcast taken cards update
-      const takenCards = await this.getTakenCards(gameId);
-      this.broadcastTakenCardsUpdate(gameId, takenCards);
-
-      if (game.status === 'WAITING_FOR_PLAYERS') {
-        this.scheduleAutoStartCheck(gameId);
-      }
-
-      return {
-        success: true,
-        message: 'Card selected successfully',
-        action: existingCard ? 'REPLACED' : 'CREATED',
-        cardId: newCard[0]._id,
-        cardNumber: cardNumber
-      };
-
-    } catch (error) {
-      await session.abortTransaction();
-      console.error('❌ Select card error:', error);
-      throw error;
-    } finally {
-      session.endSession();
     }
+
+    console.log(`✅ User ${user._id} selected card #${cardNumber} for ${game.code}`);
+
+    // Update in-memory state
+    this.updateCardSelection(gameId, cardNumber, mongoUserId);
+
+    // Broadcast updates asynchronously (don't await)
+    setImmediate(async () => {
+      try {
+        // Get fresh taken cards
+        const takenCards = await this.getTakenCards(gameId);
+        this.broadcastTakenCardsUpdate(gameId, takenCards);
+        
+        this.broadcastToGame(gameId, {
+          type: 'CARD_SELECTED',
+          gameId: game._id,
+          userId: mongoUserId,
+          cardNumber: cardNumber,
+          action: 'SELECTED',
+          timestamp: new Date().toISOString()
+        }, [mongoUserId.toString()]);
+      } catch (error) {
+        console.error('❌ Error broadcasting card selection:', error);
+      }
+    });
+
+    // Check auto-start conditions (non-blocking)
+    if (game.status === 'WAITING_FOR_PLAYERS') {
+      setImmediate(() => {
+        this.scheduleAutoStartCheck(gameId).catch(error => {
+          console.error('❌ Error scheduling auto-start:', error);
+        });
+      });
+    }
+
+    return {
+      success: true,
+      message: 'Card selected successfully',
+      action: 'CREATED',
+      cardId: bingoCard._id,
+      cardNumber: cardNumber
+    };
+
+  } catch (error) {
+    console.error('❌ Select card error:', error);
+    throw error;
+  } finally {
+    // Release the lock
+    this.processingGames.delete(lockKey);
   }
+}
+// Add to GameService class
+
+static async checkForAutoWinDueToDisqualifications(gameId) {
+  const lockKey = `auto_win_check_${gameId}`;
+  
+  if (this.processingGames.has(lockKey)) {
+    return;
+  }
+  
+  try {
+    this.processingGames.add(lockKey);
+    
+    const game = await Game.findById(gameId);
+    if (!game || game.status !== 'ACTIVE') {
+      return;
+    }
+    
+    // Check if winner already declared
+    if (this.winnerDeclared.has(gameId.toString())) {
+      return;
+    }
+    
+    // Get all players who joined the game (original players)
+    // 🚨 FIX: Don't use session here - it's not in a transaction
+    const allPlayers = await GamePlayer.find({ gameId });
+    const originalPlayerCount = allPlayers.length;
+    
+    // Get active players (not disqualified)
+    const activePlayers = await GamePlayer.find({
+      gameId,
+      disqualified: { $ne: true }
+    });
+    
+    console.log(`📊 Game ${game.code}: ${originalPlayerCount} original players, ${activePlayers.length} active players`);
+    
+    // If only one active player remains, they automatically win
+    if (activePlayers.length === 1) {
+      const winningPlayer = activePlayers[0];
+      
+      console.log(`🏆 AUTO-WIN: Only one player remains in game ${game.code}`);
+      console.log(`👤 Winning player: ${winningPlayer.userId}`);
+      console.log(`💰 Original players: ${originalPlayerCount}, Pot: $${originalPlayerCount * this.ENTRY_FEE}`);
+      
+      // Get their bingo card
+      const winningCard = await BingoCard.findOne({
+        gameId,
+        userId: winningPlayer.userId,
+        isDisqualified: { $ne: true }
+      });
+      
+      if (!winningCard) {
+        console.log(`⚠️ Winning player has no valid card - checking if game should end with no winner`);
+        
+        // If no valid cards remain, end with no winner
+        if (activePlayers.length === 1 && !winningCard) {
+          await this.endGameDueToNoWinner(gameId);
+        }
+        return;
+      }
+      
+      // CRITICAL: Calculate prize based on ORIGINAL player count, not active players
+      const totalUniquePlayers = originalPlayerCount;
+      
+      const totalPot = totalUniquePlayers * this.ENTRY_FEE;
+      const platformFee = totalPot * 0.2;
+      const winnerPrize = totalPot - platformFee;
+      
+      console.log(`💰 Prize calculation: ${totalUniquePlayers} original players × $${this.ENTRY_FEE} = $${totalPot} pot`);
+      console.log(`💰 Winner receives: $${winnerPrize} (after $${platformFee} fee)`);
+      
+      // Declare winner - need to start a session for this
+      const session = await mongoose.startSession();
+      session.startTransaction();
+      
+      try {
+        const result = await this.declareWinnerWithRetry(
+          gameId,
+          winningPlayer.userId,
+          {
+            ...winningCard.toObject(),
+            winningPatternType: 'AUTO_WIN',
+            winningPatternPositions: [],
+            winningPositionIndex: null
+          },
+          [], // No winning positions for auto-win
+          null
+        );
+        
+        await session.commitTransaction();
+        
+        // Broadcast auto-win message
+        this.broadcastToGame(gameId, {
+          type: 'AUTO_WIN_DECLARED',
+          gameId: game._id,
+          gameCode: game.code,
+          winnerId: winningPlayer.userId,
+          reason: 'All other players were disqualified',
+          winnerPrize: winnerPrize,
+          totalPlayers: totalUniquePlayers,
+          timestamp: new Date().toISOString()
+        });
+        
+        return result;
+      } catch (error) {
+        await session.abortTransaction();
+        throw error;
+      } finally {
+        session.endSession();
+      }
+    }
+    
+    // If no active players remain, end with no winner
+    if (activePlayers.length === 0) {
+      console.log(`⚠️ No active players remain in game ${game.code} - ending with no winner`);
+      await this.endGameDueToNoWinner(gameId);
+    }
+    
+  } catch (error) {
+    console.error('❌ Error checking for auto-win due to disqualifications:', error);
+  } finally {
+    this.processingGames.delete(lockKey);
+  }
+}
 
   // ==================== HELPER METHODS ====================
 
@@ -3038,49 +2955,88 @@ static async startAutoNumberCalling(gameId) {
 
 
 
-  static async disqualifyPlayer(gameId, userId, session, details = {}) {
-    try {
-      console.log(`⛔ Disqualifying player ${userId} from game ${gameId}`);
+ static async disqualifyPlayer(gameId, userId, session, details = {}) {
+  try {
+    console.log(`⛔ Disqualifying player ${userId} from game ${gameId}`);
 
-      // Mark player as disqualified in GamePlayer
-      await GamePlayer.findOneAndUpdate(
-        { gameId, userId },
-        {
-          disqualified: true,
-          disqualifiedAt: new Date(),
-          disqualificationReason: details.reason || 'False bingo claim',
-          disqualificationDetails: details
-        },
-        { session, upsert: true }
-      );
-
-      // Mark all cards from this player in this game as disqualified
-      await BingoCard.updateMany(
-        { gameId, userId },
-        {
-          isDisqualified: true,
-          disqualifiedAt: new Date(),
-          disqualificationReason: details.reason || 'False bingo claim'
-        },
-        { session }
-      );
-
-      // Add to disqualified claims tracker
-      const claimKey = `${gameId}_${userId}`;
-      this.bingoClaims.set(claimKey, {
-        userId,
-        timestamp: new Date(),
-        isDisqualified: true,
-        details
-      });
-
-      console.log(`✅ Player ${userId} disqualified from game ${gameId}`);
-
-    } catch (error) {
-      console.error('❌ Error disqualifying player:', error);
-      throw error;
+    // Get user's MongoDB ID if needed
+    let mongoUserId = userId;
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      const user = await User.findOne({ telegramId: userId }).session(session);
+      mongoUserId = user?._id;
+      if (!mongoUserId) {
+        throw new Error('User not found');
+      }
     }
+
+    // CRITICAL: Get game to check current pot before disqualification
+    const game = await Game.findById(gameId).session(session);
+    const currentPlayersBeforeDisqualification = game.currentPlayers || 0;
+
+    // Mark player as disqualified in GamePlayer - DO NOT DECREMENT game.currentPlayers
+    await GamePlayer.findOneAndUpdate(
+      { gameId, userId: mongoUserId },
+      {
+        disqualified: true,
+        disqualifiedAt: new Date(),
+        disqualificationReason: details.reason || 'False bingo claim',
+        disqualificationDetails: details
+      },
+      { session, upsert: true }
+    );
+
+    // Mark all cards from this player in this game as disqualified
+    await BingoCard.updateMany(
+      { gameId, userId: mongoUserId },
+      {
+        isDisqualified: true,
+        disqualifiedAt: new Date(),
+        disqualificationReason: details.reason || 'False bingo claim'
+      },
+      { session }
+    );
+
+    // Add to disqualified claims tracker
+    const claimKey = `${gameId}_${mongoUserId}`;
+    this.bingoClaims.set(claimKey, {
+      userId: mongoUserId,
+      timestamp: new Date(),
+      isDisqualified: true,
+      details
+    });
+
+    // CRITICAL: DO NOT decrement game.currentPlayers
+    // The pot remains the same, we just mark this player as unable to win
+    
+    console.log(`✅ Player ${userId} disqualified from game ${gameId}`);
+    console.log(`💰 Pot unchanged: ${currentPlayersBeforeDisqualification} original players, ${this.ENTRY_FEE * currentPlayersBeforeDisqualification} total pot`);
+
+    // Broadcast disqualification
+    if (this.webSocketService) {
+      this.broadcastToGame(gameId, {
+        type: 'PLAYER_DISQUALIFIED',
+        gameId,
+        userId: mongoUserId,
+        reason: details.reason || 'False bingo claim',
+        remainingPlayers: currentPlayersBeforeDisqualification, // Still show original count for transparency
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // 🚨 CRITICAL: Check if we need to auto-declare winner after disqualification
+    setImmediate(async () => {
+      try {
+        await this.checkForAutoWinDueToDisqualifications(gameId);
+      } catch (error) {
+        console.error('❌ Error checking auto-win after disqualification:', error);
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error disqualifying player:', error);
+    throw error;
   }
+}
 
   static clearBingoClaimsForGame(gameId) {
     const gameIdStr = gameId.toString();
@@ -4777,13 +4733,13 @@ static async setNextGameCountdown(gameId) {
 
   static async getWinnerInfo(gameId) {
     try {
-      const game = await Game.findById(gameId)
-        .populate('winnerId', 'username firstName telegramId');
+       const game = await Game.findById(gameId)
+      .populate('winnerId', 'username firstName telegramId');
 
       if (!game) {
         return null;
       }
-
+ 
       let winningCard = null;
       let winningPattern = null;
       let winningPatternPositions = [];
@@ -4811,6 +4767,7 @@ static async setNextGameCountdown(gameId) {
 
       // Get game details for all players to see
       const bingoCards = await BingoCard.find({ gameId });
+      
       const totalPlayers = new Set(bingoCards.map(card => card.userId.toString())).size;
 
       const winnerInfo = {
@@ -5220,3 +5177,4 @@ process.on('SIGTERM', () => {
 });
 
 module.exports = GameService;
+

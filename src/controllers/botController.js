@@ -2826,68 +2826,88 @@ this.bot.action(/admin_all_balances(?:_page_(\d+))?/, async (ctx) => {
 
 // Suspicious users view
 this.bot.action('admin_suspicious_users', async (ctx) => {
-    if (!AdminUtils.isAdmin(ctx.from.id)) {
-        await ctx.answerCbQuery('❌ Access denied');
-        return;
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
+
+  try {
+    const suspiciousUsers = await WalletService.getSuspiciousUsers({
+      rapidWithdrawalThreshold: 3,
+      largeWithdrawalThreshold: 500,
+      unusualActivityScore: 0.6,
+      minBalanceThreshold: 500
+    });
+    
+    let message = `🚨 *Suspicious Activity Report*\n\n`;
+    
+    if (suspiciousUsers.length === 0) {
+      message += `✅ No suspicious activity detected.\nAll users appear normal.`;
+    } else {
+      message += `Found ${suspiciousUsers.length} users with suspicious patterns:\n\n`;
+      
+      suspiciousUsers.forEach((user, index) => {
+        const suspiciousScore = (user.suspiciousScore * 100).toFixed(0);
+        let scoreEmoji = '🟢';
+        if (suspiciousScore > 80) scoreEmoji = '🔴';
+        else if (suspiciousScore > 60) scoreEmoji = '🟠';
+        else if (suspiciousScore > 40) scoreEmoji = '🟡';
+        
+        message += `━━━━━━━━━━━━━━━━━━\n`;
+        message += `${scoreEmoji} *Suspicious User #${index + 1}*\n`;
+        message += `👤 *${this.escapeMarkdown(user.firstName || 'Unknown')}* (@${this.escapeMarkdown(user.username || 'N/A')})\n`;
+        message += `🆔 Telegram: ${user.telegramId}\n`;
+        message += `💰 Balance: $${user.wallet?.balance?.toFixed(2) || 0}\n`;
+        message += `🔒 Locked: $${(user.wallet?.lockedAmount || 0).toFixed(2)}\n`;
+        message += `🚩 *Suspicion Score: ${suspiciousScore}%*\n\n`;
+        
+        message += `*Suspicious Indicators:*\n`;
+        if (user.withdrawalCount24h > 3) {
+          message += `• ⚠️ ${user.withdrawalCount24h} withdrawals in 24h\n`;
+        }
+        if (user.largeWithdrawalCount > 0) {
+          message += `• ⚠️ ${user.largeWithdrawalCount} large withdrawals (>$500)\n`;
+        }
+        if (user.smsCount3d > 5) {
+          message += `• ⚠️ ${user.smsCount3d} SMS in 3 days\n`;
+        }
+        message += `\n🔧 [Investigate: /user_${user.telegramId}]\n`;
+        message += `━━━━━━━━━━━━━━━━━━\n\n`;
+      });
     }
     
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('🔄 Refresh', 'admin_suspicious_users')],
+      [Markup.button.callback('🕵️ Fraud Monitor', 'admin_fraud_monitor')],
+      [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+    ]);
+
+    // Try to get the current message text
     try {
-        const suspiciousUsers = await WalletService.getSuspiciousUsers({
-            rapidWithdrawalThreshold: 3,
-            largeWithdrawalThreshold: 500,
-            unusualActivityScore: 0.6,
-            minBalanceThreshold: 500
+      // First, check if we can get the current message
+      const currentMessage = await ctx.editMessageText(message, {
+        parse_mode: 'Markdown',
+        ...keyboard
+      }).catch(() => null);
+      
+      // If editMessageText throws an error about not modified, we ignore it
+    } catch (editError) {
+      // If it's the "message not modified" error, just answer the callback
+      if (editError.message && editError.message.includes('message is not modified')) {
+        await ctx.answerCbQuery('No changes detected');
+      } else {
+        // For other errors, try to send a new message instead
+        console.error('Error editing suspicious users message:', editError);
+        await ctx.reply(message, {
+          parse_mode: 'Markdown',
+          ...keyboard
         });
-        
-        let message = `🚨 *Suspicious Activity Report*\n\n`;
-        
-        if (suspiciousUsers.length === 0) {
-            message += `✅ No suspicious activity detected.\nAll users appear normal.`;
-        } else {
-            message += `Found ${suspiciousUsers.length} users with suspicious patterns:\n\n`;
-            
-            suspiciousUsers.forEach((user, index) => {
-                const suspiciousScore = (user.suspiciousScore * 100).toFixed(0);
-                let scoreEmoji = '🟢';
-                if (suspiciousScore > 80) scoreEmoji = '🔴';
-                else if (suspiciousScore > 60) scoreEmoji = '🟠';
-                else if (suspiciousScore > 40) scoreEmoji = '🟡';
-                
-                message += `━━━━━━━━━━━━━━━━━━\n`;
-                message += `${scoreEmoji} *Suspicious User #${index + 1}*\n`;
-                message += `👤 *${user.firstName || 'Unknown'}* (@${user.username || 'N/A'})\n`;
-                message += `🆔 Telegram: ${user.telegramId}\n`;
-                message += `💰 Balance: $${user.wallet?.balance?.toFixed(2) || 0}\n`;
-                message += `🔒 Locked: $${(user.wallet?.lockedAmount || 0).toFixed(2)}\n`;
-                message += `🚩 *Suspicion Score: ${suspiciousScore}%*\n\n`;
-                
-                message += `*Suspicious Indicators:*\n`;
-                if (user.withdrawalCount24h > 3) {
-                    message += `• ⚠️ ${user.withdrawalCount24h} withdrawals in 24h\n`;
-                }
-                if (user.largeWithdrawalCount > 0) {
-                    message += `• ⚠️ ${user.largeWithdrawalCount} large withdrawals (>$500)\n`;
-                }
-                if (user.smsCount3d > 5) {
-                    message += `• ⚠️ ${user.smsCount3d} SMS in 3 days\n`;
-                }
-                message += `\n🔧 [Investigate: /user_${user.telegramId}]\n`;
-                message += `━━━━━━━━━━━━━━━━━━\n\n`;
-            });
-        }
-        
-        await ctx.editMessageText(message, {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback('🔄 Refresh', 'admin_suspicious_users')],
-                [Markup.button.callback('🕵️ Fraud Monitor', 'admin_fraud_monitor')],
-                [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
-            ])
-        });
-    } catch (error) {
-        console.error('Error loading suspicious users:', error);
-        await ctx.answerCbQuery('❌ Error analyzing suspicious activity');
+      }
     }
+  } catch (error) {
+    console.error('Error loading suspicious users:', error);
+    await ctx.answerCbQuery('❌ Error analyzing suspicious activity');
+  }
 });
 
 // User investigation view (when clicking on suspicious user)
@@ -3098,188 +3118,285 @@ View and manage all transactions.
       });
     });
 
-    this.bot.action('admin_transactions_list', async (ctx) => {
-      if (!AdminUtils.isAdmin(ctx.from.id)) {
-        await ctx.answerCbQuery('❌ Access denied');
-        return;
-      }
+  this.bot.action('admin_transactions_list', async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
 
-      try {
-        const page = 1;
-        const limit = 10;
+  try {
+    const page = 1;
+    const limit = 10;
+    
+    const transactions = await Transaction.find()
+      .populate('userId', 'firstName username telegramId')
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+
+    let message = `💳 *All Transactions - Page ${page}*\n\n`;
+
+    if (transactions.length === 0) {
+      message += `No transactions found.\n`;
+    } else {
+      transactions.forEach((tx, index) => {
+        const userName = tx.userId?.firstName || tx.userId?.username || 'Unknown User';
+        const telegramId = tx.userId?.telegramId || 'N/A';
+        const typeEmoji = tx.type === 'DEPOSIT' ? '📥' :
+                         tx.type === 'WITHDRAWAL' ? '📤' :
+                         tx.type === 'WINNING' ? '🏆' :
+                         tx.type === 'GAME_ENTRY' ? '🎮' : '💳';
         
-        const transactions = await Transaction.find()
-          .populate('userId', 'firstName username telegramId')
-          .sort({ createdAt: -1 })
-          .limit(limit)
-          .lean();
+        const statusEmoji = tx.status === 'COMPLETED' ? '✅' :
+                           tx.status === 'PENDING' ? '⏳' : '❌';
 
-        let message = `💳 *All Transactions - Page ${page}*\n\n`;
-
-        if (transactions.length === 0) {
-          message += `No transactions found.\n`;
-        } else {
-          transactions.forEach((tx, index) => {
-            const userName = tx.userId?.firstName || tx.userId?.username || 'Unknown User';
-            const telegramId = tx.userId?.telegramId || 'N/A';
-            const typeEmoji = tx.type === 'DEPOSIT' ? '📥' :
-                             tx.type === 'WITHDRAWAL' ? '📤' :
-                             tx.type === 'WINNING' ? '🏆' :
-                             tx.type === 'GAME_ENTRY' ? '🎮' : '💳';
-            
-            const statusEmoji = tx.status === 'COMPLETED' ? '✅' :
-                               tx.status === 'PENDING' ? '⏳' : '❌';
-
-            message += `━━━━━━━━━━━━━━━━━━\n`;
-            message += `#${index + 1}\n`;
-            message += `${typeEmoji} ${statusEmoji} *${tx.type}*\n`;
-            message += `👤 User: ${userName}\n`;
-            message += `📞 ID: ${telegramId}\n`;
-            message += `💰 Amount: $${Math.abs(tx.amount)}\n`;
-            
-            if (tx.metadata?.paymentMethod) {
-              message += `🏦 Method: ${tx.metadata.paymentMethod}\n`;
-            }
-            
-            message += `📝 Desc: ${tx.description?.substring(0, 50) || 'No description'}\n`;
-            message += `⏰ Time: ${new Date(tx.createdAt).toLocaleString()}\n`;
-            
-            message += `\n🔧 Actions:\n`;
-            message += `   • [View: /viewtx_${tx._id}]\n`;
-            
-            if (tx.type === 'DEPOSIT' && tx.status === 'PENDING') {
-              message += `   • [Approve: /approve_${tx._id}]\n`;
-            }
-            
-            if (tx.type === 'WITHDRAWAL' && tx.status === 'PENDING') {
-              message += `   • [Approve: /approvewithdraw_${tx._id}]\n`;
-              message += `   • [Reject: /rejectwithdraw_${tx._id}]\n`;
-            }
-            
-            message += `\n`;
-          });
+        message += `━━━━━━━━━━━━━━━━━━\n`;
+        message += `#${index + 1}\n`;
+        message += `${typeEmoji} ${statusEmoji} *${tx.type}*\n`;
+        message += `👤 User: ${this.escapeMarkdown(userName)}\n`;
+        message += `📞 ID: ${telegramId}\n`;
+        message += `💰 Amount: $${Math.abs(tx.amount)}\n`;
+        
+        if (tx.metadata?.paymentMethod) {
+          message += `🏦 Method: ${tx.metadata.paymentMethod}\n`;
         }
+        
+        message += `📝 Desc: ${tx.description?.substring(0, 50) || 'No description'}\n`;
+        message += `⏰ Time: ${new Date(tx.createdAt).toLocaleString()}\n`;
+        
+        message += `\n🔧 Actions:\n`;
+        message += `   • [View: /viewtx_${tx._id}]\n`;
+        
+        if (tx.type === 'DEPOSIT' && tx.status === 'PENDING') {
+          message += `   • [Approve: /approve_${tx._id}]\n`;
+        }
+        
+        if (tx.type === 'WITHDRAWAL' && tx.status === 'PENDING') {
+          message += `   • [Approve: /approvewithdraw_${tx._id}]\n`;
+          message += `   • [Reject: /rejectwithdraw_${tx._id}]\n`;
+        }
+        
+        message += `\n`;
+      });
+    }
 
-        const keyboard = [
-          [Markup.button.callback('🔄 Refresh', 'admin_transactions_list')],
-          [Markup.button.callback('📊 Transaction Stats', 'admin_transaction_stats')],
-          [Markup.button.callback('💳 Transactions Menu', 'admin_transactions_menu')],
-          [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
-        ];
+    const keyboard = [
+      [Markup.button.callback('🔄 Refresh', 'admin_transactions_list')],
+      [Markup.button.callback('📊 Transaction Stats', 'admin_transaction_stats')],
+      [Markup.button.callback('💳 Transactions Menu', 'admin_transactions_menu')],
+      [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+    ];
 
-        await ctx.editMessageText(message, {
+    // Try to edit the message, but handle "message not modified" error
+    try {
+      await ctx.editMessageText(message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(keyboard)
+      });
+    } catch (editError) {
+      // If it's the "message not modified" error, just answer the callback
+      if (editError.message && editError.message.includes('message is not modified')) {
+        await ctx.answerCbQuery('No changes');
+      } else {
+        // If it's a different error, log it and try to send a new message
+        console.error('Error editing transactions list message:', editError);
+        await ctx.reply(message, {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard(keyboard)
         });
-      } catch (error) {
-        console.error('Error loading transactions list:', error);
-        await ctx.editMessageText('❌ Error loading transactions list');
       }
-    });
+    }
+  } catch (error) {
+    console.error('Error loading transactions list:', error);
+    await ctx.editMessageText('❌ Error loading transactions list');
+  }
+});
 
-    this.bot.action('admin_transaction_stats', async (ctx) => {
-      if (!AdminUtils.isAdmin(ctx.from.id)) {
-        await ctx.answerCbQuery('❌ Access denied');
-        return;
+ this.bot.action('admin_transaction_stats', async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
+
+  try {
+    const stats = await WalletService.getTransactionStats();
+    
+    // Helper function to format numbers for plain text (no Markdown)
+    const formatPlainNumber = (num) => {
+      const n = Number(num);
+      if (isNaN(n)) return '0';
+      if (n < 0) {
+        return `-$${Math.abs(n).toLocaleString('en-US')}`;
       }
+      return `$${n.toLocaleString('en-US')}`;
+    };
+    
+    // Helper function to format numbers for Markdown (with proper escaping)
+    const formatMarkdownNumber = (num) => {
+      const n = Number(num);
+      if (isNaN(n)) return '0';
+      // For Markdown, we need to escape parentheses and other special chars
+      if (n < 0) {
+        const absAmount = Math.abs(n).toLocaleString('en-US');
+        return `\\-$${absAmount}`;
+      }
+      return `$${n.toLocaleString('en-US')}`;
+    };
+    
+    // Build message with properly formatted numbers
+    let message = `📊 *Transaction Statistics*\n\n`;
+    
+    message += `*Total Transactions:* ${stats.totalCount?.[0]?.count || 0}\n`;
+    message += `*Total Volume:* ${formatMarkdownNumber(stats.totalAmount?.[0]?.total || 0)}\n\n`;
+    
+    if (stats.byType && stats.byType.length > 0) {
+      message += `*By Type:*\n`;
+      stats.byType.forEach(type => {
+        const emoji = type._id === 'DEPOSIT' ? '📥' :
+                     type._id === 'WITHDRAWAL' ? '📤' :
+                     type._id === 'WINNING' ? '🏆' : '🎮';
+        message += `${emoji} ${type._id}: ${type.count} (${formatMarkdownNumber(type.totalAmount)})\n`;
+      });
+    }
+    
+    if (stats.byStatus && stats.byStatus.length > 0) {
+      message += `\n*By Status:*\n`;
+      stats.byStatus.forEach(status => {
+        const emoji = status._id === 'COMPLETED' ? '✅' :
+                     status._id === 'PENDING' ? '⏳' : '❌';
+        message += `${emoji} ${status._id}: ${status.count} (${formatMarkdownNumber(status.totalAmount)})\n`;
+      });
+    }
+    
+    if (stats.dailyStats && stats.dailyStats.length > 0) {
+      message += `\n*Last 7 Days:*\n`;
+      stats.dailyStats.forEach(day => {
+        message += `📅 ${day._id}: ${day.count} txns (${formatMarkdownNumber(day.totalAmount)})\n`;
+      });
+    }
+    
+    const keyboard = [
+      [Markup.button.callback('🔄 Refresh', 'admin_transaction_stats')],
+      [Markup.button.callback('📋 All Transactions', 'admin_transactions_list')],
+      [Markup.button.callback('💳 Transactions Menu', 'admin_transactions_menu')],
+      [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+    ];
 
-      try {
-        const stats = await WalletService.getTransactionStats();
+    // Try to edit the message, but handle "message not modified" error
+    try {
+      await ctx.editMessageText(message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(keyboard)
+      });
+    } catch (editError) {
+      // If it's the "message not modified" error, just answer the callback
+      if (editError.message && editError.message.includes('message is not modified')) {
+        await ctx.answerCbQuery('No changes');
+      } else {
+        // If it's a Markdown error, try sending as plain text
+        console.error('Markdown error in stats:', editError);
         
-        let message = `📊 *Transaction Statistics*\n\n`;
+        // Build plain text version
+        let plainMessage = `📊 Transaction Statistics\n\n`;
+        plainMessage += `Total Transactions: ${stats.totalCount?.[0]?.count || 0}\n`;
+        plainMessage += `Total Volume: ${formatPlainNumber(stats.totalAmount?.[0]?.total || 0)}\n\n`;
         
-        message += `*Total Transactions:* ${stats.totalCount?.[0]?.count || 0}\n`;
-        message += `*Total Volume:* $${stats.totalAmount?.[0]?.total || 0}\n\n`;
-        
-        if (stats.byType && stats.byType.length > 0) {
-          message += `*By Type:*\n`;
+        if (stats.byType) {
+          plainMessage += `By Type:\n`;
           stats.byType.forEach(type => {
-            const emoji = type._id === 'DEPOSIT' ? '📥' :
-                         type._id === 'WITHDRAWAL' ? '📤' :
-                         type._id === 'WINNING' ? '🏆' : '🎮';
-            message += `${emoji} ${type._id}: ${type.count} ($${type.totalAmount})\n`;
+            plainMessage += `${type._id}: ${type.count} (${formatPlainNumber(type.totalAmount)})\n`;
           });
         }
         
-        if (stats.byStatus && stats.byStatus.length > 0) {
-          message += `\n*By Status:*\n`;
+        if (stats.byStatus) {
+          plainMessage += `\nBy Status:\n`;
           stats.byStatus.forEach(status => {
-            const emoji = status._id === 'COMPLETED' ? '✅' :
-                         status._id === 'PENDING' ? '⏳' : '❌';
-            message += `${emoji} ${status._id}: ${status.count} ($${status.totalAmount})\n`;
+            plainMessage += `${status._id}: ${status.count} (${formatPlainNumber(status.totalAmount)})\n`;
           });
         }
         
-        if (stats.dailyStats && stats.dailyStats.length > 0) {
-          message += `\n*Last 7 Days:*\n`;
+        if (stats.dailyStats) {
+          plainMessage += `\nLast 7 Days:\n`;
           stats.dailyStats.forEach(day => {
-            message += `📅 ${day._id}: ${day.count} txns ($${day.totalAmount})\n`;
+            plainMessage += `${day._id}: ${day.count} txns (${formatPlainNumber(day.totalAmount)})\n`;
           });
         }
         
-        const keyboard = [
-          [Markup.button.callback('🔄 Refresh', 'admin_transaction_stats')],
-          [Markup.button.callback('📋 All Transactions', 'admin_transactions_list')],
-          [Markup.button.callback('💳 Transactions Menu', 'admin_transactions_menu')],
-          [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
-        ];
-
-        await ctx.editMessageText(message, {
-          parse_mode: 'Markdown',
+        await ctx.editMessageText(plainMessage, {
+          parse_mode: '',
           ...Markup.inlineKeyboard(keyboard)
         });
-      } catch (error) {
-        console.error('Error loading transaction stats:', error);
-        await ctx.editMessageText('❌ Error loading transaction statistics');
       }
-    });
+    }
+  } catch (error) {
+    console.error('Error loading transaction stats:', error);
+    await ctx.answerCbQuery('❌ Error loading statistics');
+  }
+});
 
-    this.bot.action('admin_pending_deposits', async (ctx) => {
-      if (!AdminUtils.isAdmin(ctx.from.id)) {
-        await ctx.reply('❌ Access denied');
-        return;
-      }
+  this.bot.action('admin_pending_deposits', async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.reply('❌ Access denied');
+    return;
+  }
 
-      try {
-        const pendingDeposits = await WalletService.getPendingDeposits();
+  try {
+    const pendingDeposits = await WalletService.getPendingDeposits();
 
-        let message = `⏳ *Pending Deposits*\n\n`;
+    let message = `⏳ *Pending Deposits*\n\n`;
 
-        if (pendingDeposits.length === 0) {
-          message += `✅ No pending deposits. All clear!\n`;
-        } else {
-          pendingDeposits.forEach((deposit, index) => {
-            const userName = deposit.userId?.firstName || deposit.userId?.username || 'Unknown User';
-            const telegramId = deposit.userId?.telegramId || 'N/A';
-            const paymentMethod = deposit.metadata?.paymentMethod || 'Unknown';
+    if (pendingDeposits.length === 0) {
+      message += `✅ No pending deposits. All clear!\n`;
+    } else {
+      pendingDeposits.forEach((deposit, index) => {
+        const userName = deposit.userId?.firstName || deposit.userId?.username || 'Unknown User';
+        const telegramId = deposit.userId?.telegramId || 'N/A';
+        const paymentMethod = deposit.metadata?.paymentMethod || 'Unknown';
 
-            message += `━━━━━━━━━━━━━━━━━━\n`;
-            message += `#${index + 1}\n`;
-            message += `👤 User: ${userName}\n`;
-            message += `📞 ID: ${telegramId}\n`;
-            message += `💰 Amount: $${deposit.amount}\n`;
-            message += `🏦 Method: ${paymentMethod}\n`;
-            message += `⏰ Time: ${new Date(deposit.createdAt).toLocaleString()}\n\n`;
+        message += `━━━━━━━━━━━━━━━━━━\n`;
+        message += `#${index + 1}\n`;
+        message += `👤 User: ${this.escapeMarkdown(userName)}\n`;
+        message += `📞 ID: ${telegramId}\n`;
+        message += `💰 Amount: $${deposit.amount}\n`;
+        message += `🏦 Method: ${paymentMethod}\n`;
+        message += `⏰ Time: ${new Date(deposit.createdAt).toLocaleString()}\n\n`;
 
-            message += `🔧 Actions:\n`;
-            message += `   • [Approve: /approve_${deposit._id}]\n`;
-            message += `   • [View User: /user_${telegramId}]\n\n`;
-          });
-        }
+        message += `🔧 Actions:\n`;
+        message += `   • [Approve: /approve_${deposit._id}]\n`;
+        message += `   • [View User: /user_${telegramId}]\n\n`;
+      });
+    }
 
-        await ctx.editMessageText(message, {
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('🔄 Refresh List', 'admin_pending_deposits')],
+      [Markup.button.callback('💳 Transactions Menu', 'admin_transactions_menu')],
+      [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+    ]);
+
+    // Try to edit the message, but handle "message not modified" error
+    try {
+      await ctx.editMessageText(message, {
+        parse_mode: 'Markdown',
+        ...keyboard
+      });
+    } catch (editError) {
+      // If it's the "message not modified" error, just answer the callback
+      if (editError.message && editError.message.includes('message is not modified')) {
+        await ctx.answerCbQuery('No changes');
+      } else {
+        // If it's a different error, log it and try to send a new message
+        console.error('Error editing pending deposits message:', editError);
+        await ctx.reply(message, {
           parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback('🔄 Refresh List', 'admin_pending_deposits')],
-            [Markup.button.callback('💳 Transactions Menu', 'admin_transactions_menu')],
-            [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
-          ])
+          ...keyboard
         });
-      } catch (error) {
-        console.error('Error loading pending deposits:', error);
-        await ctx.editMessageText('❌ Error loading pending deposits');
       }
-    });
+    }
+  } catch (error) {
+    console.error('Error loading pending deposits:', error);
+    await ctx.editMessageText('❌ Error loading pending deposits');
+  }
+});
 
     this.bot.action('admin_completed_transactions', async (ctx) => {
       if (!AdminUtils.isAdmin(ctx.from.id)) {
@@ -3578,34 +3695,53 @@ this.bot.action('admin_users_list', async (ctx) => {
   }
 
   try {
-    const users = await UserService.getAllUsers(1, 10);
+    const result = await UserService.getAllUsers(1, 10);
+    const users = result.users; // Extract the users array from the result object
+    const pagination = result.pagination;
     
-    let message = `👥 *All Users - Page 1*\n\n`;
+    let message = `👥 *All Users - Page ${pagination.page} of ${pagination.pages}*\n\n`;
     
     if (users.length === 0) {
       message += `No users found.\n`;
     } else {
       users.forEach((user, index) => {
+        // Escape special characters for Markdown
+        const firstName = this.escapeMarkdown(user.firstName || 'No name');
+        const username = this.escapeMarkdown(user.username || 'No username');
+        
         message += `━━━━━━━━━━━━━━━━━━\n`;
-        message += `#${index + 1}\n`;
-        message += `👤 *${user.firstName || 'No name'}*\n`;
-        message += `📱 Username: @${user.username || 'No username'}\n`;
+        message += `#${(pagination.page - 1) * 10 + index + 1}\n`;
+        message += `👤 *${firstName}*\n`;
+        message += `📱 Username: @${username}\n`;
         message += `🆔 Telegram ID: ${user.telegramId}\n`;
         message += `📅 Joined: ${new Date(user.createdAt).toLocaleDateString()}\n\n`;
         
         message += `🔧 Actions:\n`;
-        message += `   • [View: /viewuser_${user.telegramId}]\n`;
-        message += `   • [Transactions: /usertx_${user.telegramId}]\n`;
-        message += `   • [Wallet: /userwallet_${user.telegramId}]\n\n`;
+        message += `   • [View: /user_${user.telegramId}]\n`;
+        message += `   • [Transactions: /admin_user_tx_${user.telegramId}]\n`;
+        message += `   • [Wallet: /admin_user_wallet_${user.telegramId}]\n\n`;
       });
     }
 
-    const keyboard = [
-      [Markup.button.callback('🔄 Refresh', 'admin_users_list')],
+    // Build pagination buttons
+    const paginationButtons = [];
+    if (pagination.page > 1) {
+      paginationButtons.push(Markup.button.callback('⬅️ Previous', `admin_users_list_page_${pagination.page - 1}`));
+    }
+    if (pagination.page < pagination.pages) {
+      paginationButtons.push(Markup.button.callback('Next ➡️', `admin_users_list_page_${pagination.page + 1}`));
+    }
+
+    const keyboard = [];
+    if (paginationButtons.length > 0) {
+      keyboard.push(paginationButtons);
+    }
+    keyboard.push(
+      [Markup.button.callback('🔄 Refresh', `admin_users_list_page_${pagination.page}`)],
       [Markup.button.callback('📊 User Stats', 'admin_users_stats')],
       [Markup.button.callback('👥 Users Menu', 'admin_users_menu')],
       [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
-    ];
+    );
 
     await ctx.editMessageText(message, {
       parse_mode: 'Markdown',
@@ -3613,10 +3749,74 @@ this.bot.action('admin_users_list', async (ctx) => {
     });
   } catch (error) {
     console.error('Error loading users list:', error);
-    await ctx.editMessageText('❌ Error loading users list');
+    await ctx.editMessageText('❌ Error loading users list: ' + error.message);
   }
 });
+// Pagination for users list
+this.bot.action(/admin_users_list_page_(\d+)/, async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
 
+  const page = parseInt(ctx.match[1]);
+
+  try {
+    const result = await UserService.getAllUsers(page, 10);
+    const users = result.users;
+    const pagination = result.pagination;
+    
+    let message = `👥 *All Users - Page ${pagination.page} of ${pagination.pages}*\n\n`;
+    
+    if (users.length === 0) {
+      message += `No users found.\n`;
+    } else {
+      users.forEach((user, index) => {
+        const firstName = this.escapeMarkdown(user.firstName || 'No name');
+        const username = this.escapeMarkdown(user.username || 'No username');
+        
+        message += `━━━━━━━━━━━━━━━━━━\n`;
+        message += `#${(pagination.page - 1) * 10 + index + 1}\n`;
+        message += `👤 *${firstName}*\n`;
+        message += `📱 Username: @${username}\n`;
+        message += `🆔 Telegram ID: ${user.telegramId}\n`;
+        message += `📅 Joined: ${new Date(user.createdAt).toLocaleDateString()}\n\n`;
+        
+        message += `🔧 Actions:\n`;
+        message += `   • [View: /user_${user.telegramId}]\n`;
+        message += `   • [Transactions: /admin_user_tx_${user.telegramId}]\n`;
+        message += `   • [Wallet: /admin_user_wallet_${user.telegramId}]\n\n`;
+      });
+    }
+
+    const paginationButtons = [];
+    if (pagination.page > 1) {
+      paginationButtons.push(Markup.button.callback('⬅️ Previous', `admin_users_list_page_${pagination.page - 1}`));
+    }
+    if (pagination.page < pagination.pages) {
+      paginationButtons.push(Markup.button.callback('Next ➡️', `admin_users_list_page_${pagination.page + 1}`));
+    }
+
+    const keyboard = [];
+    if (paginationButtons.length > 0) {
+      keyboard.push(paginationButtons);
+    }
+    keyboard.push(
+      [Markup.button.callback('🔄 Refresh', `admin_users_list_page_${pagination.page}`)],
+      [Markup.button.callback('📊 User Stats', 'admin_users_stats')],
+      [Markup.button.callback('👥 Users Menu', 'admin_users_menu')],
+      [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+    );
+
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(keyboard)
+    });
+  } catch (error) {
+    console.error('Error loading users list:', error);
+    await ctx.editMessageText('❌ Error loading users list: ' + error.message);
+  }
+});
 // User stats action
 this.bot.action('admin_users_stats', async (ctx) => {
   if (!AdminUtils.isAdmin(ctx.from.id)) {
@@ -3998,24 +4198,36 @@ this.bot.action('show_help', async (ctx) => {
   });
 });
 
-// Show stats action
+// Show stats action - SECOND VERSION (around line 4284)
 this.bot.action('show_stats', async (ctx) => {
   try {
     const user = await UserService.findOrCreateUser(ctx.from);
     const stats = await UserService.getUserStats(user.telegramId);
     
-    let message = `📊 *Your Statistics*\n\n`;
+    // Escape function for Markdown
+    const escapeMarkdown = (text) => {
+      if (!text) return '';
+      return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+    };
+    
+    const firstName = escapeMarkdown(user.firstName || user.username || 'User');
+    
+    let message = `📊 *${firstName}'s Statistics*\n\n`;
     message += `🎮 Games Played: ${stats.gamesPlayed || 0}\n`;
     message += `🏆 Games Won: ${stats.gamesWon || 0}\n`;
     message += `💰 Total Winnings: $${stats.totalWinnings || 0}\n`;
     message += `💎 Win Rate: ${stats.winRate || 0}%\n\n`;
     
-    if (stats.recentGames && stats.recentGames.length > 0) {
+    // ✅ FIX: Check if recentGames exists and is an array
+    if (stats.recentGames && Array.isArray(stats.recentGames) && stats.recentGames.length > 0) {
       message += `*Recent Games:*\n`;
       stats.recentGames.forEach((game, index) => {
         const result = game.won ? '🏆 Won' : '💔 Lost';
-        message += `${index + 1}. ${result} - $${game.amount || 0}\n`;
+        const amount = Math.abs(game.amount || 0);
+        message += `${index + 1}. ${result} - $${amount}\n`;
       });
+    } else {
+      message += `No recent games played yet.\n`;
     }
 
     await ctx.editMessageText(message, {
@@ -4151,39 +4363,6 @@ this.bot.action('show_help', async (ctx) => {
   });
 });
 
-// Show stats action
-this.bot.action('show_stats', async (ctx) => {
-  try {
-    const user = await UserService.findOrCreateUser(ctx.from);
-    const stats = await UserService.getUserStats(user.telegramId);
-    
-    let message = `📊 *Your Statistics*\n\n`;
-    message += `🎮 Games Played: ${stats.gamesPlayed || 0}\n`;
-    message += `🏆 Games Won: ${stats.gamesWon || 0}\n`;
-    message += `💰 Total Winnings: $${stats.totalWinnings || 0}\n`;
-    message += `💎 Win Rate: ${stats.winRate || 0}%\n\n`;
-    
-    if (stats.recentGames && stats.recentGames.length > 0) {
-      message += `*Recent Games:*\n`;
-      stats.recentGames.forEach((game, index) => {
-        const result = game.won ? '🏆 Won' : '💔 Lost';
-        message += `${index + 1}. ${result} - $${game.amount || 0}\n`;
-      });
-    }
-
-    await ctx.editMessageText(message, {
-      parse_mode: 'Markdown',
-      ...Markup.inlineKeyboard([
-        [Markup.button.webApp('🎮 Play More Games', 'https://desta.et')],
-        [Markup.button.callback('💼 My Wallet', 'show_wallet')],
-        [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
-      ])
-    });
-  } catch (error) {
-    console.error('Error showing stats:', error);
-    await ctx.answerCbQuery('Error loading statistics');
-  }
-});
 
 // Show full history action
 this.bot.action('show_full_history', async (ctx) => {
@@ -4269,6 +4448,54 @@ Contact developer for technical issues.
       });
     });
 
+
+    // Stats command - add this with your other command handlers
+this.bot.command('stats', async (ctx) => {
+  try {
+    const user = await UserService.findOrCreateUser(ctx.from);
+    const stats = await UserService.getUserStats(user.telegramId);
+    
+    // Escape function for Markdown
+    const escapeMarkdown = (text) => {
+      if (!text) return '';
+      return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+    };
+    
+    const firstName = escapeMarkdown(user.firstName || user.username || 'User');
+    
+    let message = `📊 *${firstName}'s Statistics*\n\n`;
+    message += `🎮 Games Played: ${stats.gamesPlayed || 0}\n`;
+    message += `🏆 Games Won: ${stats.gamesWon || 0}\n`;
+    message += `💰 Total Winnings: $${stats.totalWinnings || 0}\n`;
+    message += `💎 Win Rate: ${stats.winRate || 0}%\n\n`;
+    
+    // Check if recentGames exists and is an array
+    if (stats.recentGames && Array.isArray(stats.recentGames) && stats.recentGames.length > 0) {
+      message += `*Recent Games:*\n`;
+      stats.recentGames.slice(0, 5).forEach((game, index) => {
+        const result = game.won ? '🏆 Won' : '💔 Lost';
+        const amount = Math.abs(game.amount || 0);
+        message += `${index + 1}. ${result} - $${amount}\n`;
+      });
+    } else {
+      message += `No recent games played yet.\n`;
+    }
+    
+    message += `\n*Quick Actions:*`;
+    
+    await ctx.replyWithMarkdown(message,
+      Markup.inlineKeyboard([
+        [Markup.button.webApp('🎮 Play More Games', 'https://desta.et')],
+        [Markup.button.callback('💼 My Wallet', 'show_wallet')],
+        [Markup.button.callback('💰 Deposit Money', 'show_deposit')],
+        [Markup.button.callback('⬅️ Back to Main', 'back_to_start')]
+      ])
+    );
+  } catch (error) {
+    console.error('Error in stats command:', error);
+    await ctx.reply('❌ Error loading statistics. Please try again later.');
+  }
+});
     // ========== TEXT HANDLER ==========
 
     this.bot.on('text', async (ctx) => {
@@ -5344,26 +5571,65 @@ async processTelebirrSMSImmediately(smsText, ctx) {
     }
   }
 
-  async getSystemStats() {
-    try {
-      const userCount = await UserService.getUserCount ? await UserService.getUserCount() : 0;
-      const transactionCount = await WalletService.getTransactionCount ? await WalletService.getTransactionCount() : 0;
-      const depositCount = await WalletService.getDepositCount ? await WalletService.getDepositCount() : 0;
-      const withdrawalStats = await WalletService.getWithdrawalStats();
-      const pendingWithdrawals = withdrawalStats.byStatus?.find(s => s._id === 'PENDING');
-      
-      return {
-        users: userCount,
-        transactions: transactionCount,
-        deposits: depositCount,
-        pendingWithdrawals: pendingWithdrawals?.count || 0,
-        totalWithdrawals: withdrawalStats.totalAmount?.[0]?.total || 0
-      };
-    } catch (error) {
-      console.error('Error getting system stats:', error);
-      return { users: 0, transactions: 0, deposits: 0, pendingWithdrawals: 0, totalWithdrawals: 0 };
-    }
+ async getSystemStats() {
+  try {
+    // Import models if not already imported at the top of the file
+    const User = require('../models/User');
+    const Transaction = require('../models/Transaction');
+    
+    // Get total users count
+    const userCount = await User.countDocuments();
+    console.log(`📊 Total users in database: ${userCount}`);
+    
+    // Get total transactions count
+    const transactionCount = await Transaction.countDocuments();
+    console.log(`📊 Total transactions: ${transactionCount}`);
+    
+    // Get total deposits count and amount
+    const depositStats = await Transaction.aggregate([
+      { $match: { type: 'DEPOSIT', status: 'COMPLETED' } },
+      { $group: { _id: null, count: { $sum: 1 }, total: { $sum: '$amount' } } }
+    ]);
+    
+    const depositCount = depositStats[0]?.count || 0;
+    const totalDeposits = depositStats[0]?.total || 0;
+    console.log(`📊 Total deposits: ${depositCount}, Amount: $${totalDeposits}`);
+    
+    // Get pending withdrawals count
+    const pendingWithdrawalsCount = await Transaction.countDocuments({
+      type: 'WITHDRAWAL',
+      status: 'PENDING'
+    });
+    console.log(`📊 Pending withdrawals: ${pendingWithdrawalsCount}`);
+    
+    // Get total withdrawals amount
+    const withdrawalStats = await Transaction.aggregate([
+      { $match: { type: 'WITHDRAWAL', status: 'COMPLETED' } },
+      { $group: { _id: null, total: { $sum: { $abs: '$amount' } } } }
+    ]);
+    
+    const totalWithdrawals = withdrawalStats[0]?.total || 0;
+    console.log(`📊 Total withdrawals amount: $${totalWithdrawals}`);
+    
+    return {
+      users: userCount,
+      transactions: transactionCount,
+      deposits: totalDeposits,
+      pendingWithdrawals: pendingWithdrawalsCount,
+      totalWithdrawals: totalWithdrawals
+    };
+  } catch (error) {
+    console.error('Error getting system stats:', error);
+    // Return default values on error
+    return { 
+      users: 0, 
+      transactions: 0, 
+      deposits: 0, 
+      pendingWithdrawals: 0, 
+      totalWithdrawals: 0 
+    };
   }
+}
 
   launch() {
     if (this.isRunning) {
@@ -5627,7 +5893,6 @@ this.bot.action('support_my_tickets', async (ctx) => {
   });
 
   // Ticket actions
-// Ticket actions - REPLACE THIS SECTION
 this.bot.action(/ticket_refresh_(.+)/, async (ctx) => {
   const chatId = ctx.match[1];
   
@@ -5637,8 +5902,24 @@ this.bot.action(/ticket_refresh_(.+)/, async (ctx) => {
     // Get the user
     const user = await UserService.findOrCreateUser(ctx.from);
     
-    // Get the chat messages
-    const result = await SupportService.getChatMessages(chatId, user._id, false, 1, 20);
+    // First, check if the user has access to this ticket
+    const chat = await SupportChat.findById(chatId);
+    if (!chat) {
+      await ctx.answerCbQuery('❌ Ticket not found');
+      return;
+    }
+    
+    // Check if the user is the ticket owner OR is an admin
+    const isAdmin = AdminUtils.isAdmin(ctx.from.id);
+    const isOwner = chat.userId.toString() === user._id.toString();
+    
+    if (!isOwner && !isAdmin) {
+      await ctx.answerCbQuery('❌ You do not have permission to view this ticket');
+      return;
+    }
+    
+    // Get the chat messages - pass the user ID and isAdmin flag correctly
+    const result = await SupportService.getChatMessages(chatId, user._id, isAdmin, 1, 20);
     
     // Escape the subject and messages for Markdown
     const escapedSubject = this.escapeMarkdown(result.chat.subject);
@@ -5977,55 +6258,76 @@ this.bot.command(/^admin_assign_(.+)/, async (ctx) => {
   }
 });
   // Open tickets
-  this.bot.action('admin_support_open', async (ctx) => {
-    if (!AdminUtils.isAdmin(ctx.from.id)) {
-      await ctx.answerCbQuery('❌ Access denied');
-      return;
-    }
+ // Open tickets
+this.bot.action('admin_support_open', async (ctx) => {
+  if (!AdminUtils.isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery('❌ Access denied');
+    return;
+  }
 
-    try {
-      const result = await SupportService.getOpenChats(ctx.from.id, 1, 10);
-      
-      let message = `🟢 *Open Support Tickets*\n\n`;
-      
-      if (result.chats.length === 0) {
-        message += `No open tickets. Great job! ✅`;
-      } else {
-        result.chats.forEach((chat, index) => {
-          const user = chat.userId;
-          const priorityEmoji = chat.priority === 'URGENT' ? '🔴' :
-                              chat.priority === 'HIGH' ? '🟠' :
-                              chat.priority === 'MEDIUM' ? '🟡' : '🟢';
-          
-          message += `━━━━━━━━━━━━━━━━━━\n`;
-          message += `${priorityEmoji} *Ticket #${chat._id.toString().slice(-6)}*\n`;
-          message += `👤 User: ${user?.firstName || 'Unknown'} (@${user?.username || 'N/A'})\n`;
-          message += `📝 Subject: ${chat.subject}\n`;
-          message += `⏰ Last: ${new Date(chat.lastMessageAt).toLocaleString()}\n`;
-          message += `📨 Unread: ${chat.unreadCount.admin}\n`;
-          message += `🔧 [View: /admin_ticket_${chat._id}]`;
-          
-          if (!chat.assignedTo) {
-            message += ` [Assign: /admin_assign_${chat._id}]`;
-          }
-          
-          message += `\n\n`;
-        });
-      }
-
-      await ctx.editMessageText(message, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('🔄 Refresh', 'admin_support_open')],
-          [Markup.button.callback('📞 Support Menu', 'admin_support_menu')],
-          [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
-        ])
+  try {
+    const result = await SupportService.getOpenChats(ctx.from.id, 1, 10);
+    
+    let message = `🟢 *Open Support Tickets*\n\n`;
+    
+    if (result.chats.length === 0) {
+      message += `No open tickets. Great job! ✅`;
+    } else {
+      result.chats.forEach((chat, index) => {
+        const user = chat.userId;
+        const priorityEmoji = chat.priority === 'URGENT' ? '🔴' :
+                            chat.priority === 'HIGH' ? '🟠' :
+                            chat.priority === 'MEDIUM' ? '🟡' : '🟢';
+        
+        // Escape user-provided content to prevent Markdown errors
+        const userName = this.escapeMarkdown(user?.firstName || 'Unknown');
+        const username = this.escapeMarkdown(user?.username || 'N/A');
+        const subject = this.escapeMarkdown(chat.subject);
+        const chatIdShort = chat._id.toString().slice(-6);
+        const chatIdFull = chat._id.toString();
+        
+        message += `━━━━━━━━━━━━━━━━━━\n`;
+        message += `${priorityEmoji} *Ticket #${chatIdShort}*\n`;
+        message += `👤 User: ${userName} (@${username})\n`;
+        message += `📝 Subject: ${subject}\n`;
+        message += `⏰ Last: ${new Date(chat.lastMessageAt).toLocaleString()}\n`;
+        message += `📨 Unread: ${chat.unreadCount.admin}\n`;
+        message += `🔧 [View: /admin_ticket_${chatIdFull}]`;
+        
+        if (!chat.assignedTo) {
+          message += ` [Assign: /admin_assign_${chatIdFull}]`;
+        }
+        
+        message += `\n\n`;
       });
-    } catch (error) {
-      console.error('Admin open tickets error:', error);
-      await ctx.answerCbQuery('❌ Error loading tickets: ' + error.toString());
     }
-  });
+
+    const keyboard = [
+      [Markup.button.callback('🔄 Refresh', 'admin_support_open')],
+      [Markup.button.callback('📞 Support Menu', 'admin_support_menu')],
+      [Markup.button.callback('⬅️ Admin Panel', 'admin_back_to_panel')]
+    ];
+
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(keyboard)
+    });
+  } catch (error) {
+    console.error('Admin open tickets error:', error);
+    
+    // If Markdown fails, try without formatting
+    if (error.message && error.message.includes('can\'t parse entities')) {
+      try {
+        // Fallback: send without Markdown
+        await ctx.editMessageText('Error displaying tickets. Please check the admin panel for details.');
+      } catch (fallbackError) {
+        await ctx.answerCbQuery('❌ Error loading tickets');
+      }
+    } else {
+      await ctx.answerCbQuery('❌ Error loading tickets: ' + error.message);
+    }
+  }
+});
 
   // Add this with your other SMS-related action handlers
 this.bot.action(/admin_user_sms_(.+)/, async (ctx) => {
