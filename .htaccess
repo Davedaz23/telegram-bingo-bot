@@ -1,6 +1,26 @@
-RewriteEngine On
-RewriteCond %{HTTP:Upgrade} =websocket [NC]
-RewriteRule /(.*) ws://127.0.0.1:5000/$1 [P,L]
+# DO NOT REMOVE. CLOUDLINUX PASSENGER CONFIGURATION BEGIN
+PassengerAppRoot "/home/destaept/backend"
+PassengerBaseURI "/"
+PassengerNodejs "/home/destaept/nodevenv/backend/22/bin/node"
+PassengerAppType node
+PassengerStartupFile server.js
+# DO NOT REMOVE. CLOUDLINUX PASSENGER CONFIGURATION END
 
-RewriteCond %{HTTP:Upgrade} !=websocket [NC]
-RewriteRule /(.*) http://127.0.0.1:5000/$1 [P,L]
+RewriteEngine On
+
+# WebSocket connections - Specific rule for /ws path
+RewriteEngine On
+
+# Handle WebSocket connections
+RewriteCond %{HTTP:Upgrade} =websocket [NC]
+RewriteRule /(.*) ws://localhost:7060/$1 [P,L]
+
+# If you are also proxying standard HTTP traffic to the same port:
+ProxyPass / http://localhost:7060/
+ProxyPassReverse / http://localhost:7060/
+
+# CORS headers
+Header always set Access-Control-Allow-Origin "https://desta.et"
+Header always set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+Header always set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, Accept, Upgrade, Connection, Sec-WebSocket-Key, Sec-WebSocket-Version"
+Header always set Access-Control-Allow-Credentials "true"
